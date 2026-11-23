@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from server.database import Database
@@ -110,7 +114,7 @@ async def test_manager_fires_to_all_registered(db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manager_swallows_per_notifier_exceptions(db, monkeypatch):
+async def test_manager_swallows_per_notifier_exceptions(db, monkeypatch, caplog):
     """One bad target must not poison the rest."""
     await db.save_notifier("good", "webhook", "G", {"url": "https://g"}, _now())
     await db.save_notifier("bad", "webhook", "B", {"url": "https://b"}, _now())
@@ -122,12 +126,18 @@ async def test_manager_swallows_per_notifier_exceptions(db, monkeypatch):
 
     async def maybe_raise(self, event):
         if self.id == "bad":
-            raise RuntimeError("boom")
+            try:
+                raise ValueError("synthetic-cause-query")
+            except ValueError as cause:
+                raise RuntimeError("synthetic-wrapper-userinfo") from cause
         sent.append(self.id)
 
     monkeypatch.setattr(WebhookNotifier, "send", maybe_raise)
     await mgr.fire(NotifierEvent(type="x", title="t", message="m"))
     assert sent == ["good"]
+    assert "synthetic-cause-query" not in caplog.text
+    assert "synthetic-wrapper-userinfo" not in caplog.text
+    assert "Notifier bad (webhook) event=x error=send_error" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -135,30 +145,105 @@ async def test_manager_swallows_per_notifier_exceptions(db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG], ids=["info", "debug"])
+@pytest.mark.asyncio
+async def test_webhook_delivery_logs_are_safe_per_target(db, monkeypatch, caplog, level):
+    real_client = httpx.AsyncClient
+
+    def loopback_client(**kwargs):
+        return real_client(trust_env=False, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", loopback_client)
+    delivered = {}
+    webhook_waiting = asyncio.Event()
+    release_webhook = asyncio.Event()
+
+    async def respond(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request_line = await reader.readline()
+            if request_line.startswith(b"GET /unrelated "):
+                writer.write(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+                return
+            headers = await reader.readuntil(b"\r\n\r\n")
+            content_length = next(
+                int(value) for name, _, value in (line.partition(b":") for line in headers.splitlines())
+                if name.lower() == b"content-length"
+            )
+            target = request_line.split()[1].split(b"?")[0].removeprefix(b"/synthetic-path-").decode()
+            delivered[target] = json.loads(await reader.readexactly(content_length))
+            if target == "disconnected":
+                return
+            if target == "accepted":
+                webhook_waiting.set()
+                await release_webhook.wait()
+            status, response_length = {
+                "accepted": (b"204 No Content", b"0"),
+                "rejected": (b"403 Forbidden", b"0"),
+                "partial": (b"502 Bad Gateway", b"10"),
+                "redirect": (b"302 Found", b"0"),
+            }[target]
+            response_headers = b"X-Trace: synthetic-transport-header\r\n"
+            if target == "redirect":
+                response_headers += b"Location: http://127.0.0.1:synthetic-location\r\n"
+            writer.write(
+                b"HTTP/1.1 " + status + b"\r\nContent-Length: " + response_length + b"\r\n"
+                b"Connection: close\r\n" + response_headers + b"\r\n"
+            )
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async with await asyncio.start_server(respond, "127.0.0.1", 0) as listener:
+        port = listener.sockets[0].getsockname()[1]
+        targets = ("accepted", "rejected", "disconnected", "partial", "redirect")
+        for target in targets:
+            url = f"http://synthetic-userinfo:synthetic-password@127.0.0.1:{port}/synthetic-path-{target}?key=synthetic-query"
+            await db.save_notifier(target, "webhook", target, {"url": url}, _now())
+        manager = NotifierManager()
+        manager.set_db(db)
+        await manager.load()
+
+        caplog.set_level(level)
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(manager.fire(NotifierEvent(type="session_idle", title="Idle", message="Done")))
+            try:
+                await asyncio.wait_for(webhook_waiting.wait(), timeout=5)
+                async with httpx.AsyncClient(timeout=5) as client:
+                    assert (await client.get(f"http://127.0.0.1:{port}/unrelated")).status_code == 204
+            finally:
+                release_webhook.set()
+
+    assert set(delivered) == set(targets)
+    assert all(payload["type"] == "session_idle" for payload in delivered.values())
+    assert not any(secret in caplog.text for secret in (
+        "synthetic-path", "synthetic-query", "synthetic-userinfo", "synthetic-password",
+        "synthetic-transport-header", "synthetic-location",
+    ))
+    assert "Webhook accepted event=session_idle method=POST status=204" in caplog.text
+    assert "Webhook rejected event=session_idle method=POST status=403 error=http_status" in caplog.text
+    assert "Webhook disconnected event=session_idle method=POST status=None error=protocol_error" in caplog.text
+    assert "Webhook partial event=session_idle method=POST status=502 error=protocol_error" in caplog.text
+    assert "Webhook redirect event=session_idle method=POST status=302 error=protocol_error" in caplog.text
+    assert f"GET http://127.0.0.1:{port}/unrelated" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_webhook_posts_json(monkeypatch):
     """WebhookNotifier issues an httpx POST with the event payload as JSON."""
     posted: dict = {}
+    real_client = httpx.AsyncClient
 
-    class FakeResponse:
-        status_code = 200
+    def respond(request: httpx.Request) -> httpx.Response:
+        posted["method"] = request.method
+        posted["url"] = str(request.url)
+        posted["json"] = json.loads(request.content)
+        return httpx.Response(200)
 
-    class FakeClient:
-        def __init__(self, *_, **__):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_):
-            return False
-
-        async def post(self, url, json):
-            posted["url"] = url
-            posted["json"] = json
-            return FakeResponse()
-
-    monkeypatch.setattr("server.notifiers.webhook.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
+    )
 
     n = WebhookNotifier(
         id="w-1", label="L", config={"url": "https://example.com/wh"}
@@ -172,6 +257,7 @@ async def test_webhook_posts_json(monkeypatch):
             session_name="My session",
         )
     )
+    assert posted["method"] == "POST"
     assert posted["url"] == "https://example.com/wh"
     assert posted["json"]["type"] == "session_idle"
     assert posted["json"]["session_id"] == "s-1"

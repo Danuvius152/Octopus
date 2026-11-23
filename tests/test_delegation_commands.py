@@ -67,15 +67,15 @@ async def test_cancelled_ask_waiter_keeps_owned_setup_and_starts_one_child(runti
 async def test_cancelled_followup_waiter_still_admits_the_new_round(runtime, monkeypatch):
     boot, starts = runtime
     current, original = await completed_before_restart(boot, starts)
-    get_agent = current.database.get_agent
+    get_identity = current.database.get_agent_identity
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def pause_before_admission(*args, **kwargs):
         entered.set()
         await release.wait()
-        return await get_agent(*args, **kwargs)
+        return await get_identity(*args, **kwargs)
 
-    monkeypatch.setattr(current.database, "get_agent", pause_before_admission)
+    monkeypatch.setattr(current.database, "get_agent_identity", pause_before_admission)
     following = asyncio.create_task(current.delegations.follow_up_delegation(
         parent_session_id=current.parent_id, delegation_id=original.delegation_id,
         request="second owned review",

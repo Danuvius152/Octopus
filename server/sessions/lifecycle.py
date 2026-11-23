@@ -12,13 +12,15 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from typing import Any
 
+from ..attachments import AttachmentRecord, save_upload
 from ..config import settings
 from ..credential_bindings import validate_credential_binding
-from ..db.applications import ApplicationDeleting
+from ..db.applications import ApplicationDeleting, application_deletion_blocks_session
+from ..db.users import owner_is_available as owner_is_available_in_transaction
 from ..harness import get_harness
 from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
 from ..models import (
@@ -69,6 +71,27 @@ class SessionArchiveFailed(RuntimeError):
 
 
 class LifecycleMixin(SessionManagerBase):
+
+    async def save_attachment_upload(
+        self, session: Session, *, user_id: str, filename: str, content: bytes, declared_mime: str | None,
+    ) -> AttachmentRecord | None:
+        """Publish an uploaded file only for its original live session and account."""
+        db = self.input_database()
+        async with db.transaction(write=False) as tx:
+            account_available = await owner_is_available_in_transaction(tx, user_id)
+            app_deleting = await application_deletion_blocks_session(tx, session.id)
+
+        # Transaction exit releases the main DB writer lock without yielding
+        # after the last driver wait. The final live check and file write stay
+        # in the same event loop step, with file I/O outside the SQL deadline.
+        if not account_available or self.get_session(session.id, user_id) is not session:
+            return None
+        owner = self._session_owners.get(id(session))
+        if (app_deleting or self._admission_closed or session._admission_closed
+                or session._archive_reservation is not None or self.session_deleting(session.id)
+                or (owner is not None and owner.failed)):
+            raise SessionAdmissionClosed("Session is closed for attachment uploads")
+        return save_upload(session.id, filename, content, declared_mime, user_id=user_id)
 
     async def _close_original_execution(self, owner: SessionOwner, command: CloseExecution) -> bool:
         """Close through the original writer, or join its Manager handoff.
@@ -131,9 +154,18 @@ class LifecycleMixin(SessionManagerBase):
             session = self.sessions.get(sid)
             if session is not None:
                 owner = self._session_owners.get(id(session))
-                if owner is not None and not owner.failed:
+                if owner is None:
+                    # A file-cleanup retry can finish after startup without
+                    # ever creating an Owner for the closed builder.
+                    self._release_application_admission(session)
+                elif not owner.failed:
                     await owner.call_runtime(ReleaseApplication())
                 self.reopen_application_session_work(session.id)
+
+    def _release_application_admission(self, session: Session) -> None:
+        if (self.sessions.get(session.id) is session and session._archive_reservation is None
+                and not self.session_deleting(session.id)):
+            session._admission_closed = False
 
     async def retire_application_session_work(self, session_id: str) -> None:
         """Retire independent writers before their session relationship can vanish.
@@ -186,17 +218,18 @@ class LifecycleMixin(SessionManagerBase):
             self._session_lifecycle_locks[session_id] = lock
         return lock
 
-    async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
+    async def require_active_agent(self, agent_id: str | None) -> None:
         if agent_id in self._closed_agents:
             raise SessionAdmissionClosed("Agent admission is closed")
-        agent = await self.db.get_agent(agent_id) if self.db and agent_id else None
-        if self.db and (agent is None or agent["archived"]):
+        if self.db is None:
+            return
+        agent = await self.db.get_agent_identity(agent_id) if agent_id is not None else None
+        if agent is None or agent["archived"]:
             raise SessionAdmissionClosed("Agent not found or archived")
-        if self.db and agent is not None and not await owner_is_available(self.db, agent.get("user_id")):
+        if not await owner_is_available(self.db, agent["user_id"]):
             raise SessionAdmissionClosed("Account is unavailable")
         if agent_id in self._closed_agents:
             raise SessionAdmissionClosed("Agent admission is closed")
-        return agent
 
     @asynccontextmanager
     async def agent_operation(self, agent_id: str | None) -> AsyncIterator[None]:
@@ -254,7 +287,7 @@ class LifecycleMixin(SessionManagerBase):
 
         assert self.db is not None
         async with self._agent_lifecycle_lock:
-            agent = await self.db.get_agent(agent_id)
+            agent = await self.db.get_agent_identity(agent_id)
             if agent is None:
                 raise AgentError("Agent not found")
             if agent["is_system"]:
@@ -285,7 +318,7 @@ class LifecycleMixin(SessionManagerBase):
 
         assert self.db is not None
         async with self._agent_lifecycle_lock:
-            agent = await self.db.get_agent(agent_id, user_id=user_id)
+            agent = await self.db.get_agent_identity(agent_id, user_id=user_id)
             if agent is None or agent.get("user_id") != user_id:
                 raise AgentError("Agent not found")
             operation = self._agent_archive_tasks.get(agent_id)
@@ -508,8 +541,7 @@ class LifecycleMixin(SessionManagerBase):
         sessions list. The new session starts with no `claude_session_id`
         so the CLI begins a clean conversation, under the same agent.
 
-        Schedules are owned by the *Agent* now, not the session, so there
-        is nothing to repoint (agent-refactor.md §5.2).
+        Agent-owned schedules follow the successor when their origin is rebound.
 
         If the old session has a running turn, it's interrupted first.
         An automatic owner may supply only_request_id: under the admission
@@ -553,6 +585,7 @@ class LifecycleMixin(SessionManagerBase):
         self, session: Session, *, replace: bool = False, successor: Session | None = None,
         only_request_id: str | None = None, automatic: bool = False,
         release_notice: asyncio.Future[None] | None = None,
+        settle_relationship: Callable[[], None] | None = None,
     ) -> tuple[bool, Session | None]:
         # A competing explicit archive cannot wait on the operation whose gate
         # its caller may own. The lock covers the window before the Owner has
@@ -564,24 +597,45 @@ class LifecycleMixin(SessionManagerBase):
             if automatic:
                 return False, None
             raise ValueError(f"Session {session.id} is already being archived")
-        async with lifecycle_lock:
-            if self.sessions.get(session.id) is not session:
-                return False, None
-            if self.session_deleting(session.id):
-                if automatic:
+        relationship = (self._session_relationship(session.id).changing() if settle_relationship is None
+                        else nullcontext(settle_relationship))
+        with relationship as settle:
+            async with lifecycle_lock:
+                if self.sessions.get(session.id) is not session:
                     return False, None
-                raise ValueError(f"Session {session.id} is being deleted")
-            archived = await self._archive_reserved_session(
-                session, only_request_id=only_request_id, automatic=automatic,
-            )
-        # Subscriber I/O cannot hold a lifecycle lock: a result subscriber may
-        # itself need to restore this same session.
-        if archived:
-            return True, await self._finish_session_archive(
-                session, replace=replace, successor=successor, dispatch_state=archived, automatic=automatic,
-                release_notice=release_notice,
-            )
-        return False, None
+                if self.session_deleting(session.id):
+                    if automatic:
+                        return False, None
+                    raise ValueError(f"Session {session.id} is being deleted")
+                archived = await self._archive_reserved_session(
+                    session, only_request_id=only_request_id, automatic=automatic,
+                )
+            if archived is None:
+                return False, None
+            replacing = replace or successor is not None
+            new, failure = await self._prepare_archive_successor(session, successor) if replacing else (None, None)
+            settle()
+
+        # Subscribers can restore the same session or wait for a fire that
+        # uses the settled relationship.
+        event: dict[str, Any] = {
+            "type": "session_archived",
+            "old_session_id": session.id,
+            "new_session_id": new.id if new else None,
+            "name": new.name if new else session.name,
+            "dispatch_state": archived,
+        }
+        if replacing:
+            event.update(model=new.model if new else None,
+                         reasoning_effort=new.reasoning_effort if new else None,
+                         service_tier=new.service_tier if new else None)
+        if failure is not None:
+            event["archive_result"] = failure.result.model_dump()
+        await self._publish_lifecycle(event, user_id=session.user_id, wrap_required_cancellation=automatic,
+                                      release_notice=release_notice)
+        if failure is not None:
+            raise failure
+        return True, new
 
     async def _archive_reserved_session(
         self, session: Session, *,
@@ -638,28 +692,12 @@ class LifecycleMixin(SessionManagerBase):
             if self.sessions.get(session.id) is session and self._session_owners.get(id(session)) is owner:
                 await self._release_session_reservation(owner, ReleaseArchive(reservation))
 
-    async def _finish_session_archive(
-        self, old: Session, *, replace: bool, dispatch_state: dict[str, Any], successor: Session | None = None,
-        automatic: bool, release_notice: asyncio.Future[None] | None = None,
-    ) -> Session | None:
-        """The archive effect is confirmed; publish or create its successor."""
-
-        if not replace and successor is None:
-            await self._publish_lifecycle(
-                {
-                    "type": "session_archived",
-                    "old_session_id": old.id,
-                    "new_session_id": None,
-                    "name": old.name,
-                    "dispatch_state": dispatch_state,
-                }, user_id=old.user_id, wrap_required_cancellation=automatic, release_notice=release_notice,
-            )
-            return None
-
+    async def _prepare_archive_successor(
+        self, old: Session, new: Session | None,
+    ) -> tuple[Session | None, SessionArchiveFailed | None]:
+        """Finish the durable relationship before subscribers see the archive."""
         # New session inherits agent / name / working_dir / credential_id /
         # origin but starts with no claude_session_id (fresh conversation).
-        new = successor
-        failure: SessionArchiveFailed | None = None
         stage: SessionArchiveFailureStage = "successor_creation"
         try:
             if new is None:
@@ -694,25 +732,8 @@ class LifecycleMixin(SessionManagerBase):
                 failure_stage=stage, message=str(error),
             ))
             failure.__cause__ = error
-
-        result = failure.result if failure is not None else None
-
-        await self._broadcast(
-            {
-                "type": "session_archived",
-                "old_session_id": result.old_session_id if result else old.id,
-                "new_session_id": result.new_session_id if result else new.id if new else None,
-                "name": new.name if new else old.name,
-                "model": new.model if new else None,
-                "reasoning_effort": new.reasoning_effort if new else None,
-                "service_tier": new.service_tier if new else None,
-                "dispatch_state": dispatch_state,
-                **({"archive_result": result.model_dump()} if result else {}),
-            }, user_id=old.user_id,
-        )
-        if failure is not None:
-            raise failure
-        return new
+            return new, failure
+        return new, None
 
     async def auto_archive_scheduled_session(
         self, session_id: str, *, expected_session: Session | None = None, release_notice: asyncio.Future[None] | None = None,
@@ -1190,7 +1211,7 @@ class LifecycleMixin(SessionManagerBase):
         # the ancestor chain cannot resolve a deleted parent afterward.
         await self._blit_attachments_to_descendant_forks(session_id)
         if self.db is not None and delegation_manager.db is self.db:
-            async with delegation_manager.seal_question_parent_observations(session_id):
+            async with delegation_manager.seal_session_deletion(session_id):
                 await self.db.delete_session(session_id)
         elif self.db is not None:
             await self.db.delete_session(session_id)

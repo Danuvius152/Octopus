@@ -337,7 +337,7 @@ async def configure_wiki(
     access(request, human_only=True)
     if (
         session_manager.db is None
-        or await session_manager.db.get_agent(body.curator_agent_id, user_id) is None
+        or await session_manager.db.get_agent_identity(body.curator_agent_id, user_id) is None
     ):
         raise HTTPException(404, "Curator agent not found")
     roots = await session_manager._owner_extra_roots(user_id)

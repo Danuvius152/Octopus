@@ -31,6 +31,10 @@ from .store import DocumentTooLarge, WikiError, WikiStore, read_document_bytes, 
 logger = logging.getLogger(__name__)
 
 
+class RecoveryRootUnavailable(WikiError):
+    """A valid recovery registration's root could not be used."""
+
+
 def basis(db):
     """Identity/source coordinates and hashes, never a second copy of bodies."""
     result = {}
@@ -88,9 +92,18 @@ class Metadata:
         except sqlite3.DatabaseError as exc:
             raise WikiError("Filesystem recovery metadata is unavailable; database retained: " + str(exc), 503) from exc
 
-    def check_binding(self):
-        if self.registry.state(self.user_id).resolve() != self.state or self.registry.config(self.user_id) != self.config:
+    def check_binding(self, *, require_root=True):
+        if (self.registry.state(self.user_id).resolve() != self.state
+                or self.registry.config(self.user_id, require_root=False) != self.config):
             raise WikiError("Filesystem recovery registration changed; create a new reviewed plan", 409)
+        if require_root:
+            unavailable = "Filesystem recovery root is unavailable; evidence retained"
+            try:
+                available = self.root.is_dir()
+            except OSError as error:
+                raise RecoveryRootUnavailable(unavailable, 503) from error
+            if not available:
+                raise RecoveryRootUnavailable(unavailable, 503)
 
     def record(self, db, recovery_id=None):
         if recovery_id is not None:
@@ -146,6 +159,19 @@ def summary(row):
     return result
 
 
+def check_completion(db: sqlite3.Connection, current: sqlite3.Row, expected: sqlite3.Row) -> None:
+    identity = ("id", "generation", "plan_hash", "completion_receipt")
+    if (current["phase"] != "complete" or not current["completion_receipt"]
+            or any(current[key] != expected[key] for key in identity)):
+        raise WikiError("Filesystem recovery completion receipt changed; evidence retained", 503)
+    audit = db.execute("""SELECT body,sha256 FROM filesystem_recovery_audit
+                        WHERE recovery_id=? AND generation=? AND kind='complete'""",
+                       (current["id"], current["generation"])).fetchone()
+    if (audit is None or audit["sha256"] != current["completion_receipt"]
+            or hashlib.sha256(audit["body"].encode()).hexdigest() != audit["sha256"]):
+        raise WikiError("Filesystem recovery completion receipt is unavailable", 503)
+
+
 @dataclass(eq=False)
 class Permit:
     handle: Handle
@@ -169,9 +195,9 @@ class Permit:
     def config(self):
         return self.handle.metadata.config
 
-    def check(self, db):
+    def check(self, db, *, require_root=True):
         h = self.handle
-        h.metadata.check_binding()
+        h.metadata.check_binding(require_root=require_root)
         row = h.metadata.record(db, h.recovery_id)
         if (not self.active or not self.manager.owns(h) or self not in (h.permit, h.handoff_permit)
                 or self.generation != row["generation"] or self.observer._closed
@@ -181,8 +207,21 @@ class Permit:
             raise WikiError("Filesystem recovery capability or observer generation changed", 503)
         return row
 
-    def uncertain(self, db, reason):
-        row = self.check(db)
+    def check_handoff(self, db: sqlite3.Connection, completion: sqlite3.Row) -> EventInbox:
+        """Check the receipt and receiver in the publication snapshot under the observer lock."""
+        h = self.handle
+        receiver = h.handoff_receiver
+        if receiver is None:
+            raise WikiError("Filesystem recovery receiver changed before publication", 503)
+        current = self.check(db)
+        check_completion(db, current, completion)
+        if h.error is not None:
+            raise WikiError("Filesystem recovery reception is uncertain; create a new reviewed plan", 503) from h.error
+        receiver.check(db)
+        return receiver
+
+    def uncertain(self, db, reason, *, require_root=True):
+        row = self.check(db, require_root=require_root)
         ledger.audit(db, row["id"], row["generation"], "uncertain", {"reason": reason, "received_seq": self.handle.metadata.inbox.state(db)["received_seq"]})
         if row["phase"] != "complete":
             ledger.update(db, row, uncertainty_generation=row["uncertainty_generation"] + 1)
@@ -202,14 +241,38 @@ class Handle:
         self.error = None
         self.published = False
 
+    @property
+    def handoff_receiver(self) -> EventInbox | None:
+        receiver = self.observer.journal
+        if receiver is not None and self.handoff_permit is not None and receiver.recovery is self.handoff_permit:
+            return receiver
+        return None
+
+    def retain_handoff_loss(self, error: WikiError) -> None:
+        """Record reception failure using the locked receiver's retained binding."""
+        receiver = self.handoff_receiver
+        if receiver is not None:
+            with receiver.connect() as db:
+                if not receiver.state(db)["uncertain"]:
+                    receiver.recovery.uncertain(db, str(error), require_root=False)
+
     def drain(self):
         with self.observer._lock:
             try:
                 changes = self.observer.drain()
                 self.observer.queued.merge(changes)
                 self.observer._uncertain_reason = None
+                if self.handoff_receiver is not None:
+                    try:
+                        stat = self.metadata.root.stat(follow_symlinks=False)
+                    except OSError as error:
+                        raise RecoveryRootUnavailable("Filesystem recovery root unavailable during handoff; evidence retained", 409) from error
+                    if f"{stat.st_dev}:{stat.st_ino}" != self.observer.root_generation:
+                        raise WikiError("Filesystem recovery root changed during handoff; evidence retained", 409)
             except BaseException as exc:
                 self.error = exc
+                if isinstance(exc, WikiError):
+                    self.retain_handoff_loss(exc)
                 raise
 
     def start(self):
@@ -532,15 +595,19 @@ class RecoveryManager:
 
     def _current(self, user_id, recovery_id, plan_hash):
         metadata = Metadata(self.registry, user_id, health=self.health)
-        metadata.check_binding()
+        metadata.check_binding(require_root=False)
         with metadata.connect() as db:
             row = metadata.record(db, recovery_id)
             if (row["registration"] != metadata.config["registration_generation"] or row["plan_hash"] != plan_hash
                     or row["plan"] is None or ledger.digest(json.loads(row["plan"])) != plan_hash):
                 raise WikiError("Filesystem recovery plan or registration changed", 409)
+        if row["phase"] != "complete":
+            metadata.check_binding()
         with self._lock:
             h = self._handles.get(self.key(user_id))
-        if row["phase"] != "complete" and (h is None or h.recovery_id != recovery_id or h.permit.generation != row["generation"]):
+        if h is not None and (h.recovery_id != recovery_id or h.permit.generation != row["generation"]):
+            h = None
+        if row["phase"] != "complete" and h is None:
             raise WikiError("Filesystem recovery lost its observer; re-observe and approve a new generation of this recovery", 409)
         if h is not None and h.error is not None:
             raise WikiError("Filesystem recovery reception is uncertain; create a new reviewed plan", 503) from h.error
@@ -802,25 +869,13 @@ class RecoveryManager:
                 ledger.update(db, current, phase="complete", completion_receipt=ledger.digest(body))
 
     def _finish(self, metadata, row, h):
-        metadata.check_binding()
-        stat = metadata.root.stat()
-        if metadata.root.is_symlink() or f"{stat.st_dev}:{stat.st_ino}" != row["root_generation"]:
-            raise WikiError("Filesystem recovery root changed after completion; evidence retained", 409)
-        with metadata.connect() as db:
-            current = metadata.record(db, row["id"])
-            receipt = db.execute("SELECT body,sha256 FROM filesystem_recovery_audit WHERE recovery_id=? AND generation=? AND kind='complete'",
-                                 (current["id"], current["generation"])).fetchone()
-            if (current["phase"] != "complete" or receipt is None or receipt["sha256"] != current["completion_receipt"]
-                    or hashlib.sha256(receipt["body"].encode()).hexdigest() != receipt["sha256"]):
-                raise WikiError("Filesystem recovery completion receipt is unavailable", 503)
-            state = metadata.inbox.state(db)
-            if state["uncertain"] or state["armed_epoch"]:
-                raise WikiError("Filesystem history became uncertain again; its new evidence is retained", 503)
-        if h is not None:
-            store = self._store(h)
-            with h.observer._lock:
-                h.observer.journal.recovery = None
-                self.registry.publish_recovery(metadata.user_id, store, h.permit)
+        if h is None:
+            metadata.check_binding(require_root=False)
+            with metadata.connect() as db:
+                check_completion(db, metadata.record(db, row["id"]), row)
+        else:
+            if not h.published:
+                self.registry.publish_recovery(metadata.user_id, self._store(h), h.permit, row)
                 h.published = True
             h.stop_pump()
             h.store = None  # Ownership transferred to the normal registry.
@@ -830,7 +885,7 @@ class RecoveryManager:
             h.observer.release()
             with self._lock:
                 self._handles.pop(self.key(metadata.user_id), None)
-        return summary(current)
+        return summary(row)
 
     def apply(self, user_id, recovery_id, plan_hash):
         with self.gate(user_id):

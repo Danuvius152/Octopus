@@ -33,7 +33,7 @@ beforeEach(() => {
   useSessionStore.getState().setToken("history-test");
   useSessionStore.setState({ activeSessionId: session.id, sessions: [session], archivedSessions: [], mainView: "chat",
     agents: [], messages: {}, streamingText: {}, pendingQuestions: {}, dispatchStates: {}, dispatchUnavailable: {},
-    pendingForks: {}, credentials: [], backendModels: {} });
+    pendingForks: {}, credentials: [] });
   reads.length = 0;
   transport = vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
     const match = String(url).match(/\/messages\/(\d+)\?view=browser$/);

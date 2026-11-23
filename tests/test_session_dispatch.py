@@ -14,7 +14,7 @@ from server.harness import HarnessEvent
 from server.routers.sessions import router
 from server.session_manager import ForkError, SessionManager
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 
 @pytest.fixture
@@ -36,22 +36,22 @@ async def dispatch(monkeypatch, request, tmp_path):
     class Run(FakeRunBase):
         reusable = bool(getattr(request, "param", False))
         can_steer = bool(getattr(request, "param", False))
-        run_lease_id = None
-        work_id = None
 
         def __init__(self):
+            super().__init__()
             self.input_ready = asyncio.Event()
             self.prompt = ""
 
         def prepare_turn_stream(self):
+            super().prepare_turn_stream()
             self.input_ready.clear()
 
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             self.prompt = prompt
             holds["resume ids"].append(args[1] if len(args) > 1 else kwargs.get("resume_id"))
             self.input_ready.set()
 
-        async def send_turn(self, prompt):
+        async def _write_turn_input(self, prompt):
             self.prompt = prompt
             holds["resume ids"].append("context")
             self.input_ready.set()
@@ -60,7 +60,7 @@ async def dispatch(monkeypatch, request, tmp_path):
             holds["frame entered"].set()
             await holds["frame"].wait()
 
-        async def stream(self):
+        async def _stream(self):
             await self.input_ready.wait()
             started.put_nowait(self.prompt)
             yield HarnessEvent(type="session_started", session_id="context")
@@ -68,7 +68,7 @@ async def dispatch(monkeypatch, request, tmp_path):
                 await holds[self.prompt].wait()
             yield HarnessEvent(type="result", session_id="context", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             holds["stop calls"].append(self.prompt)
             holds["stop entered"].set()
             await holds["stop"].wait()
@@ -76,7 +76,7 @@ async def dispatch(monkeypatch, request, tmp_path):
         async def interrupt(self):
             pass
 
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: Run()))
     try:
         yield manager, session, started, holds
     finally:

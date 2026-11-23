@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test } from "./test";
 import { enterAccountCredentials } from "./current-account";
 import type { Message } from "../src/stores/sessionStore";
@@ -31,7 +32,7 @@ for (const width of [390, 1280]) {
       else if (pathname === "/api/auth/login") data = { token: "card-token" };
       else if (pathname === "/api/auth/identity") data = { user_id: "card-user", label: "Reader", is_admin: false };
       else if (pathname === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-      else if (pathname === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+      else if (pathname === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
       else if (pathname === "/api/sessions") data = [session];
       else if (pathname === `/api/sessions/${session.id}/delegations`) data = rounds;
       else if (pathname === `/api/sessions/${session.id}`) data = { ...session, messages, delegations: rounds,

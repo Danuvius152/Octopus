@@ -95,8 +95,9 @@ class NotifierManager:
         try:
             await notifier.send(event)
         except Exception:
-            logger.exception(
-                "Notifier %s (%s) raised on send", notifier.id, notifier.type
+            logger.error(
+                "Notifier %s (%s) event=%s error=send_error",
+                notifier.id, notifier.type, event.type,
             )
 
 

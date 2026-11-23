@@ -205,6 +205,10 @@ class AdmissionIntegrityError(ValueError):
     """A permanent integrity refusal before this input takes effect."""
 
 
+class PreviousWriterUnconfirmed(ValueError):
+    """A previous execution's writer has no confirmed exit for this session."""
+
+
 class SessionAdmissionBusy(ValueError):
     """A lifecycle reservation refused input before it could take effect."""
 

@@ -1,10 +1,13 @@
 """Refresh one original card across pagination and historical vaults."""
 
 import json
+import sqlite3
 
 import pytest
 
 from server.wiki import job_notifications
+from server.wiki.jobs import WikiJobs
+from server.wiki.registry import registry
 from tests import wiki_api as api
 from tests.test_wiki_job_events import enqueue
 from tests.test_wiki_job_notifications import pending, subscribe
@@ -12,10 +15,71 @@ from tests.wiki_job_runtime import client as client
 from tests.wiki_job_runtime import jobs as jobs
 
 
+async def test_warm_job_reads_reuse_store_publication_checks(jobs, client, tmp_path, monkeypatch, record_property):
+    manager = api.session_manager
+    entry = await manager.create_session(jobs.registration["curator_agent_id"], "Original", str(tmp_path))
+    job = enqueue(jobs)
+    subscribe(jobs, job, entry.id)
+    assert await job_notifications.dispatch(jobs, manager) == 1
+    registry.close()
+
+    database_uri = jobs.store.db_path.resolve().as_uri()
+    connect = sqlite3.connect
+    statements = []
+
+    def observed(path, *args, **kwargs):
+        db = connect(path, *args, **kwargs)
+        if str(path).partition("?")[0] == database_uri:
+            db.set_trace_callback(lambda sql: statements.append(" ".join(sql.lower().split())))
+        return db
+
+    traces = {}
+
+    def capture(phase):
+        traces[phase] = statements.copy()
+        statements.clear()
+
+    monkeypatch.setattr(sqlite3, "connect", observed)
+    cold = WikiJobs(jobs.user_id)
+    capture("cold")
+    warm = WikiJobs(jobs.user_id)
+    assert warm.store is cold.store
+    capture("warm")
+    assert await job_notifications.dispatch(warm, manager) == 0
+    capture("empty_poll")
+
+    current = warm.update(job["id"], status="running")
+    statements.clear()
+    response = await client.get(f"/api/sessions/{entry.id}/wiki-jobs")
+    assert response.status_code == 200, response.text
+    assert [(card["job_id"], card["state_version"], card["status"]) for card in response.json()] == [
+        (job["id"], current["state_version"], "running"),
+    ]
+    capture("card")
+    assert await job_notifications.dispatch(warm, manager) == 1
+    capture("pending_delivery")
+    assert pending(warm) == []
+
+    static_checks = {}
+    for phase, sql in traces.items():
+        schema_checks = sum("select name,sql from sqlite_master" in statement for statement in sql)
+        job_shape_checks = sum("pragma table_xinfo(jobs)" in statement for statement in sql)
+        missing_state_scans = sum("left join wiki_job_state" in statement and "s.job_id is null" in statement
+                                  for statement in sql)
+        record_property(phase, f"{len(sql)} statements, {schema_checks} schema comparisons, "
+                               f"{job_shape_checks} job shape checks, {missing_state_scans} missing-state scans")
+        static_checks[phase] = (schema_checks, job_shape_checks, missing_state_scans)
+    assert all(static_checks.pop("cold"))
+    assert static_checks == dict.fromkeys(traces.keys() - {"cold"}, (0, 0, 0))
+    assert any("from filesystem_recoveries where phase<>" in sql for sql in traces["warm"])
+    assert any("where j.id=" in sql for sql in traces["card"])
+    for phase in ("empty_poll", "pending_delivery"):
+        assert any("d.acknowledged=0" in sql for sql in traces[phase])
+
+
 @pytest.mark.parametrize("action", ["retry", "readmit"])
 async def test_old_chat_reads_current_attempt_after_human_retry_and_all_notifications_are_acked(jobs, client, tmp_path, action):
     from server.agent_manager import AgentManager
-    from server.wiki.jobs import WikiJobs
 
     manager = api.session_manager
     entry = await manager.create_session(jobs.registration["curator_agent_id"], "Original", str(tmp_path))

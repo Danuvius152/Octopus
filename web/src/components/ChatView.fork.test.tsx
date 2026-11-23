@@ -40,7 +40,7 @@ beforeEach(() => {
   useSessionStore.getState().setToken("synthetic-token");
   useSessionStore.setState({
   token: "synthetic-token", activeSessionId: parent.id, activeAgentId: "agent", mainView: "chat",
-  sessions: [parent], archivedSessions: [], agents: [], credentials: [], backendModels: {},
+  sessions: [parent], archivedSessions: [], agents: [], credentials: [],
   messages: {}, streamingText: {}, lastAppliedSeq: {}, oldestSeq: {}, hasMoreMessages: {}, wikiJobs: {},
   pendingQuestions: {}, closedQuestionIds: {}, subagents: {},
   dispatchUnavailable: {}, pendingForks: {}, dispatchStates: { parent: dispatch("old-service") },

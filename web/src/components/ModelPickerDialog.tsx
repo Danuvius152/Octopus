@@ -49,7 +49,8 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied }: Mo
   const agents = useSessionStore((s) => s.agents);
   const credentials = useSessionStore((s) => s.credentials);
   const sessions = useSessionStore((s) => s.sessions);
-  const backendModels = useSessionStore((s) => s.backendModels);
+  const backendModels = useSessionStore((s) => s.backendCatalog.status === "ready"
+    ? s.backendCatalog.catalog.models[session.backend] : undefined);
   const [initial] = useState(session);
   const [typed, setTyped] = useState(initial.model ?? "");
   const [effort, setEffort] = useState(initial.reasoning_effort ?? "");
@@ -100,13 +101,13 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied }: Mo
       buildModelOptions({
         sessionModel: typed,
         agentModel: agentKnown ? agent?.model || catalog?.default_model : undefined,
-        backendModels: catalog?.models?.map((m) => m.id) ?? backendModels[session.backend],
+        backendModels: catalog?.models?.map((m) => m.id) ?? backendModels,
         inUse: [
           ...agents.map((a) => a.model),
           ...sessions.map((s) => s.model),
         ],
       }),
-    [typed, session.backend, agent?.model, agentKnown, catalog, backendModels, agents, sessions]
+    [typed, agent?.model, agentKnown, catalog, backendModels, agents, sessions]
   );
 
   const apply = async () => {

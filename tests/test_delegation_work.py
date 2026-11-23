@@ -383,6 +383,48 @@ async def test_child_lifecycle_subscriber_can_delete_the_original_parent(work_ru
         manager.remove_broadcast("delete parent during child lifecycle")
 
 
+@pytest.mark.parametrize("follow_up", [False, True], ids=["creation", "unarchive"])
+async def test_child_lifecycle_subscriber_can_delete_the_same_child(work_runtime, monkeypatch, follow_up):
+    from server.routers.sessions import router
+
+    manager, delegations, parent, starts = work_runtime
+    manager.work_test_app.include_router(router)
+    monkeypatch.setattr("server.delegations.delegation_manager", delegations)
+    client = manager.work_test_client
+    deleted = asyncio.get_running_loop().create_future()
+    url = f"/api/sessions/{parent.id}/delegations"
+    body = {"agent_name": "Worker", "request": "held initial round"}
+    if follow_up:
+        rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="First round")
+        await wait_state(delegations, rec.delegation_id, "completed")
+        await delegations.confirm_recording()
+        await manager.archive_session(rec.delegation_id, replace=False)
+        await asyncio.wait_for(starts.get(), 3)
+        url += f"/{rec.delegation_id}/follow-up"
+        body = {"request": "held follow-up round"}
+
+    async def delete_child(event):
+        if event["type"] == ("session_unarchived" if follow_up else "session_created"):
+            sid = event["session_id"]
+            try:
+                response = await asyncio.wait_for(client.delete(f"/api/sessions/{sid}"), 3)
+                deleted.set_result((sid, response.status_code))
+            except Exception as error:
+                deleted.set_exception(error)
+
+    manager.on_broadcast("delete-subject-of-notice", delete_child, required=True)
+    try:
+        started = await asyncio.wait_for(client.post(url, json=body), 5)
+        assert started.status_code == (409 if follow_up else 201)
+        child_id, status = await asyncio.wait_for(deleted, 5)
+        assert status == 204
+        assert await manager.db.get_session_binding(child_id) is None
+        await delegations.confirm_recording()
+        assert not delegations.drain_blockers()
+    finally:
+        manager.remove_broadcast("delete-subject-of-notice")
+
+
 @pytest.mark.parametrize("ack_lost", [False, True], ids=["before-commit", "after-commit"])
 @pytest.mark.parametrize("follow_up", [False, True], ids=["initial", "follow-up"])
 async def test_delete_settles_a_refused_rounds_original_receipt(work_runtime, monkeypatch, ack_lost, follow_up):

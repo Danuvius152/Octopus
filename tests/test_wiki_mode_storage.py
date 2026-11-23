@@ -21,6 +21,7 @@ from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
 from tests.accounts import create_account
 from tests.fake_run import capture_model_runs
+from tests.schedule_support import dispatch_schedule
 
 STAMP = "2026-10-19T12:00:00+00:00"
 
@@ -100,7 +101,7 @@ async def test_prepared_schedule_executes_its_source_contract_as_read_only(tmp_p
     try:
         await runner.initialize(paused=True)
         assert runner.next_run_at("old-off") is not None
-        await runner._fire("old-off")
+        await dispatch_schedule(runner, "old-off")
         async with asyncio.timeout(5):
             while not runs:
                 await asyncio.sleep(0.01)

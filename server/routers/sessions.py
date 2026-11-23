@@ -5,10 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
+from ..agent_configuration import AgentConfigurationError
 from ..auth import verify_token
 from ..browser_messages import native_view, page_view, record_view, session_view
-from ..config import settings
-from ..credential_bindings import CredentialBindingError, validate_credential_binding
+from ..credential_bindings import CredentialBindingError
 from ..db.native_details import NativeDetailError
 from ..db.sessions import MessageExportError
 from ..deps import ScopeUser, SessionMgr
@@ -17,6 +17,7 @@ from ..models import (
     BrowserMessagePage,
     BrowserNativeDetailPage,
     BrowserSessionDetail,
+    CreateAgentSessionRequest,
     CreateSessionRequest,
     DispatchState,
     DuplicateSessionRequest,
@@ -50,6 +51,7 @@ from ..submission_models import (
     SubmissionRecoveryPage,
 )
 from ..wiki.contracts import JobCard
+from .request_validation import SafeInputValidationRoute
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -91,22 +93,6 @@ def _own_session(
     return session
 
 
-async def _check_credential_binding(
-    session_manager: SessionManager, credential_id: str | None, backend: str,
-    user_id: str | None,
-) -> None:
-    """Validate the explicit binding before changing any session fields."""
-    assert session_manager.db is not None
-    try:
-        await validate_credential_binding(
-            session_manager.db, credential_id, backend, user_id,
-        )
-    except CredentialBindingError as error:
-        raise HTTPException(
-            404 if str(error) == "Credential not found" else 400, str(error),
-        ) from error
-
-
 @router.patch("/{session_id}", response_model=SessionInfo)
 async def update_session(
     session_manager: SessionMgr,
@@ -139,28 +125,28 @@ async def create_session(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    agent_id = req.agent_id
-    # Inherit the owning agent's default backend when none is pinned. Scoped,
-    # because a session takes its owner from its agent: an agent id belonging to
-    # somebody else would otherwise create a session in their account.
+    return await create_owned_session(session_manager, req.agent_id, user_id, req)
+
+
+async def create_owned_session(
+    session_manager: SessionManager, agent_id: str, user_id: str | None, req: CreateAgentSessionRequest,
+) -> SessionInfo:
     assert session_manager.db is not None
-    agent = await session_manager.db.get_agent(agent_id, user_id)
-    if agent is None:
+    if await session_manager.db.get_agent_identity(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-    backend = (
-        req.backend.value
-        if req.backend is not None
-        else agent.get("backend") or settings.default_backend
-    )
-    await _check_credential_binding(session_manager, req.credential_id, backend, user_id)
     try:
         s = await session_manager.create_session(
             agent_id,
             req.name,
             req.working_dir,
             credential_id=req.credential_id,
-            backend=backend,
+            backend=req.backend.value if req.backend is not None else None,
         )
+    except AgentConfigurationError:
+        raise
+    except CredentialBindingError as error:
+        code = 404 if req.credential_id and str(error) == "Credential not found" else 400
+        raise HTTPException(code, str(error)) from error
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return session_info(s, message_count=0)
@@ -264,26 +250,17 @@ async def wiki_jobs(
     return await current_cards(user_id, cards, verify(_))
 
 
-@router.post("/{session_id}/submissions", response_model=ClientSubmissionStatus | ClientSubmissionRefusal,
-             response_model_exclude_none=True)
 async def submit_input(session_manager: SessionMgr, session_id: str, request: ClientSubmissionRequest,
                        user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    from ..sessions.client_submissions import (
-        submit_client_compact,
-        submit_client_message,
-    )
-    from ..wiki.tasks import explicit_mode
+    from ..sessions.client_submissions import submit_client_operation
 
     _own_session(session_manager, session_id, user_id)
-    operation = request.session_operation()
-    if operation.kind == "compact":
-        return await submit_client_compact(session_manager, session_id, request.client_request_id)
-    if not operation.content.strip() and not operation.attachment_ids:
-        raise HTTPException(422, "Supply message content or attachments")
-    return await submit_client_message(
-        session_manager, session_id, operation.content, operation.attachment_ids, request.client_request_id,
-        wiki_mode=explicit_mode(operation.content, operation.wiki_mode), recovery_of_client_id=request.recovery_of_client_id,
-    )
+    return await submit_client_operation(session_manager, session_id, request)
+
+
+router.add_api_route("/{session_id}/submissions", submit_input, methods=["POST"],
+                     response_model=ClientSubmissionStatus | ClientSubmissionRefusal,
+                     response_model_exclude_none=True, route_class_override=SafeInputValidationRoute)
 
 
 @router.get("/{session_id}/submissions", response_model=SubmissionRecoveryPage)

@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test, type WebSocketRoute } from "./test";
 import { enterAccountCredentials } from "./current-account";
 import { contextState } from "../src/lib/sessionContext.fixture";
@@ -30,7 +31,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         else if (path === "/api/auth/login") data = { token: "browser-token" };
         else if (path === "/api/auth/identity") data = { user_id: "context-user", label: "Operator", is_admin: false };
         else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-        else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+        else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
         else if (path === "/api/sessions") data = [session];
         else if (path === `/api/sessions/${session.id}`) data = { ...session, messages: [],
           active_attempt: null, pending_questions: [], subagents: [], next_message_seq: 0,

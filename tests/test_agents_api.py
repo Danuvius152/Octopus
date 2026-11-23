@@ -18,8 +18,9 @@ from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
 from server.users import UserManager
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.harness_profiles import process_profile
+from tests.schedule_support import dispatch_schedule, schedule_job
 from tests.test_session_retirement import _retire_original_test_process
 
 
@@ -80,6 +81,133 @@ async def test_auth_required(client):
     assert resp.status_code in (401, 403)
 
 
+@pytest.mark.parametrize(("field", "invalid"), [
+    ("mcp_servers", "null"), ("mcp_servers", '["ask", 7]'), ("subagents", "{"),
+    ("subagents", '[{"name":null}]'), ("subagents", '[{"name":"legacy","extra":NaN}]'),
+    ("backend", "unknown-backend"), ("mcp_servers", r'["\ud800"]'),
+    ("subagents", r'[{"name":"legacy","tools":["\ud800"]}]'),
+])
+async def test_agent_reads_isolate_bad_saved_configuration(client, field, invalid):
+    bad = await _create_agent(client, name="Bad legacy agent")
+    good = await _create_agent(client, name="Healthy neighbor")
+    async with session_manager.db.transaction(write=True) as tx:
+        await tx.execute(f"UPDATE agents SET {field} = ? WHERE id = ?", (invalid, bad["id"]))
+
+    listing = await client.get("/api/agents")
+    assert listing.status_code == 200
+    assert {agent["id"] for agent in listing.json()} >= {good["id"]}
+    assert bad["id"] not in {agent["id"] for agent in listing.json()}
+
+    bad_read = await client.get(f"/api/agents/{bad['id']}")
+    assert bad_read.status_code == 409
+    assert bad["id"] in bad_read.json()["detail"]
+    assert field in bad_read.json()["detail"]
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("name", "\ud800"), ("mcp_servers", ["\ud800"]),
+    ("subagents", [{"name": "valid", "tools": ["\ud800"]}]),
+])
+async def test_unpaired_surrogate_in_agent_configuration_is_refused_without_a_write(client, field, value):
+    existing = await _create_agent(client, name="Valid settings", mcp_servers=["工具🙂"])
+    assert existing["mcp_servers"] == ["工具🙂"]
+    existing_url = f"/api/agents/{existing['id']}"
+    headers = {"Content-Type": "application/json"}
+    created = await client.post("/api/agents", content=json.dumps({"name": "Invalid settings", field: value}), headers=headers)
+    patched = await client.patch(existing_url, content=json.dumps({field: value}), headers=headers)
+    for response in (created, patched):
+        assert response.status_code in (400, 422)
+        assert field in response.text.lower()
+    assert (await client.get(existing_url)).json() == existing
+    assert "Invalid settings" not in [entry["name"] for entry in (await client.get("/api/agents")).json()]
+
+
+async def test_archive_with_bad_agent_configuration_refuses_before_retirement(client):
+    agent = await _create_agent(client, name="Legacy archive")
+    url = f"/api/agents/{agent['id']}"
+    session = await client.post(f"{url}/sessions", json={"name": "Keep the session"})
+    plan = await client.post(f"{url}/schedules", json={"name": "Keep the plan", "prompt": "Work", "interval_seconds": 7200})
+    assert session.status_code == plan.status_code == 201
+    db = session_manager.db
+    schedule_id = plan.json()["id"]
+    schedule_before = await db.get_schedule_definition(schedule_id)
+    runner = schedules_mod._get_runner()
+    next_run_before = runner.next_run_at(schedule_id)
+    assert next_run_before is not None
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE agents SET mcp_servers = 'null' WHERE id = ?", (agent["id"],))
+
+    events = []
+
+    async def capture(event):
+        if event.get("type") in ("agent_archived", "session_archived"):
+            events.append(event)
+
+    session_manager.on_broadcast("test-bad-agent-archive", capture)
+    try:
+        refused = await client.post(f"{url}/archive")
+        assert refused.status_code == 409 and agent["id"] in refused.json()["detail"]
+        assert not (await db.get_agent_identity(agent["id"]))["archived"]
+        assert session_manager.get_session(session.json()["id"]) is not None
+        assert await db.get_schedule_definition(schedule_id) == schedule_before
+        assert runner.next_run_at(schedule_id) == next_run_before
+        assert not events
+    finally:
+        session_manager.remove_broadcast("test-bad-agent-archive")
+
+
+async def test_pin_order_includes_bad_configuration_without_reordering_other_accounts(client):
+    db = session_manager.db
+    foreign = await UserManager(db).create_user(username="foreign-pins", password="test-password")
+    foreign_agent = await db.get_system_agent(foreign["id"])
+    bad = await _create_agent(client, name="Bad pinned agent")
+    good = await _create_agent(client, name="Healthy pinned neighbor")
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE agents SET subagents = 'null' WHERE id = ?", (bad["id"],))
+
+    response = await client.put("/api/agents/pin-order", json={"ids": [bad["id"], good["id"]]})
+    assert response.status_code == 200, response.text
+    assert {agent["id"]: agent["pin_order"] for agent in response.json()}[good["id"]] == 2
+    assert all(agent["id"] != bad["id"] for agent in response.json())
+    async with db.transaction(write=False) as tx:
+        assert (await tx.fetch_one("SELECT pin_order FROM agents WHERE id = ?", (bad["id"],)))[0] == 1
+    assert (await db.get_system_agent(foreign["id"]))["pin_order"] == foreign_agent["pin_order"]
+
+
+async def test_schedule_registration_checks_agent_configuration_only_when_running_parser(client):
+    agent = await _create_agent(client, name="Legacy planner")
+    async with session_manager.db.transaction(write=True) as tx:
+        await tx.execute("UPDATE agents SET subagents = 'null' WHERE id = ?", (agent["id"],))
+    url = f"/api/agents/{agent['id']}/schedules"
+    explicit = await client.post(url, json={"name": "Explicit", "prompt": "Run the build", "interval_seconds": 7200})
+    assert explicit.status_code == 201, explicit.text
+    rigid = await client.post(f"{url}/from_text", json={"text": "30m Check the build"})
+    assert rigid.status_code == 201, rigid.text
+    assert rigid.json()["interval_seconds"] == 1800
+    interpreted = await client.post(f"{url}/from_text", json={"text": "Check the build each morning"})
+    assert interpreted.status_code == 409
+    assert agent["id"] in interpreted.json()["detail"] and "subagents" in interpreted.json()["detail"]
+    scheduled = await client.get(url)
+    assert {entry["id"] for entry in scheduled.json()} == {explicit.json()["id"], rigid.json()["id"]}
+
+
+async def test_agent_write_preserves_explicit_empty_lists_and_inheritance(client, monkeypatch):
+    from server.harness import get_harness
+
+    monkeypatch.setattr(get_harness("codex"), "is_available", lambda: False)
+    agent = await _create_agent(client, backend="codex", mcp_servers=[], subagents=[], model="Saved model")
+    assert (agent["backend"], agent["mcp_servers"], agent["subagents"]) == ("codex", [], [])
+    url = f"/api/agents/{agent['id']}"
+    patched = await client.patch(url, json={"model": None, "mcp_servers": ["ask"], "subagents": []})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["model"] is None
+    rejected = await client.patch(url, json={"name": "Do not persist", "mcp_servers": [42]})
+    assert rejected.status_code == 422
+    assert (await client.get(url)).json() == patched.json()
+    cleared = await client.patch(url, json={"mcp_servers": []})
+    assert cleared.status_code == 200 and cleared.json()["mcp_servers"] == []
+
+
 @pytest.mark.asyncio
 async def test_default_agent_backend_is_claude(client):
     agents = (await client.get("/api/agents", headers=client.headers)).json()
@@ -105,6 +233,40 @@ async def test_new_agents_and_sessions_use_the_configured_backend(client, monkey
 
     explicit = await _create_agent(client, name="Explicit Claude", backend="claude-code")
     assert explicit["backend"] == "claude-code"
+
+
+@pytest.mark.parametrize("discovered", [[], ["claude-code"]])
+async def test_backend_catalog_separates_support_discovery_and_deployment_default(
+    client, monkeypatch, tmp_path, discovered,
+):
+    from server.config import settings
+    from server.harness import run
+
+    monkeypatch.setattr(settings, "default_backend", "codex")
+    monkeypatch.setattr(settings, "codex_app_server_binary", str(tmp_path / "missing-codex"))
+    monkeypatch.setattr(run, "_fallback_path_dirs", lambda: [])
+    monkeypatch.setenv("PATH", str(tmp_path))
+    if discovered:
+        claude = tmp_path / "claude"
+        claude.write_text("#!/bin/sh\nexit 0\n")
+        claude.chmod(0o755)
+
+    response = await client.get("/api/backends")
+    assert response.status_code == 200, response.text
+    catalog = response.json()
+    assert set(catalog["supported"]) == {"claude-code", "codex"}
+    assert catalog["available"] == discovered
+    assert catalog["default"] == "codex"
+    assert set(catalog["models"]) == set(catalog["supported"])
+    assert catalog["models"]["claude-code"] == ["opus", "sonnet", "haiku"]
+    assert catalog["tool_policy"] == {
+        "claude-code": {"allow": False, "deny": True},
+        "codex": {"allow": False, "deny": False},
+    }
+
+    agent = await _create_agent(client, name="Uninstalled default", backend="codex")
+    saved = await client.get(f"/api/agents/{agent['id']}")
+    assert saved.json()["backend"] == "codex"
 
 
 @pytest.mark.asyncio
@@ -301,21 +463,29 @@ async def test_late_archived_fire_preserves_restored_schedule(client, monkeypatc
     schedule_id = created.json()["id"]
     runner = schedules_mod._get_runner()
     runner._scheduler.pause()
-    assert (await client.post(f"/api/agents/{agent['id']}/archive")).status_code == 200
     database = session_manager.db
-    get_agent = database.get_agent
-    observed, release = asyncio.Event(), asyncio.Event()
+    get_identity = database.get_agent_identity
+    reading, archived, observed, release = (asyncio.Event() for _ in range(4))
+    old_job = schedule_job(runner, schedule_id)
+    fire = None
 
     async def hold_archived_result(identifier, *args, **kwargs):
-        row = await get_agent(identifier, *args, **kwargs)
-        if identifier == agent["id"] and row["archived"] and not observed.is_set():
-            observed.set()
-            await release.wait()
+        if asyncio.current_task() is not fire or identifier != agent["id"]:
+            return await get_identity(identifier, *args, **kwargs)
+        reading.set()
+        await archived.wait()
+        row = await get_identity(identifier, *args, **kwargs)
+        assert row["archived"]
+        observed.set()
+        await release.wait()
         return row
 
-    monkeypatch.setattr(database, "get_agent", hold_archived_result)
-    fire = asyncio.create_task(runner._fire(schedule_id))
+    monkeypatch.setattr(database, "get_agent_identity", hold_archived_result)
+    fire = asyncio.create_task(old_job.func(*old_job.args))
     try:
+        await asyncio.wait_for(reading.wait(), 3)
+        assert (await client.post(f"/api/agents/{agent['id']}/archive")).status_code == 200
+        archived.set()
         await asyncio.wait_for(observed.wait(), 3)
         if not restore_first:
             release.set()
@@ -328,11 +498,12 @@ async def test_late_archived_fire_preserves_restored_schedule(client, monkeypatc
         schedule = next(row for row in rows if row["id"] == schedule_id)
         assert schedule["enabled"] and schedule["next_run_at"] is not None
         assert runner._scheduler.get_job(schedule_id) is not None
-        assert not (await get_agent(agent["id"]))["archived"]
+        assert not (await get_identity(agent["id"]))["archived"]
         runs = capture_model_runs(session_manager, monkeypatch)
-        await runner._fire(schedule_id)
+        await dispatch_schedule(runner, schedule_id)
         assert len(runs) == 1 and runs[0].prompt.endswith("Run after restore")
     finally:
+        archived.set()
         release.set()
         await asyncio.gather(fire, return_exceptions=True)
 
@@ -517,17 +688,17 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
         monkeypatch.setattr(harness, "profile", process_profile(harness.profile))
 
         class UnreapedRun(FakeRunBase):
-            async def start(self, prompt, working_dir, resume_id=None, credential=None):
+            async def _start(self, prompt, working_dir, resume_id=None, credential=None):
                 record_start(prompt)
 
-            async def stream(self):
+            async def _stream(self):
                 yield HarnessEvent(type="text", content="Original agent work is running.")
                 await asyncio.Event().wait()
 
             async def interrupt(self):
                 pass
 
-            async def stop(self):
+            async def _stop_process(self):
                 with (artifacts / "stop-attempts.jsonl").open("a") as stream:
                     stream.write(str(failure) + "\n")
                 proof["selected_outcome"] = await db.get_committed_terminal(proof["session_id"], proof["request_id"])
@@ -536,7 +707,7 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
                 save_proof()
                 raise failure
 
-        monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: UnreapedRun())
+        monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: UnreapedRun()))
     else:
         code = (
             "import json,os,sys,time\n"

@@ -11,6 +11,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { reorderAgentPins, setAgentPinned } from "../api/agents";
+import { backendLabel, useBackendCatalog } from "../hooks/useBackendCatalog";
 import { connectorInstallations } from "../lib/connectorInstallations";
 import { selectSession } from "../lib/selectSession";
 import { ArchiveDeadline, postArchive } from "../lib/sessionArchive";
@@ -19,10 +20,25 @@ import { knownAgentScope, refreshAgents, refreshKnownAgents, withAgentRequest } 
 import { sessions as sessionList } from "../lib/sessionList";
 import { isImeComposing } from "../lib/composerKeys";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
+import { BackendCatalogStatus } from "./BackendCatalogStatus";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { SortablePin, SortablePins, type DragHandle } from "./SortablePins";
 
 const API = window.location.origin;
+
+type SidebarState = ReturnType<typeof useSessionStore.getState>;
+
+function watchForeground(start: SidebarState, leave: () => void, visible?: (state: SidebarState, before: SidebarState) => boolean) {
+  return useSessionStore.subscribe((state, before) => {
+    if (state.accountGeneration !== start.accountGeneration || state.token !== start.token ||
+        state.mainView !== start.mainView ||
+        (start.mainView === "chat" && state.activeSessionId !== start.activeSessionId) ||
+        (start.mainView === "application" && state.activeApplicationId !== start.activeApplicationId) ||
+        ((start.mainView === "agent-form" || start.mainView === "application-create") && state.pageTab !== start.pageTab) ||
+        (start.mainView === "agent-form" && state.agentFormGeneration !== start.agentFormGeneration) ||
+        visible?.(state, before) === false) leave();
+  });
+}
 
 /** The AGENTS section of the sidebar — the workspace's top half.
  *
@@ -39,9 +55,7 @@ const API = window.location.origin;
  * list, dimmed, only while it needs you (its session is open, or running, or
  * asking something).
  *
- * This is also the sidebar's single data orchestrator (as it was before the
- * redesign): agents, sessions, available backends and connector installations
- * are fetched once here and everything else reads the store.
+ * The sidebar starts reads for agents, sessions and connector installations.
  */
 export function SidebarAgents() {
   const token = useSessionStore((s) => s.token);
@@ -53,10 +67,10 @@ export function SidebarAgents() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const mainView = useSessionStore((s) => s.mainView);
   const openAgentForm = useSessionStore((s) => s.openAgentForm);
-  const setAvailableBackends = useSessionStore((s) => s.setAvailableBackends);
   const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const showDelegations = useSessionStore((s) => s.showDelegations);
   const pendingQuestions = useSessionStore((s) => s.pendingQuestions);
+  const agentRowPointerType = useRef("");
 
   // Which agents are unfolded. Multiple may be open; folding keeps the
   // sidebar from filling with sessions when there are many agents.
@@ -79,9 +93,11 @@ export function SidebarAgents() {
   const latestArchive = useRef<(() => void) | null>(null);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
-  const creation = useRef<symbol | null>(null);
+  const [createdId, setCreatedId] = useState<string | null>(null);
+  const creation = useRef<(() => void) | null>(null);
   const credentials = useSessionStore((s) => s.credentials);
-  const availableBackends = useSessionStore((s) => s.availableBackends);
+  const backendRead = useBackendCatalog();
+  const discoveredBackends = backendRead.status === "ready" ? backendRead.catalog.available : [];
 
   const headers = { Authorization: `Bearer ${token}` };
 
@@ -90,30 +106,24 @@ export function SidebarAgents() {
     latestArchive.current = null;
     setArchivesInFlight(new Set());
     setArchiveError(""); setArchiveConfirmation(null);
-    creation.current = null;
+    creation.current?.();
     setCreating(false);
     setCreateError("");
+    setCreatedId(null);
     setFormAgentId(null);
   }, [token, accountGeneration]);
   useEffect(() => {
     const observers = archiveObservers.current;
-    return () => { for (const { stop } of observers.values()) stop(); };
+    return () => {
+      creation.current?.();
+      for (const { stop } of observers.values()) stop();
+    };
   }, []);
 
   useEffect(() => {
     if (!token) return;
     void refreshKnownAgents().catch(() => {});
     void sessionList.refresh();
-    fetch(`${API}/api/backends`, { headers })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d?.available) setAvailableBackends(d.available);
-        if (d?.default) useSessionStore.getState().setDefaultBackend(d.default);
-        if (d?.models) useSessionStore.getState().setBackendModels(d.models);
-        if (d?.tool_policy) useSessionStore.getState().setBackendToolPolicies(d.tool_policy);
-      })
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, accountGeneration]);
 
   useEffect(() => {
@@ -170,69 +180,119 @@ export function SidebarAgents() {
       setExpanded((prev) => new Set(prev).add(id));
       return;
     }
+    if (formAgentId === id && expanded.has(id)) closeCreateRow();
     toggleExpand(id);
   };
 
   const openCreateRow = (agentId: string) => {
-    if (creation.current) return;
-    setCreateError("");
+    closeCreateRow();
     setActiveAgentId(agentId);
     setExpanded((prev) => new Set(prev).add(agentId));
     setFormAgentId(agentId);
     setNewName("");
     setWorkingDir("");
-    setFormBackend(agents.find((a) => a.id === agentId)?.backend ?? "claude-code");
+    setFormBackend("");
     setFormCredentialId("");
     setShowAdvanced(false);
   };
 
   const closeCreateRow = () => {
+    creation.current?.();
+    setCreating(false);
+    setCreateError("");
+    setCreatedId(null);
     setFormAgentId(null);
     setShowAdvanced(false);
   };
 
   const createSession = async (agentId: string) => {
-    if (creation.current) return;
-    const operation = Symbol();
-    creation.current = operation;
+    if (creation.current || createdId || formAgentId !== agentId) return;
+    const start = useSessionStore.getState();
+    if (formBackend && (start.backendCatalog.status !== "ready" || !start.backendCatalog.catalog.available.includes(formBackend))) {
+      setCreateError("Choose a detected engine or use the agent default.");
+      return;
+    }
+    // Stay in step with the sidebar drawer breakpoint in index.css.
+    const drawer = window.matchMedia?.("(max-width: 768px)");
+    const sidebarVisible = (state: SidebarState, isDrawer = drawer?.matches) =>
+      isDrawer ? state.sidebarOpen : !state.sidebarCollapsed;
+    const onResize = ({ matches }: MediaQueryListEvent) => {
+      if (creation.current === stop && !sidebarVisible(useSessionStore.getState(), matches)) closeCreateRow();
+    };
+    const unwatch = watchForeground(start, closeCreateRow, (state, before) => {
+      if (!sidebarVisible(state)) return false;
+      if (state.agents === before.agents && state.sessions === before.sessions && state.pendingQuestions === before.pendingQuestions) return true;
+      const agent = state.agents.find((row) => row.id === agentId);
+      return !!agent && (agent.pinned !== false || sidebarAgents([agent], state).present.length > 0);
+    });
+    const stop = () => {
+      unwatch();
+      drawer?.removeEventListener("change", onResize);
+      creation.current = null;
+    };
+    const ownsForm = () => {
+      if (creation.current !== stop) return false;
+      if (sidebarVisible(useSessionStore.getState())) return true;
+      closeCreateRow();
+      return false;
+    };
+    creation.current = stop;
+    drawer?.addEventListener("change", onResize);
     setCreating(true);
     setCreateError("");
-    const start = useSessionStore.getState();
-    const observation = sessionList.capture();
+    const observation = sessionList.capture(start);
+    const post = new ArchiveDeadline();
     try {
-      const res = await fetch(`${API}/api/agents/${agentId}/sessions`, {
-        method: "POST",
-        signal: AbortSignal.timeout(30_000),
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: newName.trim() || null,
-          working_dir: workingDir.trim() || null,
-          credential_id: formCredentialId || null,
-          backend: formBackend || null,
-        }),
-      });
-      if (!res.ok) {
+      const reply = await post.wait((async () => {
+        const res = await fetch(`${API}/api/agents/${agentId}/sessions`, {
+          method: "POST",
+          signal: post.signal,
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: newName.trim() || null,
+            working_dir: workingDir.trim() || null,
+            credential_id: formCredentialId || null,
+            backend: formBackend || null,
+          }),
+        });
+        if (res.status === 201) {
+          const session: SessionInfo = await res.json();
+          return typeof session?.id === "string" && session.id ? { session } : null;
+        }
+        if (res.status < 400 || res.status >= 500 || res.status === 408) return null;
         const body = await res.json().catch(() => null);
-        if (sessionList.accountCurrent(observation)) setCreateError(typeof body?.detail === "string"
-          ? body.detail : `Could not create session (HTTP ${res.status}).`);
+        return { error: typeof body?.detail === "string" ? body.detail : `Could not create session (HTTP ${res.status}).` };
+      })()).catch(() => null);
+      post.finish();
+      if (!sessionList.accountCurrent(observation)) return;
+      if (!reply) {
+        if (ownsForm()) {
+          closeCreateRow();
+          setCreateError("Creation could not be confirmed. Check the session list before creating another conversation.");
+        }
+        void sessionList.refresh();
         return;
       }
-      const session: SessionInfo = await res.json();
-      if (sessionList.accountCurrent(observation)) closeCreateRow();
-      const accepted = await sessionList.created(session, observation);
-      const current = useSessionStore.getState();
-      if (accepted && sessionList.current(observation) && current.activeSessionId === start.activeSessionId && current.mainView === start.mainView) {
-        void selectSession(session.id, agentId, { fresh: true });
+      if ("error" in reply) {
+        if (ownsForm()) setCreateError(reply.error);
+        return;
       }
-    } catch {
-      if (sessionList.accountCurrent(observation)) {
+      const { session } = reply;
+      const confirmation = new ArchiveDeadline();
+      let accepted: boolean;
+      try {
+        accepted = await sessionList.created(session, observation, undefined, confirmation);
+        accepted &&= confirmation.active && sessionList.current(observation) &&
+          useSessionStore.getState().sessions.some((row) => row.id === session.id);
+      } finally { confirmation.finish(); }
+      if (!ownsForm()) return;
+      if (accepted) {
         closeCreateRow();
-        setCreateError("Creation could not be confirmed. Check the session list before creating another conversation.");
-        void sessionList.refresh();
-      }
+        void selectSession(session.id, agentId, { fresh: true });
+      } else setCreatedId(session.id);
     } finally {
-      if (creation.current === operation) {
-        creation.current = null;
+      if (ownsForm()) {
+        stop();
         setCreating(false);
       }
     }
@@ -276,11 +336,7 @@ export function SidebarAgents() {
     const tracked = sessionList.observe(id, start, "archive");
     const { observation } = tracked;
     let foreground = start.activeSessionId === id && start.mainView === "chat";
-    const unwatch = foreground ? useSessionStore.subscribe((state) => {
-      if (state.activeSessionId !== id || state.mainView !== "chat" || state.accountGeneration !== start.accountGeneration) {
-        retireForeground();
-      }
-    }) : undefined;
+    const unwatch = foreground ? watchForeground(start, retireForeground) : undefined;
     function retireForeground() {
       foreground = false;
       unwatch?.();
@@ -354,11 +410,11 @@ export function SidebarAgents() {
       if (reply.state === "unknown") { await confirm(false); return; }
       archived = true;
       if (reply.result) {
-        sessionList.archive(id, observation, undefined, reply.result.new_session_id);
+        sessionList.archive(id, observation, reply.result.new_session_id);
         feedback(`Archive committed. ${reply.result.failure_stage.replaceAll("_", " ")} failed: ${reply.result.message}`);
         return;
       }
-      if (sessionList.archive(id, observation, undefined, null)) finishArchived(false);
+      if (sessionList.archive(id, observation, null)) finishArchived(false);
       else await confirm(false);
     } finally {
       retireForeground();
@@ -376,11 +432,21 @@ export function SidebarAgents() {
     activeSessionId,
     pendingQuestions,
   });
+  const creationLocked = creating || createdId !== null;
 
   // One agent with its session rail. `handle` is the drag handle for a
   // pinned row, and nothing for an unpinned one — those aren't in the order.
   const renderAgent = (a: Agent, handle: DragHandle) => {
     const isExpanded = expanded.has(a.id);
+    const isSessionForm = formAgentId === a.id;
+    const effectiveEngine = formBackend || a.backend;
+    const inheritedCredentialConflict = !!a.credential_id && effectiveEngine !== a.backend;
+    const selectedCredential = isSessionForm && formCredentialId
+      ? credentials.find((credential) => credential.id === formCredentialId) : undefined;
+    const invalidCredential = !!formCredentialId && selectedCredential?.backend !== effectiveEngine;
+    const needsCredential = formCredentialId ? invalidCredential : inheritedCredentialConflict;
+    const credentialOptions = isSessionForm && showAdvanced
+      ? credentials.filter((credential) => credential.backend === effectiveEngine) : [];
     // Conversations an application is holding with this agent are its
     // business, not the rail's (app-agent-access.md §7): they're
     // reachable from the app's own header, and an app that chats ten
@@ -404,8 +470,13 @@ export function SidebarAgents() {
           className={`agent-item group flex items-center gap-2 rounded-lg px-2 py-1.5 cursor-pointer hover:bg-gray-100 transition-colors${
             isExpanded ? " expanded" : ""
           }${a.pinned === false ? " unpinned" : ""}`}
+          onPointerDownCapture={(event) => { agentRowPointerType.current = event.pointerType; }}
           onClick={() => openAgent(a.id)}
-          onDoubleClick={() => openAgentForm(a.id)}
+          onDoubleClick={(event) => {
+            // A touch double-tap can span the collapsed row and its newly visible + button.
+            if (agentRowPointerType.current === "touch" || (event.target instanceof Element && event.target.closest("button"))) return;
+            openAgentForm(a.id);
+          }}
           /* The name leads even when there's a description: folded to
              the icon rail, the tooltip is the only thing naming the
              row. */
@@ -425,15 +496,14 @@ export function SidebarAgents() {
           <span className="agent-name flex-1 truncate text-sm font-semibold text-gray-900">
             {a.name}
           </span>
-          {runningCount > 0 && (
+          {runningCount > 0 ? (
             <span className="agent-running badge-running shrink-0">
               <span className="dot" />
               <span className="agent-running-count">
                 {runningCount} running
               </span>
             </span>
-          )}
-          {a.pinned === false ? (
+          ) : a.pinned === false ? (
             <button
               className="btn-agent-pin inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 group-hover:opacity-100 hover:bg-gray-200 hover:text-gray-900 transition"
               onClick={(e) => {
@@ -468,7 +538,6 @@ export function SidebarAgents() {
             }}
             title="New session"
             aria-label={`New session for ${a.name}`}
-            disabled={creating}
           >
             <IconPlus size={14} />
           </button>
@@ -476,25 +545,30 @@ export function SidebarAgents() {
 
         {isExpanded && (
           <div className="session-rail ml-[15px] mt-0.5 mb-1 flex flex-col gap-0.5 border-l-[1.5px] border-gray-400/70 pl-3">
-            {formAgentId === a.id && (
-              <fieldset disabled={creating} aria-busy={creating} aria-label="New session" className="session-create min-w-0 rounded-lg border border-primary-100 bg-primary-50/60 p-2">
+            {isSessionForm && (
+              <fieldset aria-busy={creating} aria-label="New session" className="session-create min-w-0 rounded-lg border border-primary-100 bg-primary-50/60 p-2">
                 <div className="flex items-center gap-1.5">
                   <input
                     className="min-w-0 flex-1 rounded-md border border-gray-400 bg-card px-2 py-1 text-[13px] text-gray-900 outline-none placeholder:text-gray-600 focus:border-primary"
                     placeholder="Session name"
                     value={newName}
+                    disabled={creationLocked}
                     autoFocus
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => {
                       if (isImeComposing(e.nativeEvent)) return;
-                      if (e.key === "Enter") { e.preventDefault(); void createSession(a.id); }
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        if (!needsCredential) void createSession(a.id);
+                      }
                       if (e.key === "Escape") closeCreateRow();
                     }}
                   />
                   <button
                     type="button"
-                    className="btn-create inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-white transition-colors hover:bg-primary-700"
+                    className="btn-create inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-white transition-colors hover:bg-primary-700 disabled:opacity-50"
                     onClick={() => createSession(a.id)}
+                    disabled={needsCredential || creationLocked}
                     title="Create session"
                     aria-label="Create session"
                   >
@@ -512,6 +586,10 @@ export function SidebarAgents() {
                 </div>
 
                 {creating && <p role="status" className="mt-1 text-xs text-muted-foreground">Creating session…</p>}
+                {needsCredential && <p className="mt-1 text-xs text-muted-foreground">
+                  Choose a credential for {backendLabel(effectiveEngine)}{inheritedCredentialConflict
+                    ? " or use the agent default engine." : " or restore the default sign-in."}
+                </p>}
                 {/* Overrides stay one click away: a session normally
                   * inherits the agent's engine, credential and the
                   * server's default working dir, and the design's
@@ -521,6 +599,7 @@ export function SidebarAgents() {
                   type="button"
                   className="btn-session-advanced mt-1.5 font-mono text-[10.5px] text-gray-700 hover:text-primary"
                   onClick={() => setShowAdvanced((v) => !v)}
+                  disabled={creationLocked}
                 >
                   {showAdvanced ? "− less" : "+ working dir · engine"}
                 </button>
@@ -531,38 +610,50 @@ export function SidebarAgents() {
                       className="session-working-dir rounded-md border border-gray-400 bg-card px-2 py-1 font-mono text-[11.5px] text-gray-900 outline-none placeholder:text-gray-600 focus:border-primary"
                       placeholder="working dir (default: server's)"
                       value={workingDir}
+                      disabled={creationLocked}
                       onChange={(e) => setWorkingDir(e.target.value)}
                     />
                     <select
-                        className="session-backend-select rounded-md border border-gray-400 bg-card px-2 py-1 text-[11.5px] text-gray-900 outline-none focus:border-primary"
-                        value={formBackend}
-                        onChange={(e) => {
-                          setFormBackend(e.target.value);
+                      className="session-backend-select rounded-md border border-gray-400 bg-card px-2 py-1 text-[11.5px] text-gray-900 outline-none focus:border-primary"
+                      value={formBackend}
+                      disabled={creationLocked}
+                      onChange={(e) => {
+                        const choice = e.target.value;
+                        const nextEngine = choice || a.backend;
+                        if (nextEngine !== effectiveEngine && selectedCredential?.backend !== nextEngine) {
                           setFormCredentialId("");
-                        }}
-                        aria-label="Engine"
-                      >
-                        {availableBackends.map((b) => (
-                          <option key={b} value={b}>
-                            {b === "claude-code" ? "Claude Code" : "Codex"}
-                          </option>
-                        ))}
-                      </select>
-                    {credentials.some((c) => c.backend === formBackend) && (
+                        }
+                        setFormBackend(choice);
+                      }}
+                      aria-label="Engine"
+                    >
+                      <option value="">Agent default ({backendLabel(a.backend)}{backendRead.status === "ready"
+                        && !discoveredBackends.includes(a.backend) ? ", CLI not detected" : ""})</option>
+                      {discoveredBackends.map((backend) => (
+                        <option key={backend} value={backend}>{backendLabel(backend)}</option>
+                      ))}
+                    </select>
+                    <BackendCatalogStatus read={backendRead} />
+                    {(a.credential_id || formCredentialId || credentialOptions.length > 0) && (
                       <select
                         className="session-credential-select rounded-md border border-gray-400 bg-card px-2 py-1 text-[11.5px] text-gray-900 outline-none focus:border-primary"
                         value={formCredentialId}
+                        disabled={creationLocked}
                         onChange={(e) => setFormCredentialId(e.target.value)}
                         aria-label="Credential"
                       >
-                        <option value="">Agent's credential</option>
-                        {credentials
-                          .filter((c) => c.backend === formBackend)
-                          .map((c) => (
-                            <option key={c.id} value={c.id}>
-                              {c.label}
-                            </option>
-                          ))}
+                        <option value="" disabled={inheritedCredentialConflict}>{a.credential_id
+                          ? `Agent credential (${credentials.find((c) => c.id === a.credential_id)?.label ?? "saved credential"}${inheritedCredentialConflict ? `, requires ${backendLabel(a.backend)}` : ""})`
+                          : "Host default sign-in"}</option>
+                        {invalidCredential && (
+                          <option value={formCredentialId} disabled>
+                            {selectedCredential ? `${selectedCredential.label} (requires ${backendLabel(selectedCredential.backend)})`
+                              : "Selected credential (unavailable)"}
+                          </option>
+                        )}
+                        {credentialOptions.map((c) => (
+                          <option key={c.id} value={c.id}>{c.label}</option>
+                        ))}
                       </select>
                     )}
                   </div>
@@ -668,6 +759,10 @@ export function SidebarAgents() {
           onClick={() => void archiveConfirmation.run()}>Confirm original archive</button>}
       </div>}
       {createError && <p role="alert" className="px-2 text-xs text-destructive">{createError}</p>}
+      {createdId && <div className="px-2 text-xs text-destructive">
+        <p role="alert">Session created ({createdId}), but the list could not be confirmed.</p>
+        <button className="underline" onClick={() => void sessionList.refresh()}>Check session list</button>
+      </div>}
       {sessionRead.error && <p role="alert" className="px-2 text-xs text-destructive">
         Sessions not synchronized: {sessionRead.error}
         <button className="ml-2 underline" onClick={() => void sessionList.refresh()}>Refresh sessions</button>

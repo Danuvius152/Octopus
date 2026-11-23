@@ -8,7 +8,7 @@ from server.large_prompts import LARGE_PROMPT_THRESHOLD_BYTES
 from server.service_installation import read_service_profile
 from server.users import UserManager
 from server.workspace import paths_for
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.test_account_file_layout import managed_files as managed_files
 from tests.test_service_layout import account_installation as account_installation
 from tests.test_service_layout import legacy_directories
@@ -51,14 +51,15 @@ async def test_concurrent_account_files_recreate_owned_directories_without_globa
 
     class RecordingRun(FakeRunBase):
         def __init__(self, session_id):
+            super().__init__()
             self.session_id = session_id
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             received[self.session_id].append(prompt)
             if all(received.values()):
                 both_started.set()
 
-        def stream(self):
+        def _stream(self):
             async def events():
                 # Keep both account executions alive before either completes.
                 await both_started.wait()
@@ -67,13 +68,13 @@ async def test_concurrent_account_files_recreate_owned_directories_without_globa
                 yield HarnessEvent(type="result", session_id=self.session_id, cost=0.0, num_turns=1)
             return events()
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
             pass
 
-    monkeypatch.setattr(manager, "_make_run", lambda session, *_args: RecordingRun(session.id))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda session, *_args: RecordingRun(session.id)))
     prompts = {
         session.id: f"[bg-task-result] Account {session.user_id}\n"
         + "完整输入" * (LARGE_PROMPT_THRESHOLD_BYTES // 12 + 1)

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sqlite3
 from contextlib import closing
 
 import pytest
@@ -17,6 +18,21 @@ FACTS = ("document_identities", "documents", "managed_notes", "material_origins"
          "source_bindings", "source_binding_head", "source_binding_observations", "wiki_protocols",
          "wiki_job_controls", "wiki_job_state", "wiki_job_outbox", "wiki_job_subscribers",
          "wiki_job_deliveries", "operation_receipts", "job_publications", "jobs", "job_requests")
+
+
+def remove_job_id_uniqueness(path):
+    with closing(sqlite3.connect(path)) as db, db:
+        declaration = db.execute("SELECT sql FROM sqlite_schema WHERE name='jobs'").fetchone()[0]
+        assert "id TEXT UNIQUE NOT NULL" in declaration
+        assert db.execute("SELECT 1 FROM jobs LIMIT 1").fetchone() is None
+        triggers = db.execute("SELECT sql FROM sqlite_schema WHERE type='trigger' AND tbl_name='jobs'").fetchall()
+        db.execute("PRAGMA legacy_alter_table=ON")
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("ALTER TABLE jobs RENAME TO jobs_with_unique_id")
+        db.execute(declaration.replace("id TEXT UNIQUE NOT NULL", "id TEXT NOT NULL", 1))
+        db.execute("DROP TABLE jobs_with_unique_id")
+        for (trigger,) in triggers:
+            db.execute(trigger)
 
 
 def facts(db):

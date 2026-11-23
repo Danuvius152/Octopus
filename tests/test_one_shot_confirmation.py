@@ -56,8 +56,6 @@ async def test_confirmation_after_automatic_archive_observes_the_same_fire_witho
     context = decode_context(snapshot["knowledge_context"])
     target, receipt = await manager.start_one_shot(snapshot, "Original fire", context)
     await asyncio.wait_for(receipt.wait(), 5)
-    await manager.await_session_execution(target)
-    await manager.auto_archive_scheduled_session(target)
     async with asyncio.timeout(5):
         while manager.get_session(target) is not None:
             await asyncio.sleep(.01)

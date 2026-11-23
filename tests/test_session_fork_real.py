@@ -177,8 +177,7 @@ async def test_codex_fork_history_replay_then_native_resume(tmp_path, monkeypatc
     os.makedirs(wd, exist_ok=True)
     try:
         owner = (await db.get_system_agent())["user_id"]
-        await am.create_agent(name="Codey", backend="codex", mcp_servers=[], user_id=owner)
-        agent = await db.get_agent_by_name("Codey")
+        agent = await am.create_agent(name="Codey", backend="codex", mcp_servers=[], user_id=owner)
         sess = await mgr.create_session(agent_id=agent["id"], name="s",
                                         working_dir=wd, backend="codex")
 

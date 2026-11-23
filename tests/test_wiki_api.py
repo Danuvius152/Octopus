@@ -1147,16 +1147,16 @@ async def test_worker_only_organizes_assigned_notes_and_rejects_writing_related_
             def set_idle_handler(self, handler):
                 pass
 
-            async def start(self, *args, **kwargs):
+            async def _start(self, *args, **kwargs):
                 pass
 
-            async def stop(self):
+            async def _stop_process(self):
                 pass
 
             async def interrupt(self):
                 await self.stop()
 
-            async def stream(self):
+            async def _stream(self):
                 found = next(
                     item
                     for item in (
@@ -1215,7 +1215,7 @@ async def test_worker_only_organizes_assigned_notes_and_rejects_writing_related_
                 assert result.status_code == 200, result.text
                 yield HarnessEvent(type="result", content="已完成来源发布")
 
-        return Runtime()
+        return Runtime(backend=backend, config=run_config)
 
     monkeypatch.setattr(get_harness(backend), "create_run", create)
     await worker.start(wiki_api.session_manager)
@@ -1479,22 +1479,22 @@ async def test_queued_messages_keep_separate_explicit_and_autonomous_grants(
             def set_idle_handler(self, handler):
                 pass
 
-            async def start(self, *args, **kwargs):
+            async def _start(self, *args, **kwargs):
                 pass
 
-            async def stop(self):
+            async def _stop_process(self):
                 pass
 
             async def interrupt(self):
                 pass
 
-            async def stream(self):
+            async def _stream(self):
                 if index == 0:
                     started.set()
                     await release.wait()
                 yield HarnessEvent(type="result", content="完成")
 
-        return Runtime()
+        return Runtime(backend=session.backend, config=run_config)
 
     monkeypatch.setattr(get_harness(session.backend), "create_run", create)
     try:
@@ -1570,16 +1570,16 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
             def set_idle_handler(self, handler):
                 pass
 
-            async def start(self, *args, **kwargs):
+            async def _start(self, *args, **kwargs):
                 pass
 
-            async def stop(self):
+            async def _stop_process(self):
                 pass
 
             async def interrupt(self):
                 pass
 
-            async def stream(self):
+            async def _stream(self):
                 if wiki:
                     credentials.append(wiki.credential)
                     response = await client.get(
@@ -1592,7 +1592,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
 
                 yield HarnessEvent(type="result", content="done")
 
-        return Runtime()
+        return Runtime(backend=harness.backend, config=run_config)
 
     monkeypatch.setattr(harness, "create_run", create)
     import asyncio

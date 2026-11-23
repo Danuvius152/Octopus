@@ -6,8 +6,8 @@ import logging
 import uuid
 import weakref
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine
-from contextlib import AbstractAsyncContextManager
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from contextlib import AbstractAsyncContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -449,6 +449,7 @@ class Session:
     _dispatch_revision: int = field(default=0, repr=False)
     _dispatch_order: int = field(default=0, repr=False)
     _delivery_receipts: dict[str, SubmissionReceipt] = field(default_factory=dict, repr=False)
+    _one_shot_owns_retirement: bool = field(default=False, repr=False)
     _request_completions: dict[str, asyncio.Future[RequestCompletion]] = field(default_factory=dict, repr=False)
     _request_observations: dict[str, RequestObservation] = field(default_factory=dict, repr=False)
     _inline_requests: dict[str, list[QueuedPrompt]] = field(default_factory=dict, repr=False)
@@ -462,6 +463,37 @@ class Session:
     # starts after the initial input completes until `result` is seen. Only
     # the owner accepts steers or changes this window.
     _steer_open: bool = field(default=False, repr=False)
+
+
+class SessionRelationship:
+    """The original operations that can change a session's schedule binding."""
+
+    def __init__(self) -> None:
+        self.version = 0
+        self._pending: set[asyncio.Future[None]] = set()
+
+    @contextmanager
+    def changing(self) -> Iterator[Callable[[], None]]:
+        phase = asyncio.get_running_loop().create_future()
+        self._pending.add(phase)
+        self.version += 1
+
+        def settle() -> None:
+            if not phase.done():
+                self._pending.remove(phase)
+                phase.set_result(None)
+
+        try:
+            yield settle
+        finally:
+            settle()
+
+    async def wait_for_pending_changes(self) -> bool:
+        """Report whether any operation was pending, regardless of the outcome."""
+        waited = bool(self._pending)
+        while self._pending:
+            await asyncio.shield(next(iter(self._pending)))
+        return waited
 
 
 class SessionManagerBase:
@@ -519,7 +551,10 @@ class SessionManagerBase:
     async def _fork_attachment_source(self, session_id: str, attachment_id: str, *, user_id: str) -> Path | None:
         raise NotImplementedError  # provided by a mixin
 
-    async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
+    async def require_active_agent(self, agent_id: str | None) -> None:
+        raise NotImplementedError
+
+    async def _create_session(self, agent_id: str | None, *, origin: str = "user", persist: bool = True) -> Session:
         raise NotImplementedError
 
     def agent_operation(self, agent_id: str | None) -> AbstractAsyncContextManager[None]:
@@ -599,9 +634,6 @@ class SessionManagerBase:
         raise NotImplementedError  # provided by a mixin
 
     async def capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
-        raise NotImplementedError  # provided by a mixin
-
-    async def _align_context_locked(self, session: Session, agent: dict[str, Any] | None) -> None:
         raise NotImplementedError  # provided by a mixin
 
     async def _accept_context(self, session: Session, attempt: _Attempt, event: HarnessEvent) -> None:
@@ -725,10 +757,17 @@ class SessionManagerBase:
     def _session_dispatch_snapshot(self, session: Session) -> dict[str, Any]:
         raise NotImplementedError  # provided by turns
 
+    def _session_relationship(self, session_id: str) -> SessionRelationship:
+        relationship = self._session_relationships.get(session_id)
+        if relationship is None:
+            relationship = self._session_relationships[session_id] = SessionRelationship()
+        return relationship
+
     async def _archive_original(
         self, session: Session, *, replace: bool = False, successor: Session | None = None,
         only_request_id: str | None = None, automatic: bool = False,
         release_notice: asyncio.Future[None] | None = None,
+        settle_relationship: Callable[[], None] | None = None,
     ) -> tuple[bool, Session | None]:
         raise NotImplementedError  # provided by lifecycle
 
@@ -770,6 +809,8 @@ class SessionManagerBase:
         self._session_owners: dict[int, SessionOwner] = {}
         # Serialize archive/restoration without retaining historical sessions.
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        # The phase survives live-instance replacement while an operation or fire observes it.
+        self._session_relationships: weakref.WeakValueDictionary[str, SessionRelationship] = weakref.WeakValueDictionary()
         # Archived sessions need their original audience even if a post-commit hook fails.
         self._archived_deletions: dict[str, tuple[str, asyncio.Task[bool]]] = {}
         # Carry Stop and dispatch ordering to the next live owner in this
@@ -887,11 +928,12 @@ class SessionManagerBase:
         for row in rows:
             session = _session_from_row(row)
             if session.context_state is not None:
-                from ..context_models import align_context, context_target
+                from ..context_models import align_context
+                from .context import read_session_context_target
 
                 async with db.configuration_lock:
-                    agent = await db.get_agent(session.agent_id) if session.agent_id else None
-                    state = align_context(session.context_state, context_target(session, agent))
+                    target = await read_session_context_target(db, session)
+                    state = align_context(session.context_state, target) if target is not None else session.context_state
                     if state != session.context_state:
                         await db.update_session_field(session.id, context_state=state.model_dump_json() if state else None)
                         session.context_state = state
@@ -1043,7 +1085,8 @@ class SessionManagerBase:
         return session
 
     def _start_idle_delivery(self, original: Session, captured: Session, resources: asyncio.Task[Any], *, notify: bool) -> None:
-        if captured.origin not in self._AUTO_ARCHIVE_ORIGINS and (not notify or self._notifier_manager is None):
+        auto_archive = captured.origin in self._AUTO_ARCHIVE_ORIGINS and not original._one_shot_owns_retirement
+        if not auto_archive and (not notify or self._notifier_manager is None):
             return
         async def deliver() -> None:
             # Ownership is registered before this first await, including when
@@ -1062,7 +1105,7 @@ class SessionManagerBase:
                 except asyncio.CancelledError:
                     if not notification.cancelled():
                         raise
-            if not self._admission_closed and captured.origin in self._AUTO_ARCHIVE_ORIGINS:
+            if not self._admission_closed and auto_archive:
                 await self.auto_archive_scheduled_session(original.id, expected_session=original)
 
         self._own_task(asyncio.create_task(deliver(), name=f"session-idle-{original.id}"))

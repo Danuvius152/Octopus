@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { enterAccountCredentials } from "./current-account";
 import { expect, test } from "./test";
 
@@ -20,7 +21,7 @@ test("Escape closes foreground controls without stopping the chat until an uncon
     else if (path === "/api/auth/identity") data = { user_id: "escape-owner", label: "Owner", is_admin: true };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", is_system: true, pinned: true, archived: false }];
     else if (path === "/api/applications") data = [application];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}`) data = { ...session, messages: [], next_message_seq: 0,
       oldest_loaded_seq: 0, has_more_messages: false, pending_questions: [], subagents: [], dispatch_state: dispatch,

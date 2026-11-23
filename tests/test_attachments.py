@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -16,6 +17,8 @@ from pathlib import Path
 import pytest
 from starlette.datastructures import UploadFile
 
+from server import app_agent, deps
+from server.applications import ApplicationManager
 from server.attachments import (
     MAX_FILE_BYTES,
     AttachmentError,
@@ -25,7 +28,10 @@ from server.attachments import (
 from server.database import Database
 from server.harness import get_harness
 from server.harness.claude_code import ClaudeDriver
+from server.main import app
+from server.routers import applications as app_routes
 from server.session_manager import session_manager
+from server.sessions import SessionManager
 from server.users import UserManager
 from server.workspace import paths_for
 from tests.attachment_runtime import account_user_id as account_user_id
@@ -192,6 +198,7 @@ async def test_failed_upload_leaves_no_partial_file(client, account_user_id, mon
 
     def partial_write(path, content):
         if path.parent == destination:
+            assert session_manager.db.drain_blockers() == (), "file I/O inherits no SQL deadline"
             write_bytes(path, content[:3])
             raise OSError(errno.ENOSPC, "Upload write failed")
         return write_bytes(path, content)
@@ -260,6 +267,158 @@ async def test_upload_requires_auth(client, account_user_id):
     files = {"file": ("x.txt", b"x", "text/plain")}
     resp = await client.post(f"/api/sessions/{sid}/attachments", files=files, headers={"Authorization": ""})
     assert resp.status_code in (401, 403)
+
+
+@pytest.fixture
+async def attachment_app(client, account_user_id):
+    db = session_manager.db
+    agent = await db.get_system_agent(account_user_id)
+    created = await client.post("/api/sessions", json={"agent_id": agent["id"], "backend": "codex"})
+    assert created.status_code == 201, created.text
+    sid = created.json()["id"]
+    started_at = created.json()["created_at"]
+    session_url = f"/api/sessions/{sid}"
+    app_id = "attachment-builder"
+    app_dir = paths_for(account_user_id).applications / app_id
+    app_dir.mkdir(parents=True)
+    await db.save_application(
+        app_id=app_id, name="Attachment builder", app_dir=str(app_dir), created_at=started_at,
+        updated_at=started_at, user_id=account_user_id, agent_id=agent["id"], session_id=sid,
+    )
+    return session_url, f"/api/applications/{app_id}", paths_for(account_user_id).attachments / sid
+
+
+async def _assert_reopened_attachment_input(client, session_url, destination, db):
+    upload_url = f"{session_url}/attachments"
+    contents = b"new bytes"
+    fresh = await client.post(upload_url, files={"file": ("after.txt", contents, "text/plain")})
+    assert fresh.status_code == 201, fresh.text
+    metadata = fresh.json()
+    downloaded = await client.get(f"{upload_url}/{metadata['id']}")
+    assert downloaded.status_code == 200 and downloaded.content == contents
+    [stored] = list(destination.iterdir())
+    assert stored.name == f"{metadata['id']}__after.txt"
+
+    client_id, content = "ordinary-input-after-app-delete", "Use the new attachment"
+    response = await client.post(f"{session_url}/submissions", json={
+        "client_request_id": client_id, "content": content, "attachment_ids": [metadata["id"]],
+    })
+    assert response.status_code == 200 and response.json()["accepted"], response.text
+    receipt = await client.get(f"{session_url}/submissions/{client_id}")
+    assert receipt.status_code == 200 and receipt.json()["request_id"] == response.json()["request_id"]
+    assert receipt.json()["input"]["attachment_ids"] == [metadata["id"]]
+    row = await db.get_client_submission(destination.name, client_id)
+    assert row["request_id"] == response.json()["request_id"]
+    assert row["payload"]["source"] == "human"
+    assert row["payload"]["operation"]["content"] == content
+    assert row["payload"]["operation"]["attachment_ids"] == [metadata["id"]]
+    assert row["payload"]["attachments"] == [{**metadata, "sha256": hashlib.sha256(contents).hexdigest()}]
+
+
+@pytest.mark.parametrize("archive", [False, True])
+async def test_upload_rechecks_session_when_app_deletion_starts(
+    client, attachment_app, runtime_input, monkeypatch, archive,
+):
+    session_url, app_url, destination = attachment_app
+    upload_url = f"{session_url}/attachments"
+    db = session_manager.db
+    app_manager = ApplicationManager()
+    app_manager.bind(session_manager, db)
+    agent_manager = app_agent.AppAgentManager()
+    agent_manager.bind(session_manager, db, app_manager)
+    monkeypatch.setattr(app_agent, "app_agent_manager", agent_manager)
+    monkeypatch.setattr(app_routes, "_manager", app_manager)
+
+    read_finished, resume_read = asyncio.Event(), asyncio.Event()
+    deletion_recorded, resume_delete = asyncio.Event(), asyncio.Event()
+    read, set_deletion = UploadFile.read, db.set_application_deletion
+    parsed_files = []
+
+    async def hold_after_read(file, size=-1):
+        data = await read(file, size)
+        if file.filename == "before.txt":
+            parsed_files.append(file.file)
+            read_finished.set()
+            await resume_read.wait()
+        return data
+
+    async def hold_after_deletion_marker(app_id, state):
+        await set_deletion(app_id, state)
+        if state["phase"] == "retiring":
+            deletion_recorded.set()
+            await resume_delete.wait()
+
+    monkeypatch.setattr(UploadFile, "read", hold_after_read)
+    monkeypatch.setattr(db, "set_application_deletion", hold_after_deletion_marker)
+    upload = asyncio.create_task(client.post(upload_url, files={"file": ("before.txt", b"old bytes")}))
+    deletion = None
+    try:
+        await asyncio.wait_for(read_finished.wait(), 3)
+        deletion = asyncio.create_task(client.delete(app_url, params={"keep_files": "true"}))
+        await asyncio.wait_for(deletion_recorded.wait(), 3)
+        if archive:
+            archived = await client.post(f"{session_url}/archive", params={"replace": "false"})
+            assert archived.status_code == 204, archived.text
+        resume_read.set()
+        rejected = await asyncio.wait_for(upload, 3)
+        assert rejected.status_code == (404 if archive else 409), rejected.text
+        assert parsed_files and all(file.closed for file in parsed_files)
+        assert list(destination.glob("*")) == []
+
+        resume_delete.set()
+        # Keep the HTTP waiter alive for teardown if this assertion times out.
+        deleted = await asyncio.wait_for(asyncio.shield(deletion), 3)
+        assert deleted.status_code == 204, deleted.text
+        assert (await client.get(app_url)).status_code == 404
+
+        if not archive:
+            await _assert_reopened_attachment_input(client, session_url, destination, db)
+    finally:
+        resume_read.set()
+        resume_delete.set()
+        await asyncio.gather(*(task for task in (upload, deletion) if task is not None), return_exceptions=True)
+        agent_manager.shutdown()
+        app_manager.shutdown()
+
+
+async def test_app_delete_retry_reopens_the_session_loaded_at_startup(
+    client, attachment_app, runtime_input, monkeypatch,
+):
+    session_url, app_url, destination = attachment_app
+    db = session_manager.db
+    await db.set_application_deletion(app_url.rsplit("/", 1)[1], {"phase": "files", "keep_files": True, "error": None})
+    await session_manager.close_session_owners()
+    restarted = SessionManager()
+    await restarted.initialize(db, previous_writers_retired=True)
+    monkeypatch.setitem(app.dependency_overrides, deps.get_session_manager, lambda: restarted)
+    app_manager = ApplicationManager()
+    app_manager.bind(restarted, db)
+    monkeypatch.setattr(app_routes, "_manager", app_manager)
+
+    app_row_deleted, release_session = asyncio.Event(), asyncio.Event()
+    delete_app = db.delete_application
+
+    async def hold_after_deleting_row(app_id):
+        await delete_app(app_id)
+        app_row_deleted.set()
+        await release_session.wait()
+
+    monkeypatch.setattr(db, "delete_application", hold_after_deleting_row)
+    deletion = asyncio.create_task(client.delete(app_url, params={"keep_files": "true"}))
+    try:
+        await asyncio.wait_for(app_row_deleted.wait(), 3)
+        assert (await client.get(app_url)).status_code == 404
+        rejected = await client.post(f"{session_url}/attachments", files={"file": ("closed.txt", b"still closed")})
+        assert rejected.status_code == 409, rejected.text
+        assert list(destination.glob("*")) == []
+        release_session.set()
+        deleted = await asyncio.wait_for(deletion, 3)
+        assert deleted.status_code == 204, deleted.text
+        await _assert_reopened_attachment_input(client, session_url, destination, db)
+    finally:
+        release_session.set()
+        await asyncio.gather(deletion, return_exceptions=True)
+        app_manager.shutdown()
 
 
 @pytest.mark.parametrize(("filename", "stored"), [

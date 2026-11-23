@@ -1,20 +1,44 @@
 """Submitted session operations, separate from the effective execution context."""
 
+import re
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapter
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+)
+from pydantic_core import PydanticCustomError
 
 OperationKind = Literal["message", "compact"]
 TicketPhase = Literal["ticket", "final_acceptance"]
+
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def is_utf8_text(value: str) -> bool:
+    return value.isascii() or _SURROGATE.search(value) is None
+
+
+def _require_utf8_text(value: str) -> str:
+    if not is_utf8_text(value):
+        raise PydanticCustomError("string_unicode", "Input must be valid Unicode text")
+    return value
+
+
+Utf8Text = Annotated[str, AfterValidator(_require_utf8_text)]
 
 
 class MessageOperation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["message"]
-    content: str
-    attachment_ids: list[str]
+    content: Utf8Text
+    attachment_ids: list[Utf8Text]
     wiki_mode: Literal["auto", "read", "maintain"] | None = None
 
 
@@ -114,6 +138,10 @@ def decode_payload(value: dict[str, Any]) -> dict[str, Any]:
         if (not isinstance(batch, str) or value["ticket_batch_update_for"] != batch
                 or "finish_ticket_batch_for" in value or "ticket_batch" in value):
             raise ValueError("The adopted ticket update has no valid original human binding")
+    if "ticket_batch_progress_only" in value and (
+            value["ticket_batch_progress_only"] is not True or "ticket_batch_update_for" not in value
+            or operation.kind != "message" or operation.attachment_ids or operation.content.lstrip().startswith("/")):
+        raise ValueError("The ticket progress question has no valid adoption binding")
     if value.get("source") == "handoff":
         if (operation.kind != "message" or operation.attachment_ids or value.get("recovery_of_client_id")
                 or value.get("handoff_backend") not in {"codex", "claude-code"}

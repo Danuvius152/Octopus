@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { enterAccountCredentials } from "./current-account";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 
@@ -16,7 +17,7 @@ async function openReadabilityMessages(page: Page, mobile: boolean) {
     else if (path === "/api/auth/login") data = { token: "reader-token" };
     else if (path === "/api/auth/identity") data = { user_id: "reader-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}/submissions`) data = { items: [] };
     else if (path === `/api/sessions/${session.id}`) data = { ...session, messages, next_message_seq: 2,
@@ -101,7 +102,7 @@ test("saved previews retry full reads and keep an outside-window question answer
     else if (path === "/api/auth/login") data = { token: "bounded-token" };
     else if (path === "/api/auth/identity") data = { user_id: "bounded-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}/submissions`) data = { items: [] };
     else if (path === preview.detail_ref) {

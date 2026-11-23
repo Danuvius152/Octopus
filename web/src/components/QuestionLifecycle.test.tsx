@@ -277,7 +277,7 @@ beforeEach(() => {
   activeSessionId: sid,
   sessions: [{ id: sid, name: "Question", working_dir: "/tmp", created_at: "2026-10-13", status: "running" } as SessionInfo],
   agents: [], messages: {}, lastAppliedSeq: {}, pendingQuestions: {}, questionDrafts: {}, dispatchUnavailable: {}, closedQuestionIds: {},
-  streamingText: {}, pendingForks: {}, credentials: [], backendModels: {},
+  streamingText: {}, pendingForks: {}, credentials: [],
   dispatchGeneration: null, retiredDispatchGenerations: [], dispatchStates: {},
   });
 });

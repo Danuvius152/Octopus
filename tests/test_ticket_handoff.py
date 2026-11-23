@@ -852,6 +852,9 @@ async def test_final_acceptance_can_adopt_queued_human_supplements_in_order(nati
         result = await call_batch_tool(manager, chat, command, {"message": message})
         assert {key: result[key] for key in expected} == expected
         assert await call_batch_tool(manager, chat, command, {"message": message}) == result
+        if command == "adopt_ticket_batch_update" and index == 1:
+            await call_batch_tool(manager, chat, command, {"message": message, "progress_only": True},
+                                  error="different classification")
         effective = capture(chat, live_scope(chat), prompt="Accept delivery").context
         assert effective.origin.request_id == original.request_id
         if not repeat_primary:
@@ -867,6 +870,126 @@ async def test_final_acceptance_can_adopt_queued_human_supplements_in_order(nati
         verify_main(reader)
     complete_turn()
     await wait_dispatch_idle(manager, chat.id)
+
+
+@pytest.mark.parametrize("outcome", [
+    "acknowledged", "with-steer", "with-later-steer", "with-limit-steer", "invalid-limit-evidence",
+    "unclassified", "stopped", "restart",
+])
+async def test_queued_progress_question_preserves_original_background_return(native_runtime, tmp_path, outcome):
+    manager, database, chat, mode, _, _ = native_runtime
+    mode[0] = "control_output"
+    request = "Complete the authorized batch. Leave deployment paused."
+    original = await manager.start_message(chat.id, request)
+    await until(lambda: chat._steer_open)
+    await begin_ticket_batch(manager, live_scope(chat))
+    pointers = POINTERS.model_copy(update={"next_phase": "final_acceptance"})
+    await ticket_handoff(manager, live_scope(chat), "progress-final", pointers)
+
+    def complete(session):
+        turn = session._run.backend.active_turn
+        inject(tmp_path, {"method": "turn/completed", "params": {
+            "threadId": turn.thread_id, "turn": {"id": turn.turn_id, "status": "completed"},
+        }})
+
+    complete(chat)
+    assert (await original.wait()).outcome.status == "success"
+    await until(lambda: chat.claude_session_id != ROOT and chat._steer_open)
+    scope = live_scope(chat)
+    owned = derive(capture(chat, scope, prompt="Verify A"), "Verify A")
+    target = ReturnTarget(chat.id, "bg", "bg:verify-a", scope.work_id, owned)
+
+    async def material():
+        return ReturnBody("Verification passed")
+
+    complete(chat)
+    await wait_dispatch_idle(manager, chat.id)
+    question = "卡住了吗？测试好慢"
+    with_steer = outcome in {"with-steer", "with-later-steer", "with-limit-steer"}
+    incoming = await manager.start_message(chat.id, question, wiki_mode=None if with_steer else "read")
+    await until(lambda: chat._steer_open and chat._run.settlement.request_id == incoming.request_id)
+    busy = await manager.admit_return(target, prepare=material)
+    assert isinstance(busy, ReturnRefused) and busy.reason == "busy"
+    steer = ("Finish acceptance of the current ticket, then stop." if outcome == "with-limit-steer"
+             else "Leave the live check paused as well.")
+    if outcome in {"with-steer", "with-limit-steer"}:
+        await confirm_human_steer(manager, chat, "progress-steer", steer)
+    if outcome != "unclassified":
+        name = "adopt_ticket_batch_update"
+        arguments = {"message": question, "progress_only": True}
+        expected = {"state": "registered", "original_request_id": original.request_id}
+        if outcome == "acknowledged":
+            await call_batch_tool(manager, chat, name, arguments | {"message": "Different question"}, error="verbatim")
+        assert await call_batch_tool(manager, chat, name, arguments) == expected
+        assert capture(chat, live_scope(chat), prompt="Answer progress").context.origin.request_id == incoming.request_id
+        if outcome == "acknowledged":
+            assert await call_batch_tool(manager, chat, name, arguments) == expected
+            await call_batch_tool(manager, chat, name, {"message": question}, error="different classification")
+            await call_batch_tool(manager, chat, "limit_ticket_batch", {"message": question}, error="cannot limit")
+            await call_batch_tool(manager, chat, "begin_ticket_batch", {}, error="current human authorization")
+
+    if outcome == "with-later-steer":
+        await confirm_human_steer(manager, chat, "progress-steer", steer)
+    if outcome == "with-limit-steer":
+        limit = await call_batch_tool(manager, chat, "limit_ticket_batch", {"message": steer})
+        assert limit["state"] == "finishing" and limit["original_request_id"] == original.request_id
+        assert capture(chat, live_scope(chat), prompt="Answer progress").context.origin.request_id == incoming.request_id
+    if outcome == "invalid-limit-evidence":
+        with closing(sqlite3.connect(copy_product_database(tmp_path, "limit-from-progress-question"))) as reader, reader:
+            reader.execute("UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch','finishing',"
+                           "'$.ticket_batch_limit_request_id',?) WHERE request_id=?",
+                           (incoming.request_id, original.request_id))
+            with pytest.raises(RuntimeError, match="invalid ticket acceptance limit"):
+                verify_main(reader)
+
+    restart_db = copy_product_database(tmp_path, "interrupted-progress-answer") if outcome == "restart" else None
+    complete(chat)
+    assert (await incoming.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    if outcome == "stopped":
+        await manager.interrupt(chat.id)
+        assert await database.ticket_batch_state(chat.id, original.request_id) == "stopped"
+        await manager.resume_dispatch(chat.id)
+    async def check_return(active, session):
+        returned = await active.admit_return(target, prepare=material)
+        if outcome in {"unclassified", "stopped"}:
+            assert isinstance(returned, ReturnRefused) and returned.reason == "admission_closed"
+            return
+        assert isinstance(returned, SubmissionReceipt)
+        await until(lambda: session._steer_open and session._run.settlement.request_id == returned.request_id)
+        resumed = capture(session, live_scope(session), prompt="Resume verification").context
+        assert resumed.origin.request_id == original.request_id
+        assert resumed.mode == owned.return_binding.context.mode
+        if with_steer:
+            assert request in resumed.trusted_request and steer in resumed.trusted_request
+            assert question not in resumed.trusted_request
+        else:
+            assert resumed.trusted_request == request
+        assert await finish_ticket_batch(active, live_scope(session)) == {
+            "state": "stopped", "original_request_id": original.request_id,
+        }
+        complete(session)
+        assert (await returned.wait()).outcome.status == "success"
+
+    if restart_db is None:
+        await check_return(manager, chat)
+        assert (await database.get_submission_for_request(chat.id, incoming.request_id))["payload"]["operation"]["content"] == question
+        with closing(sqlite3.connect(copy_product_database(tmp_path, "progress-question"))) as reader:
+            verify_main(reader)
+        return
+
+    await manager.stop_all_held_processes()
+    stored = Database(str(restart_db))
+    await stored.initialize()
+    restored = SessionManager()
+    try:
+        await restored.initialize(stored, previous_writers_retired=True)
+        interrupted = await stored.get_submission_for_request(chat.id, incoming.request_id)
+        assert interrupted["execution_state"] == "unknown" and interrupted["delivery_state"] == "confirmed"
+        await check_return(restored, restored.get_session(chat.id))
+    finally:
+        await restored.close_session_owners()
+        await stored.close()
 
 
 async def test_adopted_human_input_can_handoff_to_final_acceptance(native_runtime, tmp_path):
@@ -2390,6 +2513,72 @@ async def test_control_after_review_admission_qualifies_its_unwritten_input(nati
     else:
         assert len(starts) == (1 if control == "stop" else 2)
         assert "Earlier review of ticket A" not in str(starts)
+
+
+@pytest.mark.parametrize("stop_before_write", [False, True])
+async def test_claude_batch_return_commits_before_original_stdin_write(
+    claude_runtime, tmp_path, monkeypatch, stop_before_write,
+):
+    from server.harness import HarnessRun
+    from tests._fixtures.jsonl_frames import read_frames
+
+    manager, database, chat, _, _ = claude_runtime
+    plan = tmp_path / "claude-plan.json"
+    plan.write_text(json.dumps({"hold": True}))
+    root = await manager.start_message(chat.id, "Complete the authorized tickets")
+    first, = await claude_inputs(tmp_path, 1)
+    await until(lambda: chat._steer_open)
+    scope = live_scope(chat)
+    await begin_ticket_batch(manager, scope)
+    owned = derive(capture(chat, scope, prompt="Review the current ticket"), "Review the current ticket")
+    claude_inject(tmp_path, {"type": "result", "session_id": SID, "subtype": "success", "is_error": False,
+                             "user_message_uuid": first["input"]["uuid"]})
+    assert (await root.wait()).outcome.status == "success"
+    await wait_dispatch_idle(manager, chat.id)
+    plan.unlink()
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    authorize = HarnessRun.authorize_input
+
+    async def hold_before_write(run):
+        entered.set()
+        await release.wait()
+        await authorize(run)
+
+    monkeypatch.setattr(HarnessRun, "authorize_input", hold_before_write)
+
+    async def material():
+        return ReturnBody("Review approved")
+
+    review = await manager.admit_return(ReturnTarget(chat.id, "delegation", "review-before-write", scope.work_id, owned),
+                                        prepare=material)
+    assert isinstance(review, SubmissionReceipt)
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert read_frames(tmp_path / "claude-inputs.jsonl") == [first]
+        recorded = [message for message in await database.load_messages(chat.id)
+                    if (message["tool_input"] or {}).get("request_context", {}).get("request_id") == review.request_id]
+        message, = recorded
+        context = message["tool_input"]["request_context"]
+        assert context["batch_return"] is True and "Review approved" in message["content"]
+        row = await database.get_submission_for_request(chat.id, review.request_id)
+        assert context["knowledge"] == json.loads(row["payload"]["knowledge"])
+        if stop_before_write:
+            assert await manager.interrupt(chat.id)
+    finally:
+        release.set()
+
+    result = await asyncio.wait_for(review.wait(), 5)
+    await wait_dispatch_idle(manager, chat.id)
+    assert result.outcome.status == ("interrupted" if stop_before_write else "success")
+    frames = read_frames(tmp_path / "claude-inputs.jsonl", finished=True)
+    if stop_before_write:
+        assert frames == [first]
+        assert await review.execution.wait_resources() == ("proven",)
+    else:
+        assert len(frames) == 2 and "Review approved" in frames[1]["input"]["message"]["content"]
+    saved = await database.get_submission_for_request(chat.id, review.request_id)
+    assert saved["payload"]["knowledge"] == row["payload"]["knowledge"]
 
 
 async def test_scope_instruction_waits_for_a_committed_review_input(native_runtime, tmp_path, monkeypatch):

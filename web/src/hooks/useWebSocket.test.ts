@@ -1,5 +1,6 @@
 import { Socket } from "../test-support/socket";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { deferred } from "../test-support/deferred";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
@@ -168,11 +169,13 @@ describe("archive replacement settings", () => {
       messages: {}, dispatchUnavailable: {}, pendingQuestions: {},
     });
   });
+  afterEach(() => vi.unstubAllGlobals());
 
   it.each([
     { model: "gpt-5.4", reasoning_effort: "high", service_tier: "fast" },
     { model: null, reasoning_effort: null, service_tier: null },
   ])("uses the server's settings, including explicit inheritance: %j", (settings) => {
+    useSessionStore.setState({ sessions: [old, { ...old, id: event.new_session_id }] });
     handleWsMessage({ ...event, ...settings });
     const store = useSessionStore.getState();
     expect(store.activeSessionId).toBe(old.id);
@@ -180,12 +183,26 @@ describe("archive replacement settings", () => {
     expect(store.archivedSessions).toEqual([expect.objectContaining({ ...old, archived: true })]);
   });
 
-  it("receives settings even when the old session is absent locally", () => {
-    useSessionStore.setState({ sessions: [] });
+  it("changes only the successor fields carried by a sparse frame", () => {
+    const successor = { ...old, id: event.new_session_id, name: "Read earlier", working_dir: "/actual" };
+    useSessionStore.setState({ sessions: [old, successor] });
+    handleWsMessage({ type: event.type, old_session_id: old.id, new_session_id: successor.id, model: null });
+    expect(useSessionStore.getState().sessions).toEqual([{ ...successor, model: null }]);
+    expect(useSessionStore.getState().sessionSuccessors[old.id]).toBe(successor.id);
+    expect(useSessionStore.getState().activeSessionId).toBe(old.id);
+  });
+
+  it("retains an omitted successor relationship and clears an explicit null relationship", () => {
+    const successor = { ...old, id: event.new_session_id };
+    useSessionStore.setState({ sessions: [old, successor] });
     handleWsMessage(event);
-    expect(useSessionStore.getState().sessions[0]).toMatchObject({
-      model: event.model, reasoning_effort: event.reasoning_effort, service_tier: event.service_tier,
-    });
+    handleWsMessage({ type: event.type, old_session_id: old.id, model: null });
+    expect(useSessionStore.getState().sessionSuccessors[old.id]).toBe(successor.id);
+    expect(useSessionStore.getState().sessions).toEqual([{
+      ...successor, name: event.name, model: null, reasoning_effort: event.reasoning_effort, service_tier: event.service_tier,
+    }]);
+    handleWsMessage({ type: event.type, old_session_id: old.id, new_session_id: null });
+    expect(useSessionStore.getState().sessionSuccessors[old.id]).toBeUndefined();
   });
 
   it("converges when the HTTP response precedes the event and ignores duplicate events", () => {
@@ -220,17 +237,25 @@ it("applies the nested server dispatch frame for an idle Stop and a remote Resum
 
 it("preserves the replacement session's actual queue after an archive broadcast", async () => {
   useSessionStore.getState().setToken("archive-test");
+  const old = { id: "archived-old", name: "Archived" } as SessionInfo;
+  const successor = { ...old, id: "archive-replacement", working_dir: "/actual", created_at: "server-time" };
   useSessionStore.setState({ activeSessionId: "archived-old", dispatchStates: {}, dispatchUnavailable: {},
-    sessions: [{ id: "archived-old", name: "Archived" } as SessionInfo] });
+    sessions: [old] });
   const dispatch = { generation: "archive-service", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] };
   useSessionStore.setState({ dispatchStates: { "archive-replacement": dispatch } });
-  const fetcher = vi.fn();
+  const read = deferred<Response>();
+  const fetcher = vi.fn(() => read.promise);
   vi.stubGlobal("fetch", fetcher);
-  handleWsMessage({ type: "session_archived", old_session_id: "archived-old", new_session_id: "archive-replacement", name: "Archived" });
-  expect(useSessionStore.getState().dispatchStates["archive-replacement"]).toEqual(dispatch);
-  expect(useSessionStore.getState().activeSessionId).toBe("archived-old");
-  expect(fetcher).not.toHaveBeenCalled();
-  vi.unstubAllGlobals();
+  try {
+    handleWsMessage({ type: "session_archived", old_session_id: old.id, new_session_id: successor.id, name: "Archived" });
+    expect(useSessionStore.getState().sessions).toEqual([]);
+    expect(useSessionStore.getState().sessionSuccessors[old.id]).toBe(successor.id);
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("/api/sessions?include_archived=true"), expect.anything());
+    await act(async () => read.resolve(Response.json([{ ...old, archived: true }, successor])));
+    expect(useSessionStore.getState().sessions).toEqual([successor]);
+    expect(useSessionStore.getState().dispatchStates[successor.id]).toEqual(dispatch);
+    expect(useSessionStore.getState().activeSessionId).toBe(old.id);
+  } finally { vi.unstubAllGlobals(); }
 });
 
 it("ignores a superseded socket's close and open after a new bearer connects", () => {
@@ -466,18 +491,18 @@ describe("agent and application events", () => {
     expect(useSessionStore.getState().archivedAgents).toEqual([]);
   });
 
-  it("application_archived removes the row", () => {
-    handleWsMessage({ type: "application_created", application: appRow() });
+  it("application_archived leaves membership to the confirming read", () => {
+    useSessionStore.setState({ applications: [appRow()] });
     handleWsMessage({
       type: "application_archived",
       application_id: "a1",
       application: appRow({ archived: true }),
     });
-    expect(useSessionStore.getState().applications).toEqual([]);
+    expect(useSessionStore.getState().applications).toEqual([appRow()]);
   });
 
   it("a build failing out of sight is remembered until opened", () => {
-    handleWsMessage({ type: "application_created", application: appRow() });
+    useSessionStore.setState({ applications: [appRow()] });
     handleWsMessage({
       type: "application_updated",
       application: appRow({ status: "failed" }),
@@ -495,8 +520,7 @@ describe("agent and application events", () => {
   });
 
   it("a failure you're watching isn't 'unseen'", () => {
-    handleWsMessage({ type: "application_created", application: appRow() });
-    useSessionStore.setState({ mainView: "application", activeApplicationId: "a1" });
+    useSessionStore.setState({ applications: [appRow()], mainView: "application", activeApplicationId: "a1" });
     handleWsMessage({
       type: "application_updated",
       application: appRow({ status: "failed" }),

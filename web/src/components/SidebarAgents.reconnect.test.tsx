@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../test-support/backendCatalog";
 import { Socket } from "../test-support/socket";
 import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
@@ -15,7 +16,7 @@ it("reconnect updates the rendered sidebar with offline creation, rename and arc
   let rows = [agent("a", "Old A"), agent("b", "Old B")];
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     if (url.endsWith("/api/agents")) return Response.json(rows);
-    if (url.endsWith("/api/backends")) return Response.json({ available: ["codex"] });
+    if (url.endsWith("/api/backends")) return Response.json(backendCatalogFixture(["codex"]));
     return Response.json([]);
   }));
   useSessionStore.setState({ ...useSessionStore.getInitialState(), token: "synthetic-token", accountGeneration: 1, dispatchGeneration: "service-a" });

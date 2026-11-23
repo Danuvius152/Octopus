@@ -13,7 +13,7 @@ beforeEach(() => {
   sessionStorage.clear();
   useSessionStore.getState().setToken("");
   useSessionStore.setState({ activeSessionId: session.id, mainView: "chat", sessions: [session], archivedSessions: [],
-    agents: [], credentials: [], backendModels: {},
+    agents: [], credentials: [],
     messages: { [session.id]: Array.from({ length: 15 }, (_, index) => ({
       role: "assistant", type: "text", seq: index + 1, content: `Saved text ${index + 1}`,
     })) },

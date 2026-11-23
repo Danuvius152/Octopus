@@ -6,16 +6,19 @@ import json
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
 from server.config import settings
 from server.wiki import schema
+from server.wiki.history import WikiHistory, atomic
 from server.wiki.registry import WikiRegistry
 from server.wiki.store import WikiError
 from tests.test_service_runtime import installation_settings
 from tests.test_wiki_storage import registration_process
+from tests.wiki_current_storage import remove_job_id_uniqueness
 
 registry_module = importlib.import_module("server.wiki.registry")
 
@@ -45,6 +48,79 @@ def test_registration_round_trip_cannot_revive_its_old_generation(registered, fi
     registry.close()
     assert registry.config(None) == third
     assert registry.store(None).vault_id == first["vault_id"]
+
+
+def insert_publication_job(db):
+    db.execute("PRAGMA recursive_triggers=ON")
+    db.execute("""INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,created_at,updated_at)
+                  VALUES('publication-job','publication-key','hash','{}','completed','[]','time','time')""")
+
+
+def test_same_vault_reopen_rechecks_jobs_missing_state(registered):
+    registry, _, config = registered
+    path = registry.store(None).db_path
+    registry.close()
+    with closing(sqlite3.connect(path)) as db, db:
+        trigger = db.execute("SELECT sql FROM sqlite_schema WHERE name='wiki_job_insert_state'").fetchone()[0]
+        db.execute("DROP TRIGGER wiki_job_insert_state")
+        insert_publication_job(db)
+        db.execute(trigger)
+
+    with pytest.raises(WikiError, match="job notification ledger") as refused:
+        registry.store(None)
+    assert refused.value.status == 503
+
+    with closing(sqlite3.connect(path)) as db, db:
+        assert db.execute("SELECT job_id FROM wiki_job_state").fetchone() is None
+        db.execute("PRAGMA recursive_triggers=ON")
+        db.execute("INSERT INTO wiki_job_state(job_id,state_version,attempt,settlement_phase) VALUES('publication-job',1,1,'none')")
+    assert registry.store(None).vault_id == config["vault_id"]
+
+
+def test_reopen_requires_unique_job_identity(registered):
+    registry, _, _ = registered
+    path = registry.store(None).db_path
+    registry.close()
+    remove_job_id_uniqueness(path)
+
+    with pytest.raises(WikiError, match="job ledger constraints") as refused:
+        registry.store(None)
+    assert refused.value.status == 503
+
+
+def test_cold_open_checks_job_triggers_before_recovering_prepared_history(registered):
+    registry, root, _ = registered
+    store = registry.store(None)
+    path = root / "note.md"
+    landed = b"# Landed before the writer retired\n"
+    change = WikiHistory(store).record("note.md", path.read_bytes(), landed, "human", "Prepared edit", "prepared")
+    with store.connect() as db:
+        insert_publication_job(db)
+        db.execute("UPDATE operation_receipts SET job_id='publication-job' WHERE change_id=?", (change["id"],))
+        notifications = db.execute("SELECT count(*) FROM wiki_job_outbox WHERE job_id='publication-job'").fetchone()[0]
+    atomic(path, landed)
+    registry.close()
+    with closing(sqlite3.connect(store.db_path)) as db, db:
+        trigger = db.execute("SELECT sql FROM sqlite_schema WHERE name='wiki_job_event_change_status'").fetchone()[0]
+        db.execute("DROP TRIGGER wiki_job_event_change_status")
+
+    cold = WikiRegistry()
+    try:
+        with pytest.raises(WikiError, match="job notification ledger") as refused:
+            cold.store(None)
+        assert refused.value.status == 503
+        with closing(sqlite3.connect(store.db_path)) as db, db:
+            assert db.execute("SELECT status FROM changes WHERE id=?", (change["id"],)).fetchone() == ("prepared",)
+            assert db.execute("SELECT count(*) FROM wiki_job_outbox WHERE job_id='publication-job'").fetchone() == (notifications,)
+            db.execute(trigger)
+
+        reopened = cold.store(None)
+        with reopened.connect() as db:
+            assert db.execute("SELECT status FROM changes WHERE id=?", (change["id"],)).fetchone()[0] == "applied"
+            assert db.execute("SELECT count(*) FROM wiki_job_outbox WHERE job_id='publication-job'").fetchone()[0] == notifications + 1
+        assert path.read_bytes() == landed
+    finally:
+        cold.close()
 
 
 @pytest.mark.parametrize("boundary", ["before_constructor", "before_publication"])

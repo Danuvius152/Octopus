@@ -31,45 +31,24 @@ class ProcessesMixin(SessionManagerBase):
 
 
 
-    async def _enforce_held_cap(self, *, keep_session_id: str | None = None) -> int:
-        """Drop least-recently-used held processes until at most
-        `_MAX_HELD_PROCESSES` remain, never touching `keep_session_id` (the
-        session that just finished a turn) or any session mid-turn.
-
-        This is the hard bound on the memory reuse costs. The reaper's idle
-        timeout is the soft one — it releases processes nobody is using, while
-        this stops a busy workspace from holding more than we budgeted for.
-        """
-        held = [
-            s
-            for s in self.sessions.values()
-            if s._run.backend is not None
-            and s._run.held_since is not None
-            and s.id != keep_session_id
-            and not self.session_is_executing(s)
-        ]
-        if len(held) < _MAX_HELD_PROCESSES:
-            return 0
-        held.sort(key=lambda s: s._run.held_since or 0.0)
-        # `keep_session_id` occupies one slot of the budget.
-        excess = len(held) - (_MAX_HELD_PROCESSES - (1 if keep_session_id else 0))
-        stopped = 0
-        for session in held[: max(0, excess)]:
+    def _held_processes(self) -> list[tuple[Session, RetireHeldProcess]]:
+        held = []
+        for session in self.sessions.values():
             backend = session._run.backend
             held_since = session._run.held_since
-            if backend is None or held_since is None:
-                continue
-            try:
-                retirement = await self._session_owner(session).call_runtime(RetireHeldProcess(backend, held_since))
-                if retirement is not None:
-                    _, pending = await asyncio.wait({retirement}, timeout=_HELD_STOP_TIMEOUT)
-                    if pending:
-                        raise RuntimeError("Held process retirement remains unconfirmed")
-                    await asyncio.shield(retirement)
-                    stopped += 1
-            except Exception as error:
-                logger.error("failed stopping held process session=%s error=%s\n%s",
-                             session.id, type(error).__name__, backend.format_exception(error))
+            if backend is not None and held_since is not None and not self.session_is_executing(session):
+                held.append((session, RetireHeldProcess(backend, held_since)))
+        return held
+
+    async def _enforce_held_cap(self, *, keep_session_id: str | None = None) -> int:
+        """Retire the oldest excess held processes, protecting the caller's held slot."""
+        held = self._held_processes()
+        excess = len(held) - _MAX_HELD_PROCESSES
+        if excess <= 0:
+            return 0
+        candidates = [entry for entry in held if entry[0].id != keep_session_id]
+        candidates.sort(key=lambda entry: entry[1].held_since)
+        stopped = await self._retire_held_processes(candidates[:excess])
         if stopped:
             logger.info("released %d held CLI process(es) to stay under the cap", stopped)
         return stopped
@@ -84,38 +63,38 @@ class ProcessesMixin(SessionManagerBase):
         not harmed: its next turn spawns and resumes.
         """
         now = time.monotonic()
-        held = [
-            s
-            for s in self.sessions.values()
-            if s._run.backend is not None
-            and s._run.held_since is not None
-            and not self.session_is_executing(s)
-        ]
-        doomed = [s for s in held if now - (s._run.held_since or now) >= _HELD_PROCESS_IDLE_SECONDS]
-        survivors = [s for s in held if s not in doomed]
+        doomed, survivors = [], []
+        for entry in self._held_processes():
+            if now - entry[1].held_since >= _HELD_PROCESS_IDLE_SECONDS:
+                doomed.append(entry)
+            else:
+                survivors.append(entry)
         if len(survivors) > _MAX_HELD_PROCESSES:
-            survivors.sort(key=lambda s: s._run.held_since or 0.0)
+            survivors.sort(key=lambda entry: entry[1].held_since)
             doomed.extend(survivors[: len(survivors) - _MAX_HELD_PROCESSES])
 
-        stopped = 0
-        for session in doomed:
-            backend = session._run.backend
-            held_since = session._run.held_since
-            if backend is None or held_since is None:
-                continue
-            try:
-                retirement = await self._session_owner(session).call_runtime(RetireHeldProcess(backend, held_since))
-                if retirement is not None:
-                    _, pending = await asyncio.wait({retirement}, timeout=_HELD_STOP_TIMEOUT)
-                    if pending:
-                        raise RuntimeError("Held process retirement remains unconfirmed")
-                    await asyncio.shield(retirement)
-                    stopped += 1
-            except Exception as error:
-                logger.error("failed stopping held process session=%s error=%s\n%s",
-                             session.id, type(error).__name__, backend.format_exception(error))
+        stopped = await self._retire_held_processes(doomed)
         if stopped:
             logger.info("reaped %d idle CLI process(es)", stopped)
+        return stopped
+
+    async def _retire_held_processes(self, candidates: list[tuple[Session, RetireHeldProcess]]) -> int:
+        stopped = 0
+        for session, command in candidates:
+            if self.sessions.get(session.id) is not session:
+                continue
+            try:
+                retirement = await self._session_owner(session).call_runtime(command)
+                if retirement is None:
+                    continue
+                _, pending = await asyncio.wait({retirement}, timeout=_HELD_STOP_TIMEOUT)
+                if pending:
+                    raise RuntimeError("Held process retirement remains unconfirmed")
+                await asyncio.shield(retirement)
+                stopped += 1
+            except Exception as error:
+                logger.error("failed stopping held process session=%s error=%s\n%s",
+                             session.id, type(error).__name__, command.backend.format_exception(error))
         return stopped
 
     async def _reaper_loop(self) -> None:

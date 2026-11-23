@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../test-support/backendCatalog";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SidebarAgents } from "./SidebarAgents";
@@ -27,7 +28,7 @@ function mockServer(post: () => Promise<Response>, archived = false, confirm?: (
       Response.json([{ ...session, archived: posted && archived }]);
     if (path.endsWith("/api/sessions/s1")) return Response.json({ ...session, archived, messages: [],
       dispatch_state: archived ? null : dispatch, active_attempt: null, pending_questions: [], subagents: [] });
-    if (path.endsWith("/api/backends")) return Response.json({ available: ["codex"] });
+    if (path.endsWith("/api/backends")) return Response.json(backendCatalogFixture(["codex"]));
     return Response.json([]);
   });
   vi.stubGlobal("fetch", fetcher);
@@ -82,7 +83,7 @@ it.each([false, true])("reopens A's original unknown archive after B refuses, ov
       if (url.searchParams.has("include_archived") && ++reads === 1 && overlap) return firstRead.promise;
       return Response.json([{ ...session, archived: confirmed }, other].filter(row => url.searchParams.has("include_archived") || !row.archived));
     }
-    if (url.pathname === "/api/backends") return Response.json({ available: ["codex"] });
+    if (url.pathname === "/api/backends") return Response.json(backendCatalogFixture(["codex"]));
     return Response.json([]);
   });
   vi.stubGlobal("fetch", fetcher);
@@ -161,7 +162,7 @@ it("confirms a successful 204 silently after a preceding archive event", async (
   const fetcher = mockServer(() => reply.promise, true, confirm);
   await archive();
   await act(async () => {
-    sessionList.archive(session.id, undefined, undefined, null);
+    sessionList.archive(session.id, undefined, null);
     reply.resolve(new Response(null, { status: 204 }));
   });
   await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));

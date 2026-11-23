@@ -14,7 +14,7 @@ from server.harness import HarnessEvent
 from server.routers import applications as routes
 from server.sessions.owner import SessionOwnerUnavailable
 from tests import test_app_agent as app_fixtures
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.test_applications import application_model
 
 aam = app_fixtures.aam
@@ -39,19 +39,19 @@ async def test_failed_owner_receipt_keeps_app_counted_until_original_backend_ret
     starts = []
 
     class HeldRun(FakeRunBase):
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             starts.append(prompt)
             entered.set()
 
-        async def stream(self):
+        async def _stream(self):
             await stream_release.wait()
             yield HarnessEvent(type="result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             stopping.set()
             await stop_release.wait()
 
-    monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: HeldRun())
+    monkeypatch.setattr(mgr, "_make_run", model_run_factory(lambda *args, **kwargs: HeldRun()))
     read_notice = db.has_delivery_notice
 
     async def fail_original_owner(session_id, delivery_id):
@@ -111,11 +111,11 @@ async def test_app_chat_response_detaches_observation_while_original_execution_k
     starts = []
 
     class HeldRun(FakeRunBase):
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             starts.append(prompt)
             entered.set()
 
-        async def stream(self):
+        async def _stream(self):
             await stream_release.wait()
             yield HarnessEvent(type="text", content="Original SSE reply")
             yield HarnessEvent(type="result", is_error=False)
@@ -123,11 +123,11 @@ async def test_app_chat_response_detaches_observation_while_original_execution_k
         async def interrupt(self):
             stream_release.set()
 
-        async def stop(self):
+        async def _stop_process(self):
             stopping.set()
             await stop_release.wait()
 
-    monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: HeldRun())
+    monkeypatch.setattr(mgr, "_make_run", model_run_factory(lambda *args, **kwargs: HeldRun()))
     monkeypatch.setattr(routes, "_manager", am)
     monkeypatch.setattr(routes, "app_agent_manager", aam)
     scope = {

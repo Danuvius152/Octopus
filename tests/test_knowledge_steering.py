@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import uuid
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +16,7 @@ import pytest
 from server.database import Database
 from server.harness import HarnessEvent, get_harness
 from server.knowledge import capture, derive, encode
-from server.mcp_identity import McpScope, register_run, revoke_run
+from server.mcp_identity import McpScope
 from server.session_manager import SessionManager
 from server.wiki.limits import MaintenanceLimit
 from server.wiki.registry import registry
@@ -52,24 +51,18 @@ async def steering(tmp_path, monkeypatch):
             can_steer = True
 
             def __init__(self):
-                self.native_end_reason = "process_ended"
-                self.run_lease_id = uuid.uuid4().hex
-                self.session_id, self.user_id = config.session_id, config.user_id
-                self.work_id = config.work_id
+                super().__init__(backend="codex", config=config)
                 self.ready = asyncio.Event()
 
-            def bind_wiki_task(self, task_id):
-                tasks.bind_run(self.run_lease_id, task_id, self.session_id, self.user_id)
-
-            async def start(self, prompt, *args, **kwargs):
+            async def _start(self, prompt, *args, **kwargs):
                 self.prompt = prompt
-                register_run(self.run_lease_id, self.session_id, self.user_id, self.work_id)
                 self.ready.set()
 
             def prepare_turn_stream(self):
+                super().prepare_turn_stream()
                 self.ready.clear()
 
-            async def send_turn(self, prompt):
+            async def _write_turn_input(self, prompt):
                 self.prompt = prompt
                 self.ready.set()
 
@@ -80,7 +73,7 @@ async def steering(tmp_path, monkeypatch):
                 # batch. Observe only the public Database transcript seam.
                 committed = await reader.load_messages(session.id)
                 scope = McpScope(
-                    self.session_id, user_id=self.user_id, wiki_task_id=RUN_WIKI_SCOPE,
+                    session.id, user_id=session.user_id, wiki_task_id=RUN_WIKI_SCOPE,
                     run_lease_id=self.run_lease_id, work_id=self.work_id,
                 )
                 control.scope = scope
@@ -90,23 +83,12 @@ async def steering(tmp_path, monkeypatch):
                 if control.frame_error:
                     raise BrokenPipeError("frame refused before delivery")
 
-            def set_idle_handler(self, handler):
-                pass
-
-            async def stream(self):
+            async def _stream(self):
                 await self.ready.wait()
                 await started.put(self.prompt)
                 if self.prompt == "Initial comparison":
                     await first_done.wait()
                 yield HarnessEvent(type="result", is_error=False)
-
-            async def stop(self):
-                revoke_run(self.run_lease_id)
-                tasks.unbind_run(self.run_lease_id)
-
-            async def interrupt(self):
-                revoke_run(self.run_lease_id)
-                tasks.unbind_run(self.run_lease_id)
 
         return Run()
 

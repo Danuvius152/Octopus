@@ -74,6 +74,7 @@ async def test_unsupported_native_request_is_explicitly_rejected(native_runtime,
 async def test_schedule_execution_obeys_the_same_effective_native_configuration(native_runtime, tmp_path, external_clock):
     from server.agent_manager import AgentManager
     from server.scheduler import ScheduleRunner
+    from tests.schedule_support import dispatch_schedule
     from tests.test_scheduler import save_schedule
 
     manager, database, parent, _, starts, _ = native_runtime
@@ -87,7 +88,7 @@ async def test_schedule_execution_obeys_the_same_effective_native_configuration(
     await save_schedule(database, schedule_id="native-config-schedule", agent_id=parent.agent_id,
         name="Native configuration", prompt="Run the scheduled request", interval_seconds=60,
         created_at="2026-11-02T00:00:00+00:00")
-    await ScheduleRunner(manager, database)._fire("native-config-schedule")
+    await dispatch_schedule(ScheduleRunner(manager, database), "native-config-schedule")
     scheduled = next(row for row in await database.load_sessions(include_archived=True) if row["origin"] == "schedule")
     outcomes = [row["content"] for row in await database.load_messages(scheduled["id"]) if row["type"] == "result"]
     assert len(outcomes) == 1 and outcomes[0]["status"] == ("failed" if external_clock else "success")

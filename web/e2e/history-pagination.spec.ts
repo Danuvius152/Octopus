@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test, type WebSocketRoute } from "./test";
 import type { Route } from "@playwright/test";
 import { enterAccountCredentials } from "./current-account";
@@ -53,7 +54,7 @@ test("native cards retain content, order and saved references across a long hist
     else if (path === "/api/auth/login") data = { token: "history-token" };
     else if (path === "/api/auth/identity") data = { user_id: "history-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `${prefix}/messages`) {
       expect(url.searchParams.get("before_seq")).toBe("200");
@@ -132,7 +133,7 @@ test(scenario === "interrupted" ? "navigation after history merge retires queued
     else if (path === "/api/auth/login") data = { token: "history-token" };
     else if (path === "/api/auth/identity") data = { user_id: "history-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}/messages`) {
       pages.push(route);

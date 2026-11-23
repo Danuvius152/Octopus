@@ -12,6 +12,7 @@ from server.crypto import master_key
 from server.database import Database
 from server.db.portability import snapshot_account
 from server.db.schema import CURRENT_VERSION
+from server.portability import export_account, import_account
 from server.storage_verification import verify_main, verify_storage
 from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
@@ -92,6 +93,114 @@ async def test_publication_verification_leaves_current_messages_and_input_facts_
         assert submission['request_id'] == 'original-request'
     finally:
         await database.close()
+
+
+@pytest.mark.parametrize("field", ["backend", "origin"])
+@pytest.mark.parametrize("raw", ["", "unsupported", sqlite3.Binary(b"codex")])
+async def test_publication_rejects_invalid_original_session_field(installation, field, raw):
+    path = Path(installation.db_path)
+    with closing(sqlite3.connect(path)) as stored, stored:
+        stored.execute(f"UPDATE sessions SET {field}=? WHERE id='original'", (raw,))
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match=f"Session original: invalid {field}"):
+        verify_storage(installation)
+    assert path.read_bytes() == before
+
+
+async def test_publication_checks_configuration_in_committed_wal(installation):
+    path = Path(installation.db_path)
+    with closing(sqlite3.connect(path)) as stored:
+        assert stored.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        stored.execute("PRAGMA wal_autocheckpoint=0")
+        before = path.read_bytes()
+        with stored:
+            agent_id, = stored.execute("SELECT id FROM agents").fetchone()
+            stored.execute("UPDATE agents SET backend='invalid' WHERE id=?", (agent_id,))
+        assert path.read_bytes() == before
+        with pytest.raises(RuntimeError, match=f"Agent {agent_id}: invalid configuration field backend"):
+            verify_storage(installation)
+        assert path.read_bytes() == before
+
+
+async def test_restored_copy_must_pass_offline_verification_after_in_place_agent_repair(installation, tmp_path):
+    source = Path(installation.db_path)
+    backup = tmp_path / "restore-target" / "main.db"
+    backup.parent.mkdir()
+    with closing(sqlite3.connect(source)) as stored, closing(sqlite3.connect(backup)) as copied:
+        agent_id, = stored.execute("SELECT id FROM agents").fetchone()
+        with stored:
+            stored.execute("UPDATE agents SET subagents='null' WHERE id=?", (agent_id,))
+            stored.execute("UPDATE sessions SET agent_id=?, backend='codex', origin='application'", (agent_id,))
+        stored.backup(copied)
+    restored = installation.model_copy(update={"db_path": str(backup)})
+    before = backup.read_bytes()
+    with pytest.raises(RuntimeError, match=f"Agent {agent_id}: invalid configuration field subagents"):
+        verify_storage(restored)
+    assert backup.read_bytes() == before
+
+    with closing(sqlite3.connect(backup)) as copied, copied:
+        copied.execute("UPDATE agents SET subagents='[]' WHERE id=?", (agent_id,))
+
+    assert verify_storage(restored)["main_format_version"] == CURRENT_VERSION
+    with closing(sqlite3.connect(backup)) as copied:
+        assert copied.execute("SELECT id, subagents FROM agents").fetchall() == [(agent_id, "[]")]
+        assert copied.execute("SELECT id, agent_id FROM sessions").fetchall() == [("original", agent_id)]
+    with pytest.raises(RuntimeError, match=f"Agent {agent_id}: invalid configuration field subagents"):
+        verify_storage(installation)
+
+
+@pytest.mark.parametrize(("field", "assignment"), [
+    ("mcp_servers", "'null'"),
+    ("description", "CAST(X'736563726574FF' AS TEXT)"),
+])
+async def test_account_export_checks_only_its_selected_agent_configuration(installation, tmp_path, field, assignment):
+    database = Database(installation.db_path)
+    await database.initialize()
+    try:
+        neighbor, _ = await create_account(database, username="neighbor")
+        agent = await database.get_system_agent(neighbor["id"])
+    finally:
+        await database.close()
+    path = Path(installation.db_path)
+    with closing(sqlite3.connect(path)) as stored, stored:
+        owner, = stored.execute("SELECT user_id FROM sessions WHERE id='original'").fetchone()
+        stored.execute(f"UPDATE agents SET {field}={assignment} WHERE id=?", (agent["id"],))
+        stored.execute("UPDATE sessions SET origin='' WHERE id='original'")
+    message = f"Agent {agent['id']}: invalid configuration field {field}"
+    with pytest.raises(RuntimeError, match=message):
+        verify_storage(installation)
+    good_archive = tmp_path / "good.zip"
+    export_account(installation, owner, good_archive, home=path.parent)
+    restored = import_account(good_archive, home=tmp_path / "target")
+    with closing(sqlite3.connect(restored.db_path)) as copied:
+        assert copied.execute("SELECT id FROM users").fetchall() == [(owner,)]
+        assert copied.execute("SELECT user_id FROM agents").fetchall() == [(owner,)]
+        assert copied.execute("SELECT id FROM sessions").fetchall() == []
+    bad_archive = tmp_path / "bad.zip"
+    with pytest.raises(RuntimeError, match=message) as refused:
+        export_account(installation, neighbor["id"], bad_archive, home=path.parent)
+    assert str(refused.value) == message
+    assert not bad_archive.exists()
+
+
+@pytest.mark.parametrize(("damage", "diagnostic"), [
+    ("revision", "context settings revision"),
+    ("relationship", "relationships"),
+])
+async def test_account_export_retains_existing_full_database_checks(installation, tmp_path, damage, diagnostic):
+    path = Path(installation.db_path)
+    with closing(sqlite3.connect(path)) as stored, stored:
+        owner, = stored.execute("SELECT id FROM users").fetchone()
+        stored.execute("""INSERT INTO agents(user_id,id,name,created_at,updated_at)
+                          VALUES('adjacent','neighbor','Neighbor','time','time')""")
+        if damage == "revision":
+            stored.execute("UPDATE agents SET context_settings_revision=-1 WHERE id='neighbor'")
+        else:
+            stored.execute("INSERT INTO agent_connectors VALUES('neighbor','missing-installation')")
+    archive = tmp_path / "refused.zip"
+    with pytest.raises(RuntimeError, match=diagnostic):
+        export_account(installation, owner, archive, home=path.parent)
+    assert not archive.exists()
 
 
 @pytest.mark.parametrize('raw', ['{}', '{"version":true,"paths":[]}', '{"version":2,"paths":[]}',

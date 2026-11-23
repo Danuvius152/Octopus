@@ -9,7 +9,7 @@ from server.database import Database
 from server.harness import HarnessEvent
 from server.sessions import SessionManager
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 
 @pytest.fixture
@@ -34,6 +34,7 @@ async def recovery_host(monkeypatch):
 
 class _ScriptedRun(FakeRunBase):
     def __init__(self, *events, stall=False, preparation_error=None):
+        super().__init__()
         self.events = events
         self.stall = stall
         self.stopped = asyncio.Event()
@@ -42,22 +43,24 @@ class _ScriptedRun(FakeRunBase):
         self.started = asyncio.Event()
         self.preparation_error = preparation_error
 
-    async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
+    async def _prepare_scripted_input(self, prompt, resume_id):
         self.prompt = prompt
         self.resume_id = resume_id
-        self.started.set()
         if self.preparation_error:
             from server.harness.events import HarnessPreparationError
             raise HarnessPreparationError(self.preparation_error)
 
-    async def stream(self):
+    async def _start(self, *args, **kwargs):
+        self.started.set()
+
+    async def _stream(self):
         await self.started.wait()
         for event in self.events:
             yield event
         if self.stall:
             await self.stopped.wait()
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stopped.set()
 
     async def interrupt(self):
@@ -73,7 +76,7 @@ async def _recover_stale_history(recovery_host, monkeypatch, transcript):
     await manager.db.update_session_field(session.id, claude_session_id="missing-thread")
     fresh = _ScriptedRun(HarnessEvent(type="result", session_id="recovered-thread"))
     runs = iter([_ScriptedRun(preparation_error="No conversation found with session ID: missing-thread"), fresh])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(runs)))
 
     notices = []
 
@@ -170,7 +173,7 @@ async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recover
         ),
     ]
     remaining = iter(runs)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(remaining))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(remaining)))
 
     live = []
 
@@ -224,7 +227,7 @@ async def test_preparation_retries_keep_spilled_input_and_rebuilt_history(recove
         _ScriptedRun(HarnessEvent(type="result", session_id="recovered-thread")),
     ]
     remaining = iter(runs)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(remaining))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(remaining)))
     receipt = await manager.start_message(session.id, prompt)
     completion = await asyncio.wait_for(receipt.wait(), 5)
     assert completion.outcome.status == "success"
@@ -252,7 +255,7 @@ async def test_terminal_recovery_is_captured_before_recording_await(recovery_hos
         _ScriptedRun(HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")),
         _ScriptedRun(HarnessEvent(type="result", session_id="recovered-thread")),
     ])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(runs)))
     writing = asyncio.Event()
     release = asyncio.Event()
     record_terminal = manager.db.record_terminal

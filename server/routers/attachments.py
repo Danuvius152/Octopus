@@ -36,13 +36,13 @@ from ..attachments import (
     MAX_FILE_BYTES,
     AttachmentError,
     get_path,
-    save_upload,
 )
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr, ViewerUser
 from ..models import AttachmentMetadata
 from ..sessions import SessionManager
 from ..sessions.base import Session
+from ..sessions.runtime_types import SessionAdmissionClosed
 
 logger = logging.getLogger(__name__)
 
@@ -156,15 +156,19 @@ async def upload_attachment(
             raise HTTPException(413, f"attachment exceeds {MAX_FILE_BYTES} bytes")
 
         try:
-            record = save_upload(
-                session_id=session_id,
+            record = await session_manager.save_attachment_upload(
+                session,
                 filename=file.filename or "file",
                 content=content,
                 declared_mime=file.content_type,
                 user_id=owner_id,
             )
+        except SessionAdmissionClosed as error:
+            raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
         except AttachmentError as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+        if record is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Session {session_id} not found")
 
         return AttachmentMetadata(id=record.id, filename=record.filename, size=record.size, mime_type=record.mime_type)
     finally:

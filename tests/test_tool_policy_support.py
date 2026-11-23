@@ -48,8 +48,7 @@ async def test_backend_metadata_exposes_policy_support(bindings):
     assert response.status_code == 200
     policies = response.json()["tool_policy"]
     assert policies["claude-code"] == {"allow": False, "deny": True}
-    if "codex" in policies:
-        assert policies["codex"] == {"allow": False, "deny": False}
+    assert policies["codex"] == {"allow": False, "deny": False}
 
 
 async def test_backend_switch_preserves_supported_deny_until_user_clears_it(bindings):

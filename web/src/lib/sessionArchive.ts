@@ -1,31 +1,9 @@
 import type { SessionArchiveResult } from "../api";
 import { accountFetch } from "./accountFetch";
+import { RequestDeadline } from "./requestDeadline";
 import type { SessionInfo } from "../stores/sessionStore";
 
-/** One phase of the original archive observation. Waiting may end without
- * cancelling the SessionList transport shared with other consumers. */
-export class ArchiveDeadline {
-  private controller = new AbortController();
-  private until = Date.now() + 30_000;
-  private timer = setTimeout(() => this.finish(), 30_000);
-  get signal(): AbortSignal { return this.controller.signal; }
-  get active(): boolean { return !this.signal.aborted && Date.now() < this.until; }
-  finish(): void { clearTimeout(this.timer); this.controller.abort(); }
-  wait<T>(work: Promise<T>): Promise<T | null> {
-    return new Promise((resolve, reject) => {
-      const abort = () => resolve(null);
-      if (!this.active) { work.catch(() => {}); resolve(null); return; }
-      this.signal.addEventListener("abort", abort, { once: true });
-      work.then((result) => {
-        this.signal.removeEventListener("abort", abort);
-        resolve(this.active ? result : null);
-      }, (error: unknown) => {
-        this.signal.removeEventListener("abort", abort);
-        reject(error);
-      });
-    });
-  }
-}
+export { RequestDeadline as ArchiveDeadline };
 
 export type ArchiveReply =
   | { state: "archived"; successor: SessionInfo | null; result: SessionArchiveResult | null }
@@ -34,7 +12,7 @@ export type ArchiveReply =
 
 /** Observe exactly one POST, including every response body, within one budget.
  * The server's shielded archive continues when this local observer expires. */
-export async function postArchive(id: string, token: string, replace: boolean, deadline: ArchiveDeadline): Promise<ArchiveReply> {
+export async function postArchive(id: string, token: string, replace: boolean, deadline: RequestDeadline): Promise<ArchiveReply> {
   try {
     if (!deadline.active) return { state: "unknown" };
     return await deadline.wait((async (): Promise<ArchiveReply> => {

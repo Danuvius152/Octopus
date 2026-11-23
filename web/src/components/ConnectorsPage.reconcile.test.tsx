@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../test-support/backendCatalog";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ConnectorInstallationInfo } from "../api";
@@ -19,7 +20,7 @@ const deferred = <T = Response,>() => {
 };
 function otherRequest(path: string): Response {
   if (path === "/api/connectors/catalog") return Response.json([{ kind: "fake", display_name: "Fake", available: true }]);
-  if (path === "/api/backends") return Response.json({ available: ["codex"] });
+  if (path === "/api/backends") return Response.json(backendCatalogFixture(["codex"]));
   return Response.json([]);
 }
 function page() {

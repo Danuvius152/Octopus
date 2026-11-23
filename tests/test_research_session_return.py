@@ -19,7 +19,7 @@ from server.sessions.submission import (
     SubmissionReceipt,
 )
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 
 @pytest.fixture
@@ -41,25 +41,26 @@ async def returning_research(monkeypatch, tmp_path):
 
     class Run(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.ready = asyncio.Event()
 
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             self.prompt = prompt
             self.ready.set()
 
-        async def stream(self):
+        async def _stream(self):
             await self.ready.wait()
             processed.put_nowait(self.prompt)
             yield HarnessEvent(type="result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
             pass
 
     monkeypatch.setattr(research_module, "run_research", pipeline)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     try:
         yield database, manager, research, started, release, processed
     finally:

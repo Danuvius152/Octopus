@@ -88,7 +88,8 @@ class ConfigurationMixin(SessionManagerBase):
         for field in ("reasoning_effort", "service_tier"):
             if field in fields:
                 updates[field] = fields[field]
-        if {"model", "reasoning_effort", "service_tier", "credential_id"} & updates.keys():
+        state = session.context_state
+        if updates:
             agent = await self.db.get_agent(session.agent_id, user_id) if session.agent_id else None
             candidate = replace(session, **updates)
             effective = model_settings.effective_settings(candidate, agent)
@@ -102,19 +103,19 @@ class ConfigurationMixin(SessionManagerBase):
                     raise SessionConfigurationError(error.describe(
                         session.backend, inherited=not bool(getattr(candidate, error.field)),
                     )) from error
+            target = context_target(candidate, agent)
+            state = align_context(state, target)
+            if state is None and context_target(session, agent) != target:
+                state = invalidate_context(None, target, "configuration_changed", binding=True)
         if fields.get("name") is not None:
             name = str(fields["name"]).strip()
             if not name:
                 raise SessionConfigurationError("Session name cannot be empty")
             updates["name"] = name
         if updates:
-            agent = await self._load_agent(session)
-            target = context_target(replace(session, **updates), agent)
-            state = align_context(session.context_state, target)
-            if state is None and context_target(session, agent) != target:
-                state = invalidate_context(None, target, "configuration_changed", binding=True)
             owner = self._require_session_writer(session)
-            updates["context_state"] = state.model_dump_json() if state else None
+            if state != session.context_state:
+                updates["context_state"] = state.model_dump_json() if state else None
             await self.db.update_session_field(session_id, **updates)
             for key, value in updates.items():
                 if key != "context_state":

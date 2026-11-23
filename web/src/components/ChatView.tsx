@@ -83,6 +83,10 @@ function SessionContextMeter({ sessionId, archived }: { sessionId: string; archi
 
 function ArchivedSuccessor({ sessionId }: { sessionId: string }) {
   const successorId = useSessionStore((state) => state.sessionSuccessors[sessionId]);
+  const successorKnown = useSessionStore((state) => {
+    const id = state.sessionSuccessors[sessionId];
+    return !!id && (state.sessions.some((row) => row.id === id) || state.archivedSessions.some((row) => row.id === id));
+  });
   const pending = useRef(false);
   const stop = useRef<() => void>(() => {});
   const [busy, setBusy] = useState(false);
@@ -116,7 +120,9 @@ function ArchivedSuccessor({ sessionId }: { sessionId: string }) {
   };
   if (!successorId) return null;
   return <div className="shrink-0">
-    <Button size="sm" variant="outline" disabled={busy} onClick={() => void open()}>Open successor</Button>
+    <Button size="sm" variant="outline" disabled={busy} onClick={() => void open()}>
+      {successorKnown ? "Open successor" : "Check successor"}
+    </Button>
     {error && <p role="alert" className="mt-1 text-destructive">{error}</p>}
   </div>;
 }
@@ -921,13 +927,13 @@ export function ChatView({
         const fresh = reply.successor;
         if (reply.result) {
           rememberPartial(reply.result);
-          if (ownsArchiveEffect() && sessionList.archive(activeSessionId, observation, undefined, reply.result.new_session_id)) cancelOriginalFork();
+          if (ownsArchiveEffect() && sessionList.archive(activeSessionId, observation, reply.result.new_session_id)) cancelOriginalFork();
           if (canCheckSuccessor()) await confirm(false);
           return;
         }
         knownSuccessor = fresh?.id ?? null;
         if (fresh === null) {
-          if (ownsArchiveEffect() && sessionList.archive(activeSessionId, observation, undefined, null)) cancelOriginalFork();
+          if (ownsArchiveEffect() && sessionList.archive(activeSessionId, observation, null)) cancelOriginalFork();
           return;
         }
         // The `session_archived` WS broadcast also updates the

@@ -77,13 +77,13 @@ async def test_restoring_current_read_input_keeps_its_ceiling_and_original_ident
     observed = []
 
     class Run(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             observed.append(session._run.knowledge_context)
 
-        async def stream(self):
+        async def _stream(self):
             yield HarnessEvent(type="result", content="Read-only offline answer", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
@@ -173,15 +173,15 @@ async def test_concurrent_recovery_of_read_only_input_has_one_new_owner(client, 
     entered, release = asyncio.Event(), asyncio.Event()
 
     class Run(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             contexts.append(session._run.knowledge_context)
             entered.set()
 
-        async def stream(self):
+        async def _stream(self):
             await release.wait()
             yield HarnessEvent(type="result", content="One offline answer", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             release.set()
 
         async def interrupt(self):
@@ -213,13 +213,13 @@ async def test_new_http_off_input_is_refused_without_admission_or_execution(clie
     launches = []
 
     class Run(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             pass
 
-        async def stream(self):
+        async def _stream(self):
             yield HarnessEvent(type="result", content="Offline controlled result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
@@ -227,7 +227,7 @@ async def test_new_http_off_input_is_refused_without_admission_or_execution(clie
 
     def create(config):
         launches.append(config)
-        return Run()
+        return Run(backend="codex", config=config)
 
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     before = manager.dispatch_snapshot(session.id)

@@ -12,7 +12,7 @@ beforeEach(() => {
   useSessionStore.getState().setToken("");
   useSessionStore.setState({ activeSessionId: "foreground", mainView: "chat",
     sessions: [{ id: "foreground", name: "Foreground", status: "running", backend: "codex" } as SessionInfo],
-    archivedSessions: [], agents: [], credentials: [], backendModels: {},
+    archivedSessions: [], agents: [], credentials: [],
     messages: { foreground: [{ role: "assistant", type: "text", content: "Saved foreground answer", seq: 0 }] },
     subagents: {}, streamingText: {}, streamingItems: {}, dispatchStates: {}, pendingQuestions: {},
     messageWindows: {},

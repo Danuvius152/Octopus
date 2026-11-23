@@ -9,6 +9,23 @@ from server.session_manager import SessionManager
 from tests.accounts import create_account
 
 
+async def test_startup_cleans_incomplete_fork_with_bad_agent_tools(tmp_path):
+    db = Database(str(tmp_path / "fork.db"))
+    await db.initialize()
+    try:
+        owner, _ = await create_account(db, extra_roots=[tmp_path])
+        agent = await db.get_system_agent(owner["id"])
+        await db.save_session("fork", "Interrupted fork", str(tmp_path), "2026-10-11",
+                              agent_id=agent["id"], user_id=owner["id"], origin="fork")
+        await db.update_session_field("fork", fork_status="initializing")
+        async with db.transaction(write=True) as tx:
+            await tx.execute("UPDATE agents SET mcp_servers = 'null' WHERE id = ?", (agent["id"],))
+        await SessionManager().initialize(db)
+        assert await db.get_session_binding("fork") is None
+    finally:
+        await db.close()
+
+
 @pytest.mark.asyncio
 async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_open(tmp_path):
     path = str(tmp_path / "sessions.db")

@@ -8,8 +8,9 @@ changed.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -24,6 +25,28 @@ if TYPE_CHECKING:
 
 class ScheduleChangedError(ValueError):
     """The definition changed after this edit was prepared."""
+
+
+class ScheduleOriginChanged(ScheduleChangedError):
+    """A one-shot must prepare its target again under its original registration."""
+
+
+@dataclass(frozen=True)
+class OneShotFire:
+    """The prepared definition and its synchronous pre-commit admission check."""
+
+    definition: dict[str, Any]
+    validate_admission: Callable[[], None]
+
+
+def stored_run_at(run_at: str) -> datetime:
+    """Legacy timestamps without an offset represent UTC in the runner."""
+    when = datetime.fromisoformat(run_at)
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when.astimezone(UTC)
+
+
+def schedule_delivery_id(schedule_id: str, run_at: str) -> str:
+    return f"schedule:{schedule_id}:{run_at}"
 
 
 class SchedulesMixin(DatabaseBase):
@@ -180,8 +203,8 @@ class SchedulesMixin(DatabaseBase):
         """Move every schedule anchored to `old_session_id` onto
         `new_session_id` (used when a session is archived and replaced — its
         schedules should keep appending into the live successor thread). Returns
-        the affected schedule rows (post-update) so the caller can re-register
-        their jobs. No-op returning [] when nothing points at the old session."""
+        the affected schedule rows (post-update) and leaves registrations alone.
+        No-op returning [] when nothing points at the old session."""
         async with self.transaction(write=True) as tx:
             cursor = await tx.execute(
                 "SELECT id FROM schedules WHERE origin_session_id = ?",

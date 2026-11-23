@@ -45,7 +45,7 @@ import json
 import logging
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -59,9 +59,11 @@ if TYPE_CHECKING:
     from .session_manager import SessionManager
     from .sessions.base import PendingQuestion, Session
 
+from .agent_configuration import AgentConfigurationError
 from .aio import complete_cleanup
 from .bg_tasks import bg_task_manager
 from .db.applications import ApplicationDeleting
+from .db.base import DatabaseBusy
 from .db.sessions import DelegationWorkPending, TicketReviewAdmissionClosed
 from .diagnostics import exception_diagnostic, safe_diagnostic
 from .knowledge import (
@@ -96,6 +98,8 @@ from .sessions.submission import (
     ReturnTarget,
     ReturnUnconfirmed,
     SubmissionReceipt,
+    observed_input_receipt,
+    receipt_for_input,
 )
 from .submission_models import SubmissionConflict
 
@@ -219,13 +223,27 @@ class _CommandRecording:
     checks: list[Callable[[], bool]] = field(default_factory=list)
     parent_session_id: str | None = None
     parent_work_id: str | None = None
+    child_session_id: str | None = None
     release_notice: asyncio.Future[None] | None = None
+    local_settled: asyncio.Future[None] | None = None
+    recover_admission: Callable[[], Awaitable[None]] | None = None
+    admission_recovery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    completion_input: tuple[DelegationRunState, SubmissionReceipt] | None = None
     delivery_failed: bool = False
     return_sessions: set[str] = field(default_factory=set)
 
     def finish_admission(self) -> None:
         """The original round now owns the remaining terminal receipt."""
-        self.parent_session_id = self.parent_work_id = None
+        self.parent_session_id = self.parent_work_id = self.child_session_id = None
+        self.finish_local()
+
+    def finish_local(self) -> None:
+        if self.local_settled is not None and not self.local_settled.done():
+            self.local_settled.set_result(None)
+
+    def release_lifecycle(self) -> None:
+        if self.release_notice is not None and not self.release_notice.done():
+            self.release_notice.set_result(None)
 
 
 class _RoundPublication:
@@ -242,6 +260,13 @@ class _RoundPublication:
         # Captured round history can still hand off any in-flight sender.
         if (source := self._active()) is not None:
             source.release()
+
+
+@dataclass(frozen=True)
+class _CompletionHandoff:
+    round: DelegationRunState
+    receipt: SubmissionReceipt
+    callback: Callable[[asyncio.Future[RequestCompletion]], None]
 
 
 @dataclass
@@ -345,7 +370,7 @@ class DelegationManager:
         self._sealed_question_parents: set[str] = set()
         self._publications = WorkPublications()
         self._closed_parents: set[str] = set()
-        self._completion_handoffs: dict[asyncio.Future[Any], tuple[str, Callable[[asyncio.Future[Any]], None]]] = {}
+        self._completion_handoffs: dict[asyncio.Future[RequestCompletion], _CompletionHandoff] = {}
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
         self._closing = False
@@ -394,6 +419,7 @@ class DelegationManager:
     def _start_command(
         self, operation: Coroutine[Any, Any, _T], *, parent_session_id: str | None = None,
         parent_work_id: str | None = None,
+        child_session_id: str | None = None,
         return_session_id: str | None = None,
     ) -> asyncio.Task[_T]:
         """Register before scheduling so drain sees completion-created commands."""
@@ -402,9 +428,11 @@ class DelegationManager:
             raise DelegationError("Delegation admission is closed", status_code=503)
         assert self.session_mgr is not None
         task = asyncio.create_task(operation, name="delegation-command")
-        recording = _CommandRecording(parent_session_id=parent_session_id, parent_work_id=parent_work_id)
+        recording = _CommandRecording(parent_session_id=parent_session_id, parent_work_id=parent_work_id,
+                                      child_session_id=child_session_id)
         if parent_session_id is not None:
             recording.release_notice = asyncio.get_running_loop().create_future()
+            recording.local_settled = asyncio.get_running_loop().create_future()
         if return_session_id is not None:
             recording.return_sessions.add(return_session_id)
         self._commands[task] = recording
@@ -413,7 +441,8 @@ class DelegationManager:
         def finished(done: asyncio.Task[Any]) -> None:
             # A failed/cancelled cleanup still owns its resources. Ordinary
             # domain refusals have completed their confirmed local rollback.
-            if done not in self._commands or not all(check() for check in recording.checks):
+            if (done not in self._commands or recording.recover_admission is not None
+                    or not all(check() for check in recording.checks)):
                 return
             if recording.delivery_failed or (not done.cancelled() and (
                 done.exception() is None or isinstance(done.exception(), DelegationError)
@@ -438,10 +467,11 @@ class DelegationManager:
             self._commands[task].delivery_failed = True
 
     async def _command(self, operation: Coroutine[Any, Any, _T], *, parent_session_id: str | None = None,
-                       parent_work_id: str | None = None, return_session_id: str | None = None) -> _T:
+                       parent_work_id: str | None = None, child_session_id: str | None = None,
+                       return_session_id: str | None = None) -> _T:
         """Own the complete operation; an HTTP waiter only owns its wait."""
         task = self._start_command(operation, parent_session_id=parent_session_id, parent_work_id=parent_work_id,
-                                   return_session_id=return_session_id)
+                                   child_session_id=child_session_id, return_session_id=return_session_id)
         await asyncio.wait({task})
         return task.result()
 
@@ -451,15 +481,25 @@ class DelegationManager:
         if not receipt.accepted or rec is None or rec.work_id != work_id:
             return
 
-        def completed(future: asyncio.Future[Any]) -> None:
-            if self._completion_handoffs.pop(future, None) is None:
-                return
-            self._start_command(self._complete_request(rec, receipt), return_session_id=rec.parent_session_id)
+        def completed(future: asyncio.Future[RequestCompletion]) -> None:
+            self._take_completion(future)
 
         if receipt._completion in self._completion_handoffs:
             return
-        self._completion_handoffs[receipt._completion] = (rec.parent_session_id, completed)
+        self._completion_handoffs[receipt._completion] = _CompletionHandoff(rec, receipt, completed)
         receipt._completion.add_done_callback(completed)
+
+    def _take_completion(self, future: asyncio.Future[RequestCompletion], durable: SubmissionReceipt | None = None) -> None:
+        if (handoff := self._completion_handoffs.pop(future, None)) is None:
+            return
+        future.remove_done_callback(handoff.callback)
+        self._start_completion(handoff.round, durable or handoff.receipt)
+
+    def _start_completion(self, rec: DelegationRunState, receipt: SubmissionReceipt) -> asyncio.Task[None]:
+        task = self._start_command(self._complete_request(rec, receipt),
+                                   return_session_id=rec.parent_session_id)
+        self._commands[task].completion_input = (rec, receipt)
+        return task
 
     async def _complete_request(self, rec: DelegationRunState, receipt: SubmissionReceipt) -> None:
         """Classify one exact receipt before any asynchronous reply-text read."""
@@ -468,7 +508,72 @@ class DelegationManager:
             raise RuntimeError("Delegation completion changed the original input identity")
         if await self._save_round(rec, running_only=True, completion=completion) is not None:
             if rec.state != "running":
-                await self._inject_terminal(rec, request_id=completion.request_id)
+                self._start_terminal_return(rec)
+
+    async def _observe_child_input(self, rec: DelegationRunState, child: Session, request_id: str) -> SubmissionReceipt | None:
+        """Absence proves refusal only after the captured Owner and row are checked."""
+        assert self.db is not None and self.session_mgr is not None
+        self.db.health.require_healthy()
+        await self.session_mgr._join_session_owner_commands(child)
+        row = await self.db.get_submission_for_request(child.id, request_id)
+        if row is None:
+            binding = await self.db.get_session_binding(child.id)
+            current = self.session_mgr.get_session(child.id)
+            if binding is None or binding["agent_id"] != child.agent_id or binding["user_id"] != child.user_id:
+                raise SessionOwnerUnavailable("The original child submission can no longer be confirmed")
+            if current is not child and not (current is None and binding["archived"]):
+                raise SessionOwnerUnavailable("The original child submission can no longer be confirmed")
+            return None
+        payload = row["payload"] or {}
+        if payload.get("source") != "delegation" or payload.get("work_id") != rec.work_id:
+            raise RuntimeError("Delegation input does not match the original work")
+        receipt = observed_input_receipt(row, child)
+        return receipt if receipt.accepted else None
+
+    async def _submit_child(
+        self, rec: DelegationRunState, child: Session, prompt: str,
+        *, recover: Callable[[SubmissionReceipt | None], Awaitable[None]],
+    ) -> SubmissionReceipt:
+        """After a lost acknowledgment, observe the one original child submission."""
+        assert self.session_mgr is not None and rec.owned_context is not None
+        request_id = uuid.uuid4().hex
+        command = asyncio.current_task()
+        assert command is not None
+        recording = self._commands[command]
+        try:
+            receipt = await self.session_mgr.start_message(
+                rec.delegation_id, prompt, source="delegation", work_id=rec.work_id,
+                request_id=request_id, knowledge_context=rec.owned_context.execution,
+            )
+        except (AgentConfigurationError, SessionAdmissionClosed, SessionAdmissionBusy, SessionMailboxFull,
+                AdmissionIntegrityError, SubmissionConflict, ServiceUnavailable):
+            raise
+        except Exception as error:
+            async def observe_original() -> None:
+                observed = await self._observe_child_input(rec, child, request_id)
+                await self._finish_admission_cleanup(recording, lambda: recover(observed))
+
+            recording.recover_admission = observe_original
+            observed_receipt = await self._observe_child_input(rec, child, request_id)
+            if observed_receipt is None:
+                raise SessionAdmissionClosed("The original child input was not admitted") from error
+            recording.recover_admission = None
+            receipt = observed_receipt
+        if (not receipt.accepted and receipt.completion is not None and receipt.completion.state == "withdrawn"
+                and self.session_mgr.session_deleting(child.id)):
+            raise SessionAdmissionClosed("Child session is being deleted")
+        return receipt
+
+    @staticmethod
+    async def _finish_admission_cleanup(recording: _CommandRecording, cleanup: Callable[[], Awaitable[None]]) -> None:
+        recording.recover_admission = cleanup
+        try:
+            await cleanup()
+        except DelegationError:
+            # A checked relationship conflict ends this writer's authority.
+            recording.recover_admission = None
+            raise
+        recording.recover_admission = None
 
     async def _missing_relationship(
         self, rec: DelegationRunState, user_id: str | None,
@@ -493,7 +598,7 @@ class DelegationManager:
                 or child.agent_id != rec.target_agent_id):
             rec._close_round_recording()
             return DelegationError("Child delegation relationship changed; start a fresh delegation", status_code=409)
-        target = await self.db.get_agent(rec.target_agent_id)
+        target = await self.db.get_agent_identity(rec.target_agent_id)
         if target is None or target["user_id"] != user_id:
             rec._close_round_recording()
             return DelegationError("Target agent is gone", status_code=404)
@@ -538,12 +643,17 @@ class DelegationManager:
             raise DelegationError("Delegation state changed concurrently", status_code=409)
         return snapshot
 
-    async def _commit_admission(self, previous: DelegationRunState, proposed: DelegationRunState,
-                                parent_session: Session, scope: McpScope | None) -> str:
-        """One parent-work ordering point for child responsibility and seal."""
+    def _require_child_admission(self, child_id: str, *, expected: Session | None = None) -> None:
         assert self.session_mgr is not None
-        if self.session_mgr.session_deleting(proposed.delegation_id):
+        if self.session_mgr.session_deleting(child_id):
             raise DelegationError("Child session is being deleted", status_code=409)
+        if expected is not None and self.session_mgr.get_session(child_id) is not expected:
+            raise DelegationError("Child session is gone; start a fresh delegation", status_code=409)
+
+    async def _commit_admission(self, previous: DelegationRunState, proposed: DelegationRunState,
+                                parent_session: Session, scope: McpScope | None, *, child: Session | None = None) -> str:
+        """One parent-work ordering point for child responsibility and seal."""
+        self._require_child_admission(proposed.delegation_id, expected=child)
         user_id = parent_session.user_id
         if proposed.review_ticket_id is not None:
             assert proposed.owned_context is not None
@@ -565,8 +675,7 @@ class DelegationManager:
             if (self._records.get(parent.delegation_id) is not parent or parent.state != "running"
                     or not work_is_open(parent.work_id)):
                 raise DelegationError("Original parent work is closed", status_code=409)
-            if self.session_mgr.session_deleting(proposed.delegation_id):
-                raise DelegationError("Child session is being deleted", status_code=409)
+            self._require_child_admission(proposed.delegation_id, expected=child)
             changed = replace(parent, _child_work_ids=parent._child_work_ids | {proposed.work_id})
             snapshot = await self._commit_round(previous, proposed, user_id, parent_change=(parent, changed))
             parent._child_work_ids = changed._child_work_ids
@@ -578,11 +687,12 @@ class DelegationManager:
         if parent is not None and parent.work_id == child.parent_work_id:
             if await self._save_round(parent, running_only=True, withdraw_child=child.work_id) is not None:
                 if parent.state == "completed":
-                    await self._inject_terminal(parent, request_id=parent._candidate_request_id)
+                    self._start_terminal_return(parent)
 
     async def _save_round(
         self, rec: DelegationRunState, *, running_only: bool = False,
-        completion: RequestCompletion | None = None, confirm_selected_write: bool = False, **changes: Any,
+        completion: RequestCompletion | None = None, confirm_selected_write: bool = False,
+        terminal_delivery: bool = False, **changes: Any,
     ) -> _SavedRound | None:
         """Publish a change only after its complete CAS has committed."""
         assert self.db is not None and self.session_mgr is not None
@@ -594,6 +704,8 @@ class DelegationManager:
                 # pre-admission refusal. That command owns writer retirement.
                 return None
             if running_only and rec.state != "running":
+                return None
+            if terminal_delivery and rec._round_recording_closed:
                 return None
             withdrawn = changes.pop("withdraw_child", None)
             if withdrawn is not None:
@@ -639,9 +751,9 @@ class DelegationManager:
             self._retire_delivery_failures()
             # Future callbacks run on the next loop turn. A completed receipt
             # already owns its handoff even when that callback has not run.
-            for future, (parent_session_id, completed) in tuple(self._completion_handoffs.items()):
-                if future.done() and return_session_id in {None, parent_session_id}:
-                    completed(future)
+            for future, completion in tuple(self._completion_handoffs.items()):
+                if future.done() and return_session_id in {None, completion.round.parent_session_id}:
+                    self._take_completion(future)
             commands = {task: recording for task, recording in self._commands.items()
                         if return_session_id is None or return_session_id in recording.return_sessions}
             observations = self._question_parent_handoffs(return_session_id)
@@ -668,6 +780,8 @@ class DelegationManager:
                 recording = self._commands.get(task)
                 if recording is None:
                     continue  # Its captured diagnostic moved to an owned reentry.
+                if recording.recover_admission is not None:
+                    raise RuntimeError("Delegation command cleanup failed") from task.exception()
                 if not all(check() for check in recording.checks):
                     raise RuntimeError("Delegation command cleanup failed") from (
                         task.exception() if not task.cancelled() else None
@@ -748,7 +862,10 @@ class DelegationManager:
         parent_work_closed = rec._parent_work_closed()
         if parent_work_closed:
             rec._publication.release()
-        if parent_work_closed or rec.parent_session_id in self._closed_parents:
+        deleting_child = self.session_mgr.session_deleting(rec.delegation_id)
+        if deleting_child:
+            rec._publication.release()
+        if deleting_child or parent_work_closed or rec.parent_session_id in self._closed_parents:
             close_work(rec.work_id)
         self._records[rec.delegation_id] = rec
         self._rounds[rec.work_id] = rec
@@ -848,7 +965,7 @@ class DelegationManager:
         # message and in the injection prefix). A missing parent agent
         # falls back to a generic placeholder rather than 500ing.
         parent_agent = (
-            await self.db.get_agent(parent.agent_id, parent.user_id)
+            await self.db.get_agent_identity(parent.agent_id, parent.user_id)
             if parent.agent_id
             else None
         )
@@ -862,22 +979,29 @@ class DelegationManager:
             files=files or [],
             working_dir=parent.working_dir,
         )
-        child_backend = (target.get("backend") or "claude-code")
         child_name = f"{target['name']} ← {parent_name}"
-        child = await self.session_mgr.create_session(
-            agent_id=target["id"],
-            name=child_name,
-            working_dir=parent.working_dir,
-            origin="delegation",
-            backend=child_backend,
-            parent_session_id=parent.id,
-            delegation_request=request,
-        )
+        try:
+            child = await self.session_mgr.create_session(
+                agent_id=target["id"],
+                name=child_name,
+                working_dir=parent.working_dir,
+                origin="delegation",
+                parent_session_id=parent.id,
+                delegation_request=request,
+            )
+        except (AgentConfigurationError, SessionAdmissionClosed) as exc:
+            raise DelegationError(str(exc), status_code=409) from exc
+        admission.child_session_id = child.id
+
+        async def archive_empty_child() -> None:
+            assert self.session_mgr is not None
+            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child,
+                                                                release_notice=admission.release_notice)
+
         try:
             self._require_caller(scope, parent_session_id, parent_work_id)
         except DelegationError:
-            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child,
-                                                                release_notice=admission.release_notice)
+            await self._finish_admission_cleanup(admission, archive_empty_child)
             raise
 
         work_id = uuid.uuid4().hex
@@ -907,12 +1031,21 @@ class DelegationManager:
             if rec._terminal_disposition != "unknown":
                 await self._withdraw_child_responsibility(rec)
 
+        async def withdraw_unadmitted_setup() -> None:
+            assert self.session_mgr is not None
+            await self._withdraw_child_responsibility(rec)
+            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child,
+                                                                release_notice=admission.release_notice)
+
         async def abandon_setup(
             error: str = "Delegation setup ended before child request admission",
             *, return_terminal: bool = False,
         ) -> None:
             """Finish any original return before withdrawing the exact parent obligation."""
             assert self.session_mgr is not None
+            if not return_terminal and rec.state == "cancelled" and rec._terminal_disposition == "stopped":
+                await withdraw_unadmitted_setup()
+                return
             if rec.state != "running" or self.session_mgr.work_has_resources(rec.work_id):
                 return
             finished_at = datetime.now(UTC).isoformat()
@@ -920,6 +1053,7 @@ class DelegationManager:
                 saved = await self._save_round(
                     rec, running_only=True, state="cancelled",
                     error=error, finished_at=finished_at,
+                    _terminal_disposition=None if return_terminal else "stopped",
                 )
             except DelegationError:
                 # Only the acknowledged absence of the original relationship
@@ -946,7 +1080,8 @@ class DelegationManager:
             if not observe_return:
                 # Proven refusal has no return to admit. Release the exact
                 # parent responsibility before archival can fail independently.
-                await self._withdraw_child_responsibility(rec)
+                await withdraw_unadmitted_setup()
+                return
             try:
                 await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child,
                                                                     release_notice=admission.release_notice)
@@ -955,8 +1090,6 @@ class DelegationManager:
             except Exception as archive_failure:
                 # The original archive task still reports its failure. The
                 # committed child terminal still belongs to the parent.
-                if not observe_return:
-                    raise
                 try:
                     await settle_initial_terminal_return()
                 except ServiceUnavailable:
@@ -972,47 +1105,55 @@ class DelegationManager:
                     assert task is not None
                     self._commands[task].delivery_failed = False
                 raise
-            if observe_return:
-                admission.finish_admission()
-                await settle_initial_terminal_return()
+            admission.finish_admission()
+            await settle_initial_terminal_return()
 
         # Commit before publishing, then register before child admission:
         # a fast child can synchronously broadcast its complete result there.
         try:
             async with rec._save_lock:
-                rec._persisted_state = await self._commit_admission(rec, rec, parent, scope)
+                rec._persisted_state = await self._commit_admission(rec, rec, parent, scope, child=child)
                 self._register_round(rec)
-        except DelegationError:
+        except (DelegationError, DatabaseBusy) as error:
             # A confirmed refusal owns no admitted work. Retire the empty
             # conversation allocated before waiting for the parent's seal.
-            await self.session_mgr.auto_archive_scheduled_session(child.id, expected_session=child,
-                                                                release_notice=admission.release_notice)
+            await self._finish_admission_cleanup(admission, archive_empty_child)
+            if isinstance(error, DatabaseBusy):
+                raise DelegationError(str(error), status_code=503) from error
             raise
         try:
+            self._require_child_admission(child.id, expected=child)
             if self.session_mgr.get_session(parent.id) is not parent:
                 raise DelegationError("Parent session is no longer live", status_code=404)
             self._require_caller(scope, parent_session_id, parent_work_id)
         except DelegationError:
-            await abandon_setup()
+            await self._finish_admission_cleanup(admission, abandon_setup)
             raise
 
+        async def recover_initial_input(receipt: SubmissionReceipt | None) -> None:
+            if receipt is None:
+                await abandon_setup()
+            else:
+                self._watch_completion(child.id, rec.work_id, receipt)
+
         try:
-            receipt = await self.session_mgr.start_message(
-                child.id, composed, source="delegation", work_id=rec.work_id,
-                knowledge_context=owned_context.execution,
-            )
+            receipt = await self._submit_child(rec, child, composed, recover=recover_initial_input)
+        except AgentConfigurationError as exc:
+            message = str(exc)
+            await self._finish_admission_cleanup(admission, lambda: abandon_setup(message))
+            raise DelegationError(message, status_code=409) from exc
         except (SessionAdmissionClosed, SessionAdmissionBusy, SessionMailboxFull, AdmissionIntegrityError) as exc:
-            await abandon_setup()
+            await self._finish_admission_cleanup(admission, abandon_setup)
             raise DelegationError(str(exc), status_code=409) from exc
         if not receipt.accepted:
             await abandon_setup("Child request suppressed: admission is closed", return_terminal=True)
         else:
             self._watch_completion(child.id, rec.work_id, receipt)
             if self.session_mgr.get_session(child.id) is child and not self.session_mgr.session_deleting(child.id):
-                await self.session_mgr._broadcast({
+                await self.session_mgr._publish_lifecycle({
                     "type": "session_created", "session_id": child.id,
                     "session": session_info(child).model_dump(mode="json", exclude={"delegation_request"}),
-                }, user_id=child.user_id)
+                }, user_id=child.user_id, release_notice=admission.release_notice)
 
         return rec
 
@@ -1055,10 +1196,9 @@ class DelegationManager:
             if item._parent_work_closed():
                 item._publication.release()
         for recording in self._commands.values():
-            if recording.parent_work_id in owned or (deleted_parent is not None and recording.parent_session_id == deleted_parent):
-                notice = recording.release_notice
-                if notice is not None and not notice.done():
-                    notice.set_result(None)
+            if recording.parent_work_id in owned or (deleted_parent is not None and
+                    deleted_parent in (recording.parent_session_id, recording.child_session_id)):
+                recording.release_lifecycle()
         return branch
 
     async def _retire_rounds(
@@ -1076,6 +1216,9 @@ class DelegationManager:
                 break
             joined.update(pending)
             await self._join_admissions(pending)
+
+        if deleted_parent is not None:
+            await self._join_round_completions(owned)
 
         commands = []
         child_commands: dict[str, list[asyncio.Task[DelegationRunState]]] = {}
@@ -1112,6 +1255,7 @@ class DelegationManager:
             return previous
         task = self._start_command(self._cancel_delegation(rec, children, reason=reason),
                                    return_session_id=rec.parent_session_id)
+        self._commands[task].local_settled = asyncio.get_running_loop().create_future()
         rec._retirement_command = task
         if previous is not None:
             recording = self._commands.get(previous)
@@ -1151,8 +1295,17 @@ class DelegationManager:
                     child.result()
                 except DelegationError as exc:
                     refusal = refusal or exc
+        task = asyncio.current_task()
+        assert task is not None
+        recording = self._commands[task]
+        handoff_return = not rec._retiring_with_parent and self.session_mgr.session_deleting(rec.delegation_id)
         try:
-            await self._settle_retired_round_terminal(rec)
+            if handoff_return:
+                self._start_terminal_return(rec)
+            if refusal is None:
+                recording.finish_local()
+            if not handoff_return:
+                await self._settle_retired_round_terminal(rec)
         except DelegationError as exc:
             refusal = refusal or exc
         if refusal is not None:
@@ -1170,7 +1323,7 @@ class DelegationManager:
             if recording is not None and not retry_terminal:
                 original.result()
         if rec.state == "cancelled" or retry_terminal:
-            await self._inject_terminal(rec)
+            await self._inject_terminal(rec, request_id=rec._candidate_request_id)
 
     async def follow_up_delegation(
         self, *, parent_session_id: str, delegation_id: str, request: str,
@@ -1180,10 +1333,14 @@ class DelegationManager:
         """Continue a terminal round in its existing child conversation."""
         if self.session_mgr is None or self.db is None:
             raise DelegationError("DelegationManager not bound", status_code=500)
+        previous = self._records.get(delegation_id)
+        if previous is not None and previous.parent_session_id == parent_session_id:
+            self._require_child_admission(delegation_id)
         return await self._command(self._follow_up_delegation(
             parent_session_id=parent_session_id, delegation_id=delegation_id,
             request=request, scope=scope, purpose=purpose, caller_request_id=caller_request_id,
-        ), parent_session_id=parent_session_id, parent_work_id=scope.work_id if scope else None)
+        ), parent_session_id=parent_session_id, parent_work_id=scope.work_id if scope else None,
+            child_session_id=delegation_id)
 
     async def _follow_up_delegation(
         self, *, parent_session_id: str, delegation_id: str, request: str,
@@ -1234,7 +1391,10 @@ class DelegationManager:
                 _child_work_ids=set(), request=request, _candidate_request_id=None,
                 owned_context=owned_context, created_at=datetime.now(UTC).isoformat(),
             )
-            rec._persisted_state = await self._commit_admission(previous, rec, parent, scope)
+            try:
+                rec._persisted_state = await self._commit_admission(previous, rec, parent, scope)
+            except DatabaseBusy as error:
+                raise DelegationError(str(error), status_code=503) from error
             self._register_round(rec)
 
         child = self.session_mgr.get_session(delegation_id)
@@ -1242,45 +1402,59 @@ class DelegationManager:
         command = asyncio.current_task()
         assert command is not None
         recording = self._commands[command]
+        rolled_back = False
         restored_previous = False
         admission: Literal["not_submitted", "unknown", "refused", "accepted"] = "not_submitted"
 
         async def rollback_setup() -> None:
-            nonlocal restored_previous
+            nonlocal rolled_back, restored_previous
             assert self.session_mgr is not None
             # Only a confirmed business refusal before admission rolls back.
             # Neither a lost waiter nor an unknown storage error takes this path.
             if admission not in {"not_submitted", "refused"} or self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
                 return
-            async with rec._save_lock:
-                if self._records.get(delegation_id) is not rec or rec.state != "running":
-                    return
-                try:
-                    previous._persisted_state = await self._commit_round(rec, previous, parent.user_id)
-                except DelegationError:
-                    if not rec._relationship_deleted:
-                        raise
-                    # No submission was made (or its original receipt refused
-                    # it), and the original relation's deletion is confirmed.
-                    # There is no remaining row to restore. Unknown acceptance
-                    # and a replaced relation never enter this local exit.
-                    if self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
+            if not rolled_back:
+                async with rec._save_lock:
+                    if self._records.get(delegation_id) is not rec or rec.state != "running":
                         return
-                    self._records.pop(delegation_id, None)
-                    rec.state = "cancelled"
-                    rec.error = "Delegation relationship deleted before child admission"
-                    rec.finished_at = datetime.now(UTC).isoformat()
-                else:
-                    self._records[delegation_id] = previous
-                    restored_previous = True
-                close_work(rec.work_id)
-                self._rounds.pop(rec.work_id, None)
-                rec._close_round_recording()
-                rec._question_recording_closed = True
+                    try:
+                        previous._persisted_state = await self._commit_round(rec, previous, parent.user_id)
+                    except DelegationError:
+                        if not rec._relationship_deleted:
+                            raise
+                        # Confirmed missing relationship leaves no row to restore.
+                        if self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
+                            return
+                        self._records.pop(delegation_id, None)
+                        rec.state = "cancelled"
+                        rec.error = "Delegation relationship deleted before child admission"
+                        rec.finished_at = datetime.now(UTC).isoformat()
+                    else:
+                        self._records[delegation_id] = previous
+                        restored_previous = True
+                    close_work(rec.work_id)
+                    self._rounds.pop(rec.work_id, None)
+                    rec._close_round_recording()
+                    rec._question_recording_closed = True
+                    rolled_back = True
             await self._withdraw_child_responsibility(rec)
             if reopening and child is not None:
                 await self.session_mgr.auto_archive_scheduled_session(delegation_id, expected_session=child,
                                                                     release_notice=recording.release_notice)
+
+        def close_previous() -> None:
+            previous._close_round_recording()
+            previous._question_recording_closed = True
+            self._retire_delivery_failures()
+
+        async def recover_follow_up_input(receipt: SubmissionReceipt | None) -> None:
+            nonlocal admission
+            if receipt is None:
+                admission = "refused"
+                await rollback_setup()
+            else:
+                self._watch_completion(delegation_id, rec.work_id, receipt)
+                close_previous()
 
         try:
             if reopening:
@@ -1288,7 +1462,7 @@ class DelegationManager:
                     child = await self.session_mgr.unarchive_session(delegation_id, release_notice=recording.release_notice)
                 except ValueError as exc:
                     raise DelegationError(f"Child session {delegation_id!r} is gone and can't be reused; start a fresh delegation", status_code=409) from exc
-            parent_agent = await self.db.get_agent(parent.agent_id) if parent.agent_id else None
+            parent_agent = await self.db.get_agent_identity(parent.agent_id, parent.user_id) if parent.agent_id else None
             parent_name = (parent_agent or {}).get("name") or "another agent"
             composed = (
                 f"Agent **{parent_name}** has a follow-up for you in the "
@@ -1298,20 +1472,16 @@ class DelegationManager:
             )
             if self.session_mgr.get_session(parent_session_id) is not parent:
                 raise DelegationError("Parent session is gone", status_code=404)
-            if self.session_mgr.get_session(delegation_id) is not child:
-                raise DelegationError("Child session is gone; start a fresh delegation", status_code=409)
-            if self.session_mgr.session_deleting(delegation_id):
-                raise DelegationError("Child session is being deleted", status_code=409)
+            self._require_child_admission(delegation_id, expected=child)
             self._require_caller(scope, parent_session_id, parent_work_id)
             if rec.state != "running" or not work_is_open(rec.work_id) or self._records.get(delegation_id) is not rec:
                 return rec
             try:
                 admission = "unknown"
-                receipt = await self.session_mgr.start_message(
-                    delegation_id, composed, source="delegation", work_id=rec.work_id,
-                    knowledge_context=owned_context.execution,
-                )
-            except (SessionAdmissionClosed, SessionAdmissionBusy, SessionMailboxFull, AdmissionIntegrityError) as exc:
+                assert child is not None
+                receipt = await self._submit_child(rec, child, composed, recover=recover_follow_up_input)
+            except (SessionAdmissionClosed, SessionAdmissionBusy, SessionMailboxFull, AdmissionIntegrityError,
+                    AgentConfigurationError) as exc:
                 admission = "refused"
                 raise DelegationError(str(exc), status_code=409) from exc
             except ValueError as exc:
@@ -1327,16 +1497,17 @@ class DelegationManager:
                 await self._inject_terminal(rec)
             else:
                 self._watch_completion(delegation_id, rec.work_id, receipt)
-        except DelegationError:
-            await rollback_setup()
+        except (DelegationError, DatabaseBusy) as error:
+            if admission in {"not_submitted", "refused"}:
+                await self._finish_admission_cleanup(recording, rollback_setup)
+                if isinstance(error, DatabaseBusy):
+                    raise DelegationError(str(error), status_code=503) from error
             raise
         finally:
             # Another command may stage a new round while rollback awaits
             # archival. Only this command's confirmed rollback is decisive.
-            if not restored_previous:
-                previous._close_round_recording()
-                previous._question_recording_closed = True
-                self._retire_delivery_failures()
+            if not restored_previous and recording.recover_admission is None:
+                close_previous()
         return rec
 
     def list_delegations(
@@ -1369,6 +1540,10 @@ class DelegationManager:
     def close_session(self, session_id: str, *, permanent: bool = False) -> None:
         self._closed_parents.add(session_id)
         if permanent:
+            for rec in self._rounds.values():
+                if rec.delegation_id == session_id:
+                    close_work(rec.work_id)
+                    rec._publication.release()
             self._close_rounds([rec for rec in self._rounds.values() if rec.parent_session_id == session_id],
                                deleted_parent=session_id)
 
@@ -1380,14 +1555,29 @@ class DelegationManager:
         self.close_session(session_id)
         if permanent:
             await self._reopen_question_parent_observations(session_id)
+            await self._join_admissions({task for task, recording in self._commands.items()
+                                         if recording.child_session_id == session_id})
             await self._retire_rounds([], reason="Parent session deleted", deleted_parent=session_id)
             await self.confirm_recording(return_session_id=session_id)
+            await self._confirm_deleted_parent_returns(session_id)
+            await self._settle_deleted_child(session_id)
             return
         await self._join_admissions({task for task, recording in self._commands.items()
                                      if recording.parent_session_id == session_id})
         rounds = [rec for rec in self._rounds.values() if rec.parent_session_id == session_id]
         for rec in rounds:
             await self.cancel_delegation(rec.delegation_id, work_id=rec.work_id, reason="Application writer retired")
+
+    @asynccontextmanager
+    async def seal_session_deletion(self, session_id: str) -> AsyncIterator[None]:
+        """Keep disposition writes ordered against the original child's row deletion."""
+        async with self.seal_question_parent_observations(session_id):
+            rec = self._records.get(session_id)
+            if rec is None:
+                yield
+            else:
+                async with rec._save_lock:
+                    yield
 
     @asynccontextmanager
     async def seal_question_parent_observations(self, session_id: str) -> AsyncIterator[None]:
@@ -1430,16 +1620,113 @@ class DelegationManager:
         if self.db.health.cause is None and await self.db.get_session_binding(session_id) is not None:
             self._sealed_question_parents.discard(session_id)
 
+    @staticmethod
+    async def _join_local_command(task: asyncio.Task[Any], recording: _CommandRecording) -> bool:
+        """Wait for the original command or its transfer to the return owner."""
+        milestone = recording.local_settled
+        if milestone is None:
+            await asyncio.wait({task})
+        elif not (task.done() or milestone.done()):
+            await asyncio.wait({task, milestone}, return_when=asyncio.FIRST_COMPLETED)
+        return milestone is not None and milestone.done()
+
     async def _join_admissions(self, tasks: set[asyncio.Task[Any]]) -> None:
-        if tasks:
-            await asyncio.wait(tasks)
-        for task in tasks:
-            recording = self._commands.get(task)
-            if recording is not None and recording.parent_session_id is not None:
-                try:
-                    task.result()
-                except DelegationError:
-                    pass
+        async def join(task: asyncio.Task[Any], recording: _CommandRecording) -> None:
+            if await self._join_local_command(task, recording):
+                return
+            if recording.recover_admission is not None:
+                async with recording.admission_recovery_lock:
+                    if (recover := recording.recover_admission) is None:
+                        return  # Another deletion finished the same observation.
+                    await recover()
+                    recording.recover_admission = None
+                    self._forget_command(task)
+                return
+            try:
+                task.result()
+            except DelegationError:
+                pass
+
+        results = await asyncio.gather(*(join(task, recording) for task in tasks
+                                         if (recording := self._commands.get(task)) is not None), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+
+    async def _join_round_completions(self, work_ids: set[str]) -> None:
+        """Classify the original completions before selecting round retirement."""
+        assert self.db is not None
+        while True:
+            for future, handoff in tuple(self._completion_handoffs.items()):
+                if handoff.round.work_id in work_ids and future.done():
+                    self._take_completion(future)
+
+            completions = []
+            for task, recording in tuple(self._commands.items()):
+                if (original := recording.completion_input) is None or original[0].work_id not in work_ids:
+                    continue
+                if task.done() and not task.cancelled() and isinstance(task.exception(), DatabaseBusy):
+                    self.db.health.require_healthy()
+                    completions.append(self._start_completion(*original))
+                    self._forget_command(task)
+                else:
+                    completions.append(task)
+            if not completions:
+                return
+            # A sibling can register its own completion while this batch waits.
+            await asyncio.wait(completions)
+            for task in completions:
+                task.result()
+
+    async def _confirm_deleted_parent_returns(self, session_id: str) -> None:
+        """Observe unknown returns after their commands exit, before receipt deletion."""
+        assert self.session_mgr is not None
+        for rec in tuple(self._rounds.values()):
+            if rec.parent_session_id != session_id or rec._terminal_disposition is None:
+                continue
+            if rec._terminal_disposition == "unknown":
+                observed = await self.session_mgr.source_receipt(
+                    "delegation", f"agent-terminal:{rec.work_id}", session_id=session_id,
+                )
+                if observed is not None and observed[1].accepted:
+                    await self._acknowledge_terminal(rec, observed[1])
+            else:
+                # A previous deletion attempt may have observed the original
+                # return but failed to persist its acknowledged disposition.
+                await self._persist_terminal_delivery(rec)
+
+    async def _settle_deleted_child(self, session_id: str) -> None:
+        """Finish the child's writes and resources before unlinking its row."""
+        assert self.db is not None
+        for future, handoff in tuple(self._completion_handoffs.items()):
+            if handoff.round.delegation_id != session_id or future.done():
+                continue
+            row = await self.db.get_submission_for_request(session_id, handoff.receipt.request_id)
+            if future.done():
+                continue
+            if (row is None or not (row["receipt"] or {}).get("accepted") or (
+                row["terminal"] is None and row["execution_state"] not in {"withdrawn", "unknown"}
+            )):
+                raise RuntimeError("Original delegation completion could not be confirmed")
+            self._take_completion(future, receipt_for_input(row))
+
+        if (rec := self._records.get(session_id)) is not None and not rec._relationship_deleted:
+            binding = await self.db.get_session_binding(session_id)
+            saved = await self.db.load_delegation_state(session_id, parent_session_id=rec.parent_session_id,
+                                                        user_id=binding["user_id"] if binding else None)
+            if not rec._relationship_deleted and (saved is None or json.loads(saved)["work_id"] != rec.work_id):
+                raise RuntimeError("Deleted child work does not match the original saved round")
+
+        rounds = [rec for rec in self._rounds.values() if rec.delegation_id == session_id]
+        await self._join_round_completions({rec.work_id for rec in rounds})
+        for rec in rounds:
+            original_retirement = rec._retirement_command
+            task = self._start_round_retirement(rec, children=[], reason="Child session deleted", retry_completed=False)
+            retirement = self._commands.get(task)
+            if retirement is None or not await self._join_local_command(task, retirement):
+                task.result()
+            if task is original_retirement:
+                self._start_terminal_return(rec)
 
     @staticmethod
     def _capture_caller(parent: Session, scope: McpScope | None, request: str,
@@ -1485,20 +1772,19 @@ class DelegationManager:
         Multiple matches → DelegationError(409). One match → the row.
         Zero matches → None (caller turns this into a 404)."""
         assert self.db is not None  # bound at lifespan
-        wanted = (name or "").strip().lower()
-        if not wanted:
+        if not name or not name.strip():
             return None
-        agents = await self.db.load_agents(user_id=user_id)
-        matches = [a for a in agents if (a.get("name") or "").lower() == wanted]
+        matches = await self.db.match_live_agents(name, user_id)
         if not matches:
             return None
         if len(matches) > 1:
-            names = ", ".join(repr(a.get("name")) for a in matches)
+            names = ", ".join(repr(label) for _, label in matches)
             raise DelegationError(
                 f"Ambiguous agent name {name!r} (matches: {names})",
                 status_code=409,
             )
-        return matches[0]
+        agent_id, label = matches[0]
+        return {"id": agent_id, "name": label}
 
     async def _check_chain(self, parent: Session, *, target_agent_id: str) -> None:
         """Walk the parent chain upward from the given parent session.
@@ -2067,6 +2353,29 @@ class DelegationManager:
             "ok": True,
         }
 
+    def _start_terminal_return(self, rec: DelegationRunState) -> None:
+        """Transfer to the registered command for this round's original return."""
+        previous = rec._terminal_command
+        if rec.state == "running" or (previous is not None and not previous.done()):
+            return
+        if rec._terminal_disposition not in {None, "unknown"} and (
+            rec._round_recording_closed or self._snapshot(rec) == rec._persisted_state
+        ):
+            return
+        task = self._start_command(self._inject_terminal(rec, request_id=rec._candidate_request_id),
+                                   return_session_id=rec.parent_session_id)
+        self._record_terminal_command(rec, task)
+
+    def _record_terminal_command(self, rec: DelegationRunState, task: asyncio.Task[Any]) -> None:
+        rec._terminal_command = task
+        recording = self._commands[task]
+        recording.return_sessions.add(rec.parent_session_id)
+        recording.checks.append(
+            lambda: rec._terminal_command is not task or rec._round_recording_closed
+            or rec._terminal_disposition is None or self._snapshot(rec) == rec._persisted_state,
+        )
+        self._retire_delivery_failures()
+
     async def _inject_terminal(self, rec: DelegationRunState, *, request_id: str | None = None) -> None:
         """Relay one committed terminal using its stable original work identity."""
         assert self.session_mgr is not None
@@ -2077,24 +2386,23 @@ class DelegationManager:
                 ok=rec.state == "completed", error_code=None if rec.state == "completed" else rec.state,
                 detail={"delegation_id": rec.delegation_id, "state": rec.state},
             ))
-        if rec._terminal_injecting:
+        command = asyncio.current_task()
+        original = rec._terminal_command
+        if rec._terminal_injecting or (original is not None and original is not command and not original.done()):
             return
         if rec.state not in {"completed", "failed", "cancelled", "interrupted"}:
             return
         rec._terminal_injecting = True
-        command = asyncio.current_task()
         if command in self._commands and rec._terminal_command is not command:
-            rec._terminal_command = command
-            self._commands[command].return_sessions.add(rec.parent_session_id)
-            self._commands[command].checks.append(
-                lambda: rec._terminal_command is not command or rec._round_recording_closed
-                or rec._terminal_disposition is None or self._snapshot(rec) == rec._persisted_state,
-            )
-            self._retire_delivery_failures()
+            self._record_terminal_command(rec, command)
         try:
             if rec._terminal_disposition is not None:
                 await self._persist_terminal_delivery(rec)
                 if rec._terminal_disposition != "unknown":
+                    return
+                if self.session_mgr.session_deleting(rec.parent_session_id):
+                    # Permanent deletion joins this writer, then observes the
+                    # original receipt before it can remove the parent row.
                     return
 
             async def prepare() -> ReturnBody | ReturnSkipped:
@@ -2204,7 +2512,7 @@ class DelegationManager:
         if publication is None or self._snapshot(rec) == rec._persisted_state:
             return
         try:
-            saved = await self._save_round(rec, confirm_selected_write=True)
+            saved = await self._save_round(rec, confirm_selected_write=True, terminal_delivery=True)
         except (Exception, asyncio.CancelledError):
             del publication
             if not rec._round_recording_closed and self._snapshot(rec) != rec._persisted_state:

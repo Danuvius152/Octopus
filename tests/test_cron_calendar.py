@@ -15,9 +15,9 @@ from server.schedule_ai import build_explicit_schedule, cron_trigger
 from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager, session_manager
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.schedule_support import client as client
-from tests.schedule_support import create_session
+from tests.schedule_support import create_session, dispatch_schedule
 
 
 def fire_times(expr, start, count, timezone="UTC"):
@@ -210,19 +210,20 @@ async def test_control_does_not_revoke_the_original_in_flight_execution(client, 
 
     class Run(FakeRunBase):
         def __init__(self, session_id):
+            super().__init__()
             self.session_id = session_id
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             self.prompt = prompt
             self.request_id = manager.dispatch_snapshot(self.session_id)["active_request_id"]
             runs.append(self)
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await release.wait()
             yield HarnessEvent(type="result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             retired.set()
 
         async def interrupt(self):
@@ -231,7 +232,7 @@ async def test_control_does_not_revoke_the_original_in_flight_execution(client, 
         def is_alive(self):
             return not retired.is_set()
 
-    monkeypatch.setattr(manager, "_make_run", lambda session, *args, **kwargs: Run(session.id))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda session, *args, **kwargs: Run(session.id)))
     created = await client.post(f"/api/sessions/{sid}/schedules", json={
         "prompt": "original instructions", "interval_seconds": 3600,
         "in_session": False, "wiki_mode": "read",
@@ -240,7 +241,7 @@ async def test_control_does_not_revoke_the_original_in_flight_execution(client, 
     identifier = created.json()["id"]
     original = await db.get_schedule_definition(identifier)
     original_knowledge = json.loads(original["knowledge_context"])["value"]
-    firing = asyncio.create_task(runner._fire(identifier))
+    firing = asyncio.create_task(dispatch_schedule(runner, identifier))
     try:
         await asyncio.wait_for(started.wait(), 2)
         run = runs[0]
@@ -276,7 +277,7 @@ async def test_control_does_not_revoke_the_original_in_flight_execution(client, 
         assert len(results) == 1
         assert results[0]["request_id"] == run.request_id and results[0]["status"] == "success"
         assert (await db.get_session_binding(run.session_id))["archived"]
-        await runner._fire(identifier)
+        await dispatch_schedule(runner, identifier)
         assert len(runs) == 1
     finally:
         release.set()

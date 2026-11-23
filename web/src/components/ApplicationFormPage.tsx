@@ -4,7 +4,7 @@ import {
   IconArchive,
   IconSparkles,
 } from "@tabler/icons-react";
-import { applications as applicationList, orderedApplicationPins } from "../lib/applicationList";
+import { applications as applicationList, orderedApplicationPins, type ApplicationCreation } from "../lib/applicationList";
 import {
   useSessionStore,
   type Application,
@@ -50,21 +50,34 @@ export function ApplicationFormPage({
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(null);
-  const [operation, setOperation] = useState<{ current: () => boolean } | null>(null);
-  // Admission lasts through the original POST and its list confirmation.
-  const pending = useRef<{ current: () => boolean } | null>(null);
-  const [created, setCreated] = useState<{ id: string; current: () => boolean; canNavigate: () => boolean } | null>(null);
-  const navigation = useRef(0);
-  const busy = !!operation?.current() || !!created?.current();
+  const pending = useRef<symbol | null>(null);
+  const creationLifetime = useRef<AbortController | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState<Exclude<ApplicationCreation, { state: "live" }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const freezeEdit = (event: SyntheticEvent) => {
-    if (pending.current?.current()) { event.preventDefault(); event.stopPropagation(); }
+    if (pending.current) { event.preventDefault(); event.stopPropagation(); }
   };
 
-  useEffect(() => useSessionStore.subscribe((state, before) => {
-    if ((state.mainView !== before.mainView || state.pageTab !== before.pageTab) &&
-      (state.mainView !== "application-create" || state.pageTab !== "form")) navigation.current++;
-  }), []);
+  useEffect(() => {
+    const retireCreation = () => {
+      pending.current = null;
+      creationLifetime.current?.abort();
+      creationLifetime.current = null;
+    };
+    const unwatch = useSessionStore.subscribe((state, before) => {
+      const accountChanged = state.accountGeneration !== before.accountGeneration || state.token !== before.token;
+      const leftForm = before.mainView === "application-create" && before.pageTab === "form" &&
+        (state.mainView !== "application-create" || state.pageTab !== "form");
+      if (accountChanged || leftForm) {
+        retireCreation();
+        setBusy(false);
+        setCreated(null);
+        setError(null);
+      }
+    });
+    return () => { unwatch(); retireCreation(); };
+  }, []);
 
   useEffect(() => {
     if (token && tab === "all") {
@@ -72,22 +85,6 @@ export function ApplicationFormPage({
       void applicationList.refresh("archived");
     }
   }, [token, accountGeneration, tab]);
-
-  useEffect(() => {
-    if (!created) return;
-    const synchronized = () => {
-      const state = useSessionStore.getState();
-      if (!created.current() || !state.applications.some((row) => row.id === created.id)) return;
-      if (pending.current?.current === created.current) pending.current = null;
-      setCreated(null);
-      if (created.canNavigate() && state.mainView === "application-create" && state.pageTab === "form") {
-        openApplication(created.id);
-      }
-    };
-    const unsubscribe = useSessionStore.subscribe(synchronized);
-    synchronized();
-    return unsubscribe;
-  }, [created, openApplication]);
 
   // Derived, not synced through an effect, so a late-arriving agent list can't
   // stomp a choice the user already made.
@@ -102,43 +99,49 @@ export function ApplicationFormPage({
       : defaultAgentId ?? "";
 
   const canSubmit =
-    !busy && name.trim().length > 0 && description.trim().length > 0 && !!agentId;
+    !busy && !created && name.trim().length > 0 && description.trim().length > 0 && !!agentId;
 
-  const submit = async () => {
+  const observeCreation = async (work: () => Promise<ApplicationCreation>) => {
     const state = useSessionStore.getState();
-    if (!canSubmit || pending.current?.current() || state.accountGeneration !== accountGeneration ||
+    if (pending.current || state.accountGeneration !== accountGeneration || state.token !== token ||
         state.mainView !== "application-create" || state.pageTab !== "form") return;
-    const current = applicationList.accountGuard();
-    const startNavigation = navigation.current;
-    const request = { current };
+    const request = Symbol();
     pending.current = request;
-    setOperation(request);
+    setBusy(true);
     setError(null);
-    let awaitingList = false;
     try {
-      const app = await applicationList.create({
+      const result = await work();
+      if (pending.current !== request) return;
+      if (result.state === "live" && result.canOpen()) openApplication(result.id);
+      else setCreated(result.state === "live" ? { state: "unconfirmed", id: result.id, checkAgain: result.checkAgain } : result);
+    } catch (e) {
+      if (pending.current === request) setError(e instanceof Error ? e.message : "Failed to create application");
+    } finally {
+      if (pending.current === request) {
+        pending.current = null;
+        setBusy(false);
+      }
+    }
+  };
+
+  const submit = () => {
+    if (!canSubmit) return;
+    void observeCreation(() => {
+      const lifetime = new AbortController();
+      creationLifetime.current = lifetime;
+      return applicationList.create({
         name: name.trim(),
         description: description.trim(),
         agent_id: agentId,
         icon: icon.trim() || null,
         instructions: instructions.trim(),
-      });
-      if (current()) {
-        awaitingList = true;
-        setCreated({ id: app.id, current, canNavigate: () => navigation.current === startNavigation });
-      }
-    } catch (e) {
-      if (current()) setError(e instanceof Error ? e.message : "Failed to create application");
-    } finally {
-      if (!awaitingList && pending.current === request) pending.current = null;
-      if (current()) setOperation(null);
-    }
+      }, lifetime.signal);
+    });
   };
 
   // Restoring stays on the All tab: the app reappears under "In sidebar"
   // (the server pins what it restores), which is the confirmation.
   const restore = async (app: Application) => {
-    if (pending.current?.current()) return;
     const current = applicationList.currentGuard();
     setError(null);
     try {
@@ -149,7 +152,6 @@ export function ApplicationFormPage({
   };
 
   const archive = async (app: Application) => {
-    if (pending.current?.current()) return;
     if (!window.confirm(`Archive "${app.name}"? Its files are kept.`)) return;
     const current = applicationList.currentGuard();
     setError(null);
@@ -161,7 +163,6 @@ export function ApplicationFormPage({
   };
 
   const togglePin = async (app: Application, pinned: boolean) => {
-    if (pending.current?.current()) return;
     const current = applicationList.currentGuard();
     setError(null);
     try {
@@ -210,12 +211,26 @@ export function ApplicationFormPage({
       <div className="page-body">
         <div className="mx-auto w-full max-w-4xl">
           {error && (
-            <div className="app-create-error mb-4 rounded-lg border border-danger-border bg-danger-bg px-3.5 py-2.5 text-[13px] text-destructive">
+            <div role="alert" className="app-create-error mb-4 rounded-lg border border-danger-border bg-danger-bg px-3.5 py-2.5 text-[13px] text-destructive">
               {error}
             </div>
           )}
-          {created?.current() && <p role="status">Created. Synchronizing the application…</p>}
-          {(tab === "all" || created?.current()) && (reads.live.error || reads.archived.error) && (
+          {created && tab === "form" && (
+            <div role="status" className="mb-4 space-y-2 text-sm">
+              <p>{{
+                archived: "The application was archived.",
+                deleting: "The application is being deleted.",
+                deleted: "The application was deleted.",
+                unconfirmed: `Application ${created.id} was created, but its current status could not be confirmed.`,
+              }[created.state]}</p>
+              {created.state !== "deleted" && (
+                <Button variant="outline" disabled={busy} onClick={() => {
+                  void observeCreation(created.checkAgain);
+                }}>Check application again</Button>
+              )}
+            </div>
+          )}
+          {tab === "all" && (reads.live.error || reads.archived.error) && (
             <div role="alert">
               <p>List not synchronized: {reads.live.error || reads.archived.error}</p>
               <Button variant="outline" onClick={() => {

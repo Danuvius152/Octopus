@@ -13,6 +13,7 @@ from server.routers import schedules
 from server.scheduler import ScheduleRunner
 from server.users import UserManager
 from tests import test_schedule_tool as schedule_api
+from tests.schedule_support import dispatch_schedule
 from tests.test_delegation_work import work_runtime as work_runtime
 
 client = schedule_api.client
@@ -95,7 +96,7 @@ async def test_mcp_creation_inherits_read_even_when_the_scheduled_body_requests_
     assert decode_context(row["knowledge_context"]).trusted_request == "/wiki controlled source question"
     (tmp_path / "release").touch()
     assert (await receipt.wait()).outcome.status == "success"
-    await runner._fire(row["id"])
+    await dispatch_schedule(runner, row["id"])
     fired = (await manager.db.load_schedules())[0]
     messages = await manager.db.load_messages(fired["last_run_session_id"])
     knowledge = next(m["tool_input"]["request_context"]["knowledge"]["value"] for m in messages if m["role"] == "user")
@@ -122,7 +123,7 @@ async def test_legacy_missing_contract_stays_visible_without_starting_a_turn(pla
     manager, runner, parent, starts, _api = plan_runtime
     await manager.db.save_schedule(schedule_id="legacy", agent_id=parent.agent_id, name="old", prompt="/wiki maintain X",
                                    interval_seconds=3600, created_at="2026-10-19")
-    await runner._fire("legacy")
+    await dispatch_schedule(runner, "legacy")
     row = (await manager.db.load_schedules())[0]
     assert row["prompt"] == "/wiki maintain X" and not row["enabled"]
     assert row["invalid_reason"] == "knowledge_contract_missing"
@@ -133,7 +134,7 @@ async def test_human_reauthorization_clears_missing_contract_without_enabling_th
     manager, runner, parent, _starts, api = plan_runtime
     await manager.db.save_schedule(schedule_id="legacy", agent_id=parent.agent_id, name="old", prompt="Explain X",
                                    interval_seconds=3600, created_at="2026-10-19")
-    await runner._fire("legacy")
+    await dispatch_schedule(runner, "legacy")
     response = await api.patch("/api/schedules/legacy", headers=api.headers, json={"wiki_mode": "read"})
     assert response.status_code == 200, response.text
     assert response.json()["invalid_reason"] is None
@@ -146,7 +147,7 @@ async def test_definition_edit_does_not_change_a_fire_already_captured_by_its_ow
         "prompt": "/wiki controlled first definition", "interval_seconds": 3600, "in_session": False, "wiki_mode": "read",
     })
     schedule_id = created.json()["id"]
-    first = asyncio.create_task(runner._fire(schedule_id))
+    first = asyncio.create_task(dispatch_schedule(runner, schedule_id))
     try:
         await asyncio.wait_for(starts.get(), 5)
         changed = await api.patch(f"/api/schedules/{schedule_id}", headers=api.headers,
@@ -155,7 +156,7 @@ async def test_definition_edit_does_not_change_a_fire_already_captured_by_its_ow
         first_sid = (await manager.db.load_schedules())[0]["last_run_session_id"]
         (tmp_path / "release").touch()
         await first
-        await runner._fire(schedule_id)
+        await dispatch_schedule(runner, schedule_id)
         second_sid = (await manager.db.load_schedules())[0]["last_run_session_id"]
         assert first_sid != second_sid
         contexts = []
@@ -217,7 +218,7 @@ async def test_mcp_target_refinement_survives_definition_and_fire(plan_runtime, 
     assert edited.status_code == 200, edited.text
     (tmp_path / "release").touch()
     await receipt.wait()
-    await runner._fire(schedule_id)
+    await dispatch_schedule(runner, schedule_id)
     row = (await manager.db.load_schedules())[0]
     context = next(message["tool_input"]["request_context"]["knowledge"]["value"]
                    for message in await manager.db.load_messages(row["last_run_session_id"]) if message["role"] == "user")
@@ -238,7 +239,7 @@ async def test_mcp_edit_without_body_keeps_new_source_limits_in_the_actual_fire(
     assert changed.status_code == 200, changed.text
     (tmp_path / "release").touch()
     await receipt.wait()
-    await runner._fire(schedule_id)
+    await dispatch_schedule(runner, schedule_id)
     row = (await manager.db.load_schedules())[0]
     context = next(message["tool_input"]["request_context"]["knowledge"]["value"]
                    for message in await manager.db.load_messages(row["last_run_session_id"]) if message["role"] == "user")
@@ -264,9 +265,10 @@ async def test_work_closed_during_schedule_preparation_cannot_publish_a_definiti
     validate = schedules.validate_schedule_target
 
     async def pause_target(*args, **kwargs):
-        await validate(*args, **kwargs)
+        agent = await validate(*args, **kwargs)
         prepared.set()
         await release.wait()
+        return agent
 
     if boundary == "prepare":
         monkeypatch.setattr(schedules, "validate_schedule_target", pause_target)
@@ -419,7 +421,7 @@ async def test_fire_reads_the_confirmed_definition_after_update_interruption(pla
     monkeypatch.setattr(manager, "start_message", capture_fire)
     written, release, snapshot = asyncio.Event(), asyncio.Event(), asyncio.Event()
     execute = manager.db.conn._execute
-    schedule_row = runner._schedule_row
+    capture_definition = runner._capture_fire
 
     async def pause_after_sql(function, *args, **kwargs):
         result = await execute(function, *args, **kwargs)
@@ -428,19 +430,19 @@ async def test_fire_reads_the_confirmed_definition_after_update_interruption(pla
             await release.wait()
         return result
 
-    async def observe_snapshot(identifier):
-        result = await schedule_row(identifier)
+    async def observe_snapshot(registration):
+        result = await capture_definition(registration)
         snapshot.set()
         return result
 
     monkeypatch.setattr(manager.db.conn, "_execute", pause_after_sql)
-    monkeypatch.setattr(runner, "_schedule_row", observe_snapshot)
+    monkeypatch.setattr(runner, "_capture_fire", observe_snapshot)
     patch = asyncio.create_task(api.patch(f"/api/schedules/{schedule_id}", headers=headers,
                                           json={"prompt": "Updated definition"}))
     fire = None
     try:
         await asyncio.wait_for(written.wait(), 5)
-        fire = asyncio.create_task(runner._fire(schedule_id))
+        fire = asyncio.create_task(dispatch_schedule(runner, schedule_id))
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(snapshot.wait(), .1)
         assert not snapshot.is_set(), "A definition reader crossed the unconfirmed write"

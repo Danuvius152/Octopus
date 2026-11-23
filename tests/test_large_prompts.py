@@ -145,7 +145,7 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
     from server.harness import HarnessEvent
     from server.session_manager import SessionManager
     from tests.accounts import create_account
-    from tests.fake_run import FakeRunBase
+    from tests.fake_run import FakeRunBase, model_run_factory
 
     mgr = SessionManager()
     db = Database(":memory:")
@@ -161,12 +161,12 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
 
         class RecordingBackend(FakeRunBase):
 
-            async def start(
+            async def _start(
                 self, prompt, working_dir, resume_id=None, credential=None
             ):
                 received_prompts.append(prompt)
 
-            def stream(self):
+            def _stream(self):
                 async def _gen():
                     yield HarnessEvent(
                         type="session_started", session_id="sid-huge"
@@ -181,10 +181,10 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
 
                 return _gen()
 
-            async def stop(self):
+            async def _stop_process(self):
                 pass
 
-        mgr._make_run = lambda s, agent=None, connectors=None: RecordingBackend()  # type: ignore[method-assign,assignment]
+        mgr._make_run = model_run_factory(lambda s, agent=None, connectors=None: RecordingBackend())  # type: ignore[method-assign,assignment]
 
         huge = "Q" * (LARGE_PROMPT_THRESHOLD_BYTES + 50_000)
         receipt = await mgr.start_message(session.id, huge)

@@ -8,7 +8,7 @@ from server.database import Database
 from server.session_manager import Session, SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 
 @pytest.fixture
@@ -107,16 +107,16 @@ async def test_ready_sources_execute_only_after_the_saved_claim_commits(not_read
         await release.wait()
         return result
     class Run(FakeRunBase):
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             starts.append(prompt)
-        async def stream(self):
+        async def _stream(self):
             yield HarnessEvent(type="result", is_error=False)
-        async def stop(self):
+        async def _stop_process(self):
             pass
         async def interrupt(self):
             pass
     monkeypatch.setattr(database, "claim_client_submission", held_claim)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     receipt = await manager.start_message(session.id, "Saved original input", source=source,
                                           delivery_id=f"source-{source}", request_id="saved-input")
     try:
@@ -173,16 +173,16 @@ async def test_stop_settles_a_started_claim_without_running_or_replaying_it(not_
         await release.wait()
         return result
     class Run(FakeRunBase):
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             starts.append(prompt)
-        async def stream(self):
+        async def _stream(self):
             yield HarnessEvent(type="result", is_error=False)
-        async def stop(self):
+        async def _stop_process(self):
             pass
         async def interrupt(self):
             pass
     monkeypatch.setattr(database, "claim_client_submission", held_claim)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     receipt = await manager.start_message(session.id, "Original committed content")
     try:
         await asyncio.wait_for(entered.wait(), 2)

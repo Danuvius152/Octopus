@@ -45,6 +45,30 @@ it.each(["archive", "delete"])("does not let a stale snapshot resurrect a sessio
   expect(useSessionStore.getState().sessionRead.stale).toBe(false);
 });
 
+it("keeps a sparse successor relationship through a read failure and lets a newer deletion retire it", async () => {
+  list.archive("old", undefined, "new");
+  expect(useSessionStore.getState().sessionSuccessors).toEqual({ old: "new" });
+  expect(useSessionStore.getState().sessions).toEqual([]);
+  calls[0].reject(new Error("offline"));
+  await flush();
+  expect(useSessionStore.getState().sessionRead.error).toBe("offline");
+  expect(useSessionStore.getState().sessionSuccessors).toEqual({ old: "new" });
+
+  list.archive("old", undefined, undefined, undefined, { model: null });
+  expect(calls).toHaveLength(2);
+  const retry = list.refresh(true);
+  list.remove("new");
+  const archived = { ...row(), archived: true };
+  calls[1].resolve(Response.json([archived, row("new")]));
+  expect(await retry).toEqual({ state: "pending" });
+  await flush();
+  calls[2].resolve(Response.json([archived]));
+  await flush();
+  expect(useSessionStore.getState().sessionSuccessors).toEqual({});
+  expect(useSessionStore.getState().sessions).toEqual([]);
+  expect(useSessionStore.getState().archivedSessions).toEqual([archived]);
+});
+
 it("preserves sessions created during a read and coalesces conflicting observations", async () => {
   const old = list.refresh();
   const create = list.capture();
@@ -132,9 +156,15 @@ it.each(["reconnect", "reconnect with link", "new service", "new successor", "re
     const child = row("child");
     const replacement = row("replacement");
     if (boundary.startsWith("reconnect")) list.connect(source);
-    if (boundary === "reconnect with link") list.archive("old", undefined, child);
+    if (boundary === "reconnect with link") {
+      list.row(child);
+      list.archive("old", undefined, child.id);
+    }
     if (boundary === "new service") useSessionStore.setState({ dispatchGeneration: "replacement-service" });
-    if (boundary === "new successor") list.archive("old", undefined, replacement);
+    if (boundary === "new successor") {
+      list.row(replacement);
+      list.archive("old", undefined, replacement.id);
+    }
     if (boundary === "ended") original.finish();
     const manual = list.observe("old", useSessionStore.getState(), "archive");
     const confirming = list.confirmArchive("old", manual.observation, undefined, receipt);
@@ -191,7 +221,7 @@ it.each(["created", "successor"])("gives a later %s lookup only the original con
     list.patch("old", { name: "Changed since the POST" });
     pending = list.created(row("new"), observation.observation, "old", budget);
   } else {
-    list.archive("old", undefined, row("new"));
+    list.archive("old", undefined, "new");
     pending = list.confirmSuccessor("old", observation.observation, budget);
   }
   const signal = vi.mocked(fetch).mock.calls[0][1]!.signal!;
@@ -348,6 +378,22 @@ it("ends creation confirmation on read failure or scope retirement", async () =>
   calls[1].resolve(Response.json([row("new")])); await flush();
   expect(useSessionStore.getState().sessions).toEqual([]);
   expect(calls).toHaveLength(2);
+});
+
+it("uses the later archived projection when an inclusive read sees creation on both sides of archive", async () => {
+  const initial = list.refresh(true);
+  calls[0].resolve(Response.json([row()]));
+  expect(await initial).toEqual({ state: "applied" });
+
+  const original = list.capture();
+  list.patch("old", { status: "idle" });
+  const created = row("new");
+  const confirming = list.created(created, original);
+  const archived = { ...created, archived: true };
+  calls[1].resolve(Response.json([row(), created, archived]));
+  expect(await confirming).toBe(false);
+  expect(useSessionStore.getState().sessions).toEqual([row()]);
+  expect(useSessionStore.getState().archivedSessions).toEqual([archived]);
 });
 
 it("confirms concurrent creation receipts after the read begun before their last invalidation", async () => {

@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test, type WebSocketRoute } from "./test";
 import { accountToken, enterAccountCredentials } from "./current-account";
 import type { Message } from "../src/stores/sessionStore";
@@ -109,7 +110,7 @@ for (const target of ["Other parent", "Vera child"]) {
           else if (path === "/api/auth/login") data = { token: "presentation-token" };
           else if (path === "/api/auth/identity") data = { user_id: "presentation-user", label: "Reader", is_admin: false };
           else if (path === "/api/agents") data = [{ id: "presentation-agent", name: "Octo", backend: "codex", pinned: true, is_system: true }];
-          else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+          else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
           else if (path === "/api/sessions") data = sessions;
           else if (path.endsWith("/submissions")) data = { items: [], next_cursor: null };
           else {

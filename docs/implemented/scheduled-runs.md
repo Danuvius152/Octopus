@@ -45,12 +45,12 @@ restore a later deletion or re-enable a disabled schedule. Deletion commits
 before removing its trigger. Cancelling the HTTP/MCP waiter does not cancel this
 responsibility or its list-change notification.
 
-Target validation is an observation of one captured definition; it never disables
-a row or removes a trigger. Startup, archive/restore, a suppressed fire and an
-unaccepted one-shot all ask the original Runner to reconcile the schedule ID.
-Under the registration lock it rereads the current definition before deciding
-whether to register, leave suspended or remove the trigger. A late archived-target
-observation therefore cannot remove the trigger installed by a completed restore.
+Target validation observes one captured definition. Startup and archive/restore
+ask the Runner to reconcile the schedule ID. A suppressed fire can request this
+check while its original registration still owns the schedule. Under the
+registration lock the Runner rereads the current definition before deciding
+whether to register, leave suspended or remove the trigger. A completed restore
+owns its trigger even if an earlier callback is still waiting on a target read.
 
 Temporary Agent archive keeps the enabled definition for restoration. Permanent
 target or knowledge invalidity, including an invalid stored recurrence or one-shot time,
@@ -84,10 +84,10 @@ control is neither an unexpected control error nor a cleanup failure. Existing
 overdue definitions retain their catch-up behavior. Unexpected write failures,
 registration failures and unfinished controls still fail shutdown.
 
-Archive keeps origin repointing inside its original lifecycle operation. Triggers
-hold only the schedule ID and each fire rereads the database origin, so repointing
-needs no re-registration and preserves the original cadence, including an archive
-that reaches this step after Runner admission closed.
+Archive keeps origin repointing inside its original lifecycle operation. Each
+fire rereads the database origin, so repointing preserves the original trigger
+and cadence, including an archive that reaches this step after Runner admission
+closed.
 
 Regressions in `test_agents_api.py`, `test_schedules.py`, `test_scheduler.py`,
 `test_knowledge_schedules.py` and `test_session_manager.py` cover cancelled waiters
@@ -98,13 +98,14 @@ after restore completes, then checks the current trigger and a real later fire.
 
 ### Captured fire definitions
 
-A timer holds the schedule ID. Each callback first reads the current durable
-definition and checks its enabled state and target. A pause or deletion visible
-to that lookup prevents a new launch. A periodic fire then retains its captured
-prompt and knowledge contract: later editing, pausing or deleting the definition
-does not revoke that in-flight execution. Pause removes future triggers while
-retaining the definition; delete removes both. Neither control retires an
-already-running request or its resources.
+A timer carries its Runner registration, including the schedule ID and original
+trigger parameters. Each date arm has a distinct APScheduler job ID. Periodic
+registrations share the job ID across edits to preserve the executor's instance
+limit. A callback checks the current registration, enabled definition and
+trigger parameters before capturing the target, prompt and knowledge contract.
+After a periodic fire is captured, it can finish with those values across later
+edits, pauses and deletion. A pause removes future triggers and retains the
+definition. Deletion removes both.
 
 Reading the snapshot is not durable input admission. In particular, a one-shot's
 target/input admission transaction still compares its captured definition with
@@ -125,16 +126,34 @@ also makes that check true; it does not identify which input is a prior fire.
 These checks cannot establish a universal single-outstanding-fire guarantee.
 A skipped periodic tick retains the ordinary cadence.
 
-One-time schedules use a different admission rule: a human backlog retains
-the fire rather than skipping it. The target session, complete input and
-consumption of the schedule commit in one database transaction. A one-shot
-is deleted at that admission point; callback return and model completion do
-not decide whether it was consumed. An overdue, unaccepted one-shot is
-registered on startup. A transient refusal retries the same source identity;
-an already accepted or uncertain execution is never submitted as a new fire.
-The retry also reconciles current eligibility and registers an unconsumed source
-no earlier than five seconds later; it does not directly reinstall a captured
-trigger outside the Runner's owned control path.
+One-time schedules queue behind a human backlog. SQLite obtains write ownership
+and compares the enabled date definition, original `run_at`, target Agent,
+origin, name, recurrence label, prompt and knowledge context with the values used
+to prepare the input. It checks the original time against aware UTC. Stored
+timestamps without an offset use UTC. Any temporary session, the complete input
+and the deletion of the schedule commit together. The transaction checks the
+original Runner registration before committing. A committed definition write
+revokes the old date registration before trigger reconciliation starts. The
+Runner keeps the old job ID until removal is confirmed. Schedule reads omit the
+next run time while that revoked job awaits reconciliation. A pause followed by
+re-enabling cannot restore the old registration's admission authority. The
+command that creates the temporary target observes its original
+execution and owns automatic archive, even if the callback loses the response.
+
+The durable source is `schedule:{id}:{run_at}`, using the original stored string.
+Its receipt can be observed even when the target or Agent configuration has
+changed. A new submission validates the selected Agent before admission. An
+overdue unadmitted date is registered on startup.
+
+A healthy transient failure, invalid Agent configuration or an early wake after
+clock rollback leaves the definition enabled. After an unconfirmed response the
+Runner observes the original receipt and joins any still-pending submission for
+that source. Under its registration lock it verifies that the original
+registration still owns the enabled date, the source is unconsumed, no successor
+job is armed and scheduling remains open. It then registers the later of the
+original time and a five-second cooldown. The next callback prepares from the
+current definition. A confirmed missing definition ends the callback. Loss of
+storage trust stops recovery through the service health boundary.
 See [input reliability](input-reliability.md) for the shared input contract.
 
 <a id="3-a-scheduled-turn-says-it-is-one"></a>

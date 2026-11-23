@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from ..harness.run import RetirementObservation
 
-EvidenceState = Literal["pending", "proven", "failed", "unavailable"]
+EvidenceState = Literal["pending", "proven", "failed"]
 
 
 def future_state(future: asyncio.Future[None]) -> EvidenceState:
@@ -23,16 +23,14 @@ class AttemptResource:
     request_id: str
     attempt_id: str
     work_id: str | None
-    run_lease_id: str | None
-    _retirement: RetirementObservation | None = field(repr=False, compare=False)
+    run_lease_id: str
+    _retirement: RetirementObservation = field(repr=False, compare=False)
 
     @property
     def state(self) -> EvidenceState:
-        return self._retirement.state if self._retirement is not None else "unavailable"
+        return self._retirement.state
 
     async def wait(self) -> EvidenceState:
-        if self._retirement is None:
-            return "unavailable"
         await self._retirement.wait()
         return self.state
 

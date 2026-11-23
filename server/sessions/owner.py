@@ -182,6 +182,13 @@ class SessionOwner:
                 return command_digest(entry.command.data) != command_digest(data)
         return False
 
+    def one_shot_replies(self, delivery_id: str) -> tuple[asyncio.Future, ...]:
+        """The original one-shot commands still capable of committing."""
+        return tuple(entry.reply for entry in (self._current, *self._commands)
+                     if isinstance(entry, _RuntimeCommand) and isinstance(entry.command, Submit)
+                     and entry.command.schedule is not None and entry.command.request.delivery_id == delivery_id
+                     and not entry.reply.done())
+
     async def call_runtime(self, command: RuntimeCommand) -> Any:
         if asyncio.current_task() is self.task:
             return await self.runtime.handle(command)

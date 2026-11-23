@@ -23,6 +23,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from . import deps
 from . import monitor as monitor_pkg
 from .account_baseline import RetainedLegacyInstallation, require_account_installation
+from .agent_configuration import AgentConfigurationError
 from .agent_manager import AgentManager
 from .aio import complete_cleanup
 from .app_agent import app_agent_manager
@@ -416,6 +417,11 @@ async def _input_not_ready(_request: Request, exc: InputAdmissionNotReady) -> JS
     return JSONResponse(status_code=503, content={"detail": str(exc), "code": exc.code})
 
 
+@app.exception_handler(AgentConfigurationError)
+async def _invalid_agent_configuration(_request: Request, exc: AgentConfigurationError) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 @app.exception_handler(ScheduleRegistrationError)
 async def _schedule_registration_unconfirmed(_request: Request, exc: ScheduleRegistrationError) -> JSONResponse:
     return JSONResponse(status_code=503, content={
@@ -625,31 +631,19 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
     return {"status": "stopping", "request_id": request_id}
 
 
-@app.get("/api/backends", response_model=backends.BackendAvailability)
+@app.get("/api/backends", response_model=backends.BackendCatalog)
 async def list_backends(_: str = Depends(verify_token)):
-    """Which AI backends are usable on this host (codex-backend.md §6.1).
-    A harness kind appears only when its CLI resolves on PATH. `claude-code`
-    is always listed (the default) even if not yet installed, matching the
-    historical contract."""
-    from .harness import available_backends, get_harness
+    """List registered engines, local CLI discovery and the deployment preference."""
+    from .harness import all_backends, available_backends, get_harness
 
-    available = available_backends()
-    if "claude-code" not in available:
-        available = ["claude-code", *available]
-    # Per-backend model shortlists, for `/model`'s picker. A shortlist, not a
-    # whitelist — see `RuntimeProfile.models`.
-    models: dict[str, list[str]] = {}
-    for kind in available:
-        try:
-            models[kind] = list(get_harness(kind).profile.models)
-        except Exception:
-            models[kind] = []
-    return {
-        "available": available,
-        "models": models,
-        "default": settings.default_backend,
-        "tool_policy": {kind: get_harness(kind).profile.tool_policy for kind in available},
-    }
+    profiles = {kind: get_harness(kind).profile for kind in all_backends()}
+    return backends.BackendCatalog(
+        supported=list(profiles),
+        available=available_backends(),
+        default=settings.default_backend,
+        models={kind: list(profile.models) for kind, profile in profiles.items()},
+        tool_policy={kind: profile.tool_policy for kind, profile in profiles.items()},
+    )
 
 
 @app.get("/health")

@@ -1,6 +1,7 @@
-"""Shared schedule API runtime and MCP invocation; assertions stay in case files."""
+"""Shared schedule API, Runner dispatch and MCP invocation."""
 
 import pytest
+from apscheduler.triggers.date import DateTrigger
 from httpx import ASGITransport, AsyncClient
 
 from server import deps
@@ -12,6 +13,22 @@ from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
 from server.users import UserManager
+
+
+def schedule_job(runner, schedule_id):
+    registration = runner._registrations.get(schedule_id)
+    return runner._scheduler.get_job(registration.job_id) if registration is not None else None
+
+
+async def dispatch_schedule(runner, schedule_id):
+    """Dispatch through the registered APScheduler job with a controlled tick."""
+    if schedule_id not in runner._registrations:
+        await runner.reconcile(schedule_id)
+    job = schedule_job(runner, schedule_id)
+    if job is not None:
+        if isinstance(job.trigger, DateTrigger):
+            job.remove()
+        await job.func(*job.args)
 
 
 @pytest.fixture

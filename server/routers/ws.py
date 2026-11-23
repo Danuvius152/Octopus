@@ -3,15 +3,60 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 
 from .. import deps
+from ..attachments import AttachmentUnavailable
 from ..browser_messages import event_view, unavailable_event
 from ..deps import SessionMgr
+from ..session_operations import is_utf8_text
+from ..sessions import SessionManager
+from ..sessions.client_submissions import submit_client_operation
 from ..sessions.runtime_types import QuotaExceeded
+from ..submission_models import ClientSubmissionRequest
 from ..ws_delivery import SocketDelivery
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+async def _message_submission(manager: SessionManager, data: dict, user_id: str | None) -> dict:
+    session_id = data.get("session_id")
+    if not isinstance(session_id, str) or not is_utf8_text(session_id):
+        session_id = None
+    rejection = {"type": "submission", "session_id": session_id,
+                 "client_request_id": data.get("client_request_id"), "accepted": False}
+    try:
+        request = ClientSubmissionRequest.model_validate({
+            key: value for key, value in data.items() if key not in {"type", "session_id"}
+        })
+    except ValidationError as error:
+        errors = error.errors(include_input=False, include_context=False, include_url=False)
+        fields = {item["loc"] for item in errors if item["type"] != "extra_forbidden"}
+        if ("client_request_id",) in fields:
+            return {"type": "error", "session_id": session_id, "message": "Invalid client request identity"}
+        if ("recovery_of_client_id",) in fields:
+            return {**rejection, "code": "invalid_recovery_identity", "message": "Invalid recovery identity"}
+        if any(item["type"] in {"list_type", "string_type", "string_unicode"} and (
+            item["loc"][:1] == ("attachment_ids",) or item["loc"][:3] == ("operation", "message", "attachment_ids")
+        ) for item in errors):
+            return {**rejection, "code": AttachmentUnavailable.code, "message": str(AttachmentUnavailable())}
+        detail = errors[0]
+        message = "Invalid submission input"
+        if detail["type"] == "extra_forbidden":
+            message = "Unknown submission field"
+        elif detail["loc"][-1:] == ("wiki_mode",):
+            message = "Unknown knowledge request mode"
+        elif detail["type"] == "string_unicode":
+            message = "Input must be valid Unicode text"
+        elif detail["type"] == "value_error" and not detail["loc"]:
+            message = detail["msg"].removeprefix("Value error, ")
+        return {**rejection, "code": "admission_refused", "message": message}
+
+    session = manager.get_session(session_id) if session_id is not None else None
+    if session is None or session.user_id != user_id:
+        return {**rejection, "message": "Session not found"}
+    return {"type": "submission", **await submit_client_operation(manager, session.id, request)}
 
 
 @router.websocket("/ws")
@@ -78,6 +123,10 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 continue
 
             msg_type = data.get("type")
+            if msg_type == "send_message":
+                delivery.offer(await _message_submission(session_manager, data, user_id), session_scoped=False)
+                continue
+
             if msg_type in ("interrupt", "answer_question", "snooze_question", "cancel_compact"):
                 command_id = data.get("client_command_id")
                 if not isinstance(command_id, str) or not command_id or len(command_id) > 128:
@@ -89,85 +138,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 delivery.offer(await process_command(session_manager, data, user_id, source=principal.answer_source()), session_scoped=False)
                 continue
 
-            if msg_type == "send_message":
-                session_id = data.get("session_id")
-                content = data.get("content", "")
-                client_request_id = data.get("client_request_id")
-                if not isinstance(client_request_id, str) or not client_request_id or len(client_request_id) > 128:
-                    delivery.offer({"type": "error", "session_id": session_id,
-                                    "message": "Invalid client request identity"}, session_scoped=False)
-                    continue
-
-                def reject(message: str, code: str | None = None, session_id=session_id, client_request_id=client_request_id) -> None:
-                    # Account-local echo of submitted input, containing no
-                    # session content. Missing/foreign resources share it.
-                    delivery.offer({
-                        "type": "submission", "session_id": session_id, "message": message,
-                        "client_request_id": client_request_id, "accepted": False,
-                        **({"code": code} if code else {}),
-                    }, session_scoped=False)
-                from ..attachments import AttachmentUnavailable
-
-                if "operation" in data:
-                    from pydantic import ValidationError
-
-                    from ..sessions.client_submissions import (
-                        submit_client_compact,
-                        submit_client_message,
-                    )
-                    from ..submission_models import ClientSubmissionRequest
-                    from ..wiki.tasks import explicit_mode
-
-                    try:
-                        request = ClientSubmissionRequest.model_validate({key: value for key, value in data.items()
-                            if key not in {"type", "session_id"}})
-                        session = session_manager.get_session(session_id) if isinstance(session_id, str) else None
-                        if session is None or session.user_id != user_id:
-                            raise ValueError("Session not found")
-                        operation = request.session_operation()
-                        if operation.kind == "compact":
-                            response = await submit_client_compact(session_manager, session.id, client_request_id)
-                        else:
-                            if not operation.content.strip() and not operation.attachment_ids:
-                                raise ValueError("Supply message content or attachments")
-                            response = await submit_client_message(session_manager, session.id, operation.content,
-                                operation.attachment_ids, client_request_id,
-                                wiki_mode=explicit_mode(operation.content, operation.wiki_mode),
-                                recovery_of_client_id=request.recovery_of_client_id)
-                        delivery.offer({"type": "submission", **response}, session_scoped=False)
-                    except (ValidationError, ValueError) as error:
-                        reject(str(error), code="admission_refused")
-                    continue
-
-                recovery_of = data.get("recovery_of_client_id")
-                if recovery_of is not None and (not isinstance(recovery_of, str) or not recovery_of or len(recovery_of) > 128):
-                    reject("Invalid recovery identity", code="invalid_recovery_identity")
-                    continue
-
-                attachment_ids = data.get("attachment_ids", [])
-                if not isinstance(attachment_ids, list) or any(not isinstance(a, str) for a in attachment_ids):
-                    reject(str(AttachmentUnavailable()), code=AttachmentUnavailable.code)
-                    continue
-                # Allow attachment-only turns (no text), but require *some*
-                # signal so we don't kick a backend turn off an empty payload.
-                if not isinstance(session_id, str) or not session_id or not isinstance(content, str) or (not content and not attachment_ids):
-                    reject("session_id and content required")
-                    continue
-
-                try:
-                    from ..wiki.tasks import explicit_mode
-                    session = session_manager.get_session(session_id)
-                    if session is None or session.user_id != user_id:
-                        raise ValueError("Session not found")
-                    from ..sessions.client_submissions import submit_client_message
-                    response = await submit_client_message(session_manager, session_id, content, attachment_ids, client_request_id,
-                                                           wiki_mode=explicit_mode(content, data.get("wiki_mode")),
-                                                           recovery_of_client_id=recovery_of)
-                    delivery.offer({"type": "submission", **response}, session_scoped=False)
-                except ValueError as e:
-                    reject(str(e))
-
-            elif msg_type == "resume_dispatch":
+            if msg_type == "resume_dispatch":
                 session_id = data.get("session_id")
                 session = session_manager.get_session(session_id) if session_id else None
                 if session is not None and session.user_id == user_id and isinstance(session_id, str):

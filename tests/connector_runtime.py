@@ -11,6 +11,13 @@ from server.mcp_servers.connectors import _shared, github
 
 
 @pytest.fixture
+def connector_tool(request):
+    """Resolve the tool when the case runs, including after a namespace reload."""
+    namespace, name = request.param
+    return getattr(namespace, name)
+
+
+@pytest.fixture
 def clock(monkeypatch):
     class Clock:
         now = 0.0

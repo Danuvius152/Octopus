@@ -20,6 +20,7 @@ from server.applications import (
 from server.config import settings
 from server.database import Database
 from server.portability import export_account, import_account
+from server.service_installation import InstallationOwner
 from server.sessions import SessionManager
 from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
@@ -425,6 +426,141 @@ def _write_modified_archive(archive, manifest, members):
     with zipfile.ZipFile(archive, "w") as package:
         for name, content in members.items():
             package.writestr(name, content)
+
+
+@pytest.fixture
+async def account_package(tmp_path, monkeypatch):
+    home = tmp_path / "source"
+    home.mkdir()
+    config, _ = installation_settings(home)
+    for name, value in config.model_dump().items():
+        monkeypatch.setattr(settings, name, value)
+    database = Database(config.db_path)
+    await database.initialize()
+    try:
+        owner, _ = await create_account(database)
+        agent = await database.get_system_agent(owner["id"])
+    finally:
+        await database.close()
+    with closing(sqlite3.connect(config.db_path)) as stored, stored:
+        stored.execute("UPDATE agents SET context_settings_revision=7 WHERE id=?", (agent["id"],))
+        stored.execute("""INSERT INTO backend_credentials
+            (user_id,id,backend,label,auth_type,created_at,token_expires_at)
+            VALUES(?,'source-oauth','codex','OAuth','oauth','time','later')""", (owner["id"],))
+    archive = tmp_path / "account.zip"
+    export_account(config, owner["id"], archive, home=home)
+    return archive, Path(config.db_path).relative_to(home), owner["id"], agent["id"]
+
+
+def test_account_import_publishes_new_context_and_reconnect_state(tmp_path, account_package):
+    archive, _, _, agent = account_package
+    restored = import_account(archive, home=tmp_path / "restored")
+    with closing(sqlite3.connect(restored.db_path)) as database:
+        assert database.execute("SELECT id, context_settings_revision FROM agents").fetchall() == [(agent, 0)]
+        assert database.execute("""SELECT status, needs_reconnect, token_expires_at, last_refresh_error_code
+            FROM backend_credentials WHERE id='source-oauth'""").fetchall() == [("needs_reconnect", 1, None, None)]
+
+
+@pytest.mark.parametrize(("damage", "diagnostic"), [
+    ("second-account", "users"),
+    ("foreign-agent-with-bad-config", "users"),
+    ("unowned-agent", "agents"),
+    ("archived-agent-bad-config", "archive-bad.*mcp_servers"),
+    ("unrelated-kind", "custom_connectors"),
+    ("oauth-provider-secret", "credential_secrets"),
+    ("agent-context-revision", "Agent context settings revision"),
+    ("oauth-connected-state", "OAuth credential state"),
+    ("execution-history", "sessions"),
+    ("missing-installation", "relationships"),
+])
+async def test_account_import_rejects_database_outside_archive_contract(tmp_path, account_package, damage, diagnostic):
+    archive, db_relative, owner, agent = account_package
+    with zipfile.ZipFile(archive) as package:
+        members = {name: package.read(name) for name in package.namelist()}
+    manifest = json.loads(members["manifest.json"])
+    member = "files/" + db_relative.as_posix()
+    with closing(sqlite3.connect(":memory:")) as database:
+        database.deserialize(members[member])
+        if damage == "second-account":
+            database.execute("INSERT INTO users(id,username,password_hash,created_at) VALUES('extra','other','unused','time')")
+        elif damage in {"foreign-agent-with-bad-config", "unowned-agent", "archived-agent-bad-config"}:
+            if damage == "foreign-agent-with-bad-config":
+                database.execute("INSERT INTO users(id,username,password_hash,created_at) VALUES('extra','other','unused','time')")
+            user_id = {"foreign-agent-with-bad-config": "extra", "unowned-agent": None,
+                       "archived-agent-bad-config": owner}[damage]
+            database.execute("""INSERT INTO agents(user_id,id,name,archived,mcp_servers,created_at,updated_at)
+                VALUES(?,'archive-bad','Archive Agent',1,'null','time','time')""", (user_id,))
+        elif damage == "unrelated-kind":
+            database.execute("""INSERT INTO custom_connectors(kind,display_name,authorize_url,token_url,api_base,created_at,updated_at)
+                VALUES('unused','Unused','https://example.com','https://example.com','https://example.com','time','time')""")
+        elif damage == "oauth-provider-secret":
+            database.execute("""INSERT INTO backend_credentials
+                (user_id,id,backend,label,auth_type,created_at,status,needs_reconnect)
+                VALUES(?,'oauth','codex','OAuth','oauth','time','needs_reconnect',1)""", (owner,))
+            database.execute("INSERT INTO credential_secrets VALUES('oauth','excluded provider secret')")
+        elif damage == "agent-context-revision":
+            database.execute("UPDATE agents SET context_settings_revision=7 WHERE id=?", (agent,))
+        elif damage == "oauth-connected-state":
+            database.execute("""INSERT INTO backend_credentials
+                (user_id,id,backend,label,auth_type,created_at,token_expires_at)
+                VALUES(?,'oauth','codex','OAuth','oauth','time','later')""", (owner,))
+        elif damage == "execution-history":
+            database.execute("""INSERT INTO sessions(user_id,id,name,working_dir,created_at)
+                VALUES(?,'extra','Excluded chat','/unused','time')""", (owner,))
+        else:
+            database.execute("INSERT INTO agent_connectors VALUES(?,'missing-installation')", (agent,))
+        database.commit()
+        db_bytes = database.serialize()
+    members[member] = db_bytes
+    manifest["entries"][db_relative.as_posix()].update(size=len(db_bytes), sha256=hashlib.sha256(db_bytes).hexdigest())
+    modified = tmp_path / "modified.zip"
+    _write_modified_archive(modified, manifest, members)
+    target = tmp_path / "refused"
+    with pytest.raises((ValueError, RuntimeError), match=diagnostic):
+        import_account(modified, home=target)
+    assert not (target / db_relative).exists()
+    assert not (target / (str(db_relative) + ".import.env")).exists()
+    assert not (target / (str(db_relative) + ".importing")).exists()
+
+
+@pytest.mark.parametrize("location", ["archive", "target", "target-after-lock"])
+def test_account_import_requires_a_standalone_primary_database(tmp_path, monkeypatch, account_package, location):
+    archive, db_relative, _, _ = account_package
+    sidecar = Path(str(db_relative) + "-wal")
+    target = tmp_path / "refused"
+    marker = target / (str(db_relative) + ".importing")
+    sidecar_bytes = b"external SQLite state"
+    if location == "archive":
+        with zipfile.ZipFile(archive) as package:
+            members = {name: package.read(name) for name in package.namelist()}
+        manifest = json.loads(members["manifest.json"])
+        manifest["roots"].append(sidecar.as_posix())
+        manifest["entries"][sidecar.as_posix()] = {
+            "kind": "file", "mode": 0o600, "size": len(sidecar_bytes), "sha256": hashlib.sha256(sidecar_bytes).hexdigest(),
+        }
+        members["files/" + sidecar.as_posix()] = sidecar_bytes
+        archive = tmp_path / "with-wal.zip"
+        _write_modified_archive(archive, manifest, members)
+    elif location == "target":
+        (target / sidecar).parent.mkdir(parents=True)
+        (target / sidecar).write_bytes(sidecar_bytes)
+    else:
+        acquire = InstallationOwner.acquire_offline
+
+        def attach_sidecar_after_lock(owner):
+            acquire(owner)
+            (target / sidecar).write_bytes(sidecar_bytes)
+            marker.write_bytes(b"another attempt's inventory")
+
+        monkeypatch.setattr(InstallationOwner, "acquire_offline", attach_sidecar_after_lock)
+    with pytest.raises(ValueError, match="SQLite sidecar"):
+        import_account(archive, home=target)
+    assert not (target / db_relative).exists()
+    assert not (target / (str(db_relative) + ".import.env")).exists()
+    if location != "archive":
+        assert (target / sidecar).read_bytes() == sidecar_bytes
+    if location == "target-after-lock":
+        assert marker.read_bytes() == b"another attempt's inventory"
 
 
 def _set_archived_application_address(manifest, members, db_relative, address):

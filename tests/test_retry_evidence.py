@@ -11,7 +11,7 @@ from server.harness import HarnessEvent, get_harness
 from server.harness.events import HarnessPreparationError
 from server.sessions import SessionManager
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.harness_profiles import process_profile
 
 
@@ -36,18 +36,19 @@ async def host(monkeypatch):
 
 class LostOutput(FakeRunBase):
     def __init__(self, effect, failure, conversation=None):
+        super().__init__()
         self.effect, self.failure, self.conversation = effect, failure, conversation
         self.prompts = []
         self.started = asyncio.Event()
         self.stopped = asyncio.Event()
 
-    async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
+    async def _start(self, prompt, working_dir=None, resume_id=None, **kwargs):
         self.prompts.append((prompt, resume_id))
         # The external effect happened; its tool_use and text never arrived.
         self.effect.write_text(self.effect.read_text() + "effect\n" if self.effect.exists() else "effect\n")
         self.started.set()
 
-    async def stream(self):
+    async def _stream(self):
         await self.started.wait()
         if self.conversation:
             yield HarnessEvent(type="session_started", session_id=self.conversation)
@@ -60,7 +61,7 @@ class LostOutput(FakeRunBase):
                 "success": "",
             }[self.failure])
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stopped.set()
 
     async def interrupt(self):
@@ -73,11 +74,11 @@ async def test_missing_output_does_not_authorize_replay(host, monkeypatch, tmp_p
     manager, agent = host
     session = await manager.create_session(agent["id"], "Lost output", backend=backend)
     # An old resume id alone says nothing about this input's effects.
-    session.claude_session_id = "old-thread"
+    await manager.db.update_session_field(session.id, claude_session_id="old-thread")
     first = LostOutput(tmp_path / "effects", failure)
     replacement = LostOutput(tmp_path / "effects", "success")
     runs = iter([first, replacement])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(runs)))
     receipt = await manager.start_message(session.id, "perform the operation")
     completion = await asyncio.wait_for(receipt.wait(), 2)
     assert completion.outcome.status != "success"
@@ -94,7 +95,7 @@ async def test_captured_conversation_allows_continuation_without_output(host, mo
     first = LostOutput(tmp_path / "original", failure, "current-thread")
     replacement = LostOutput(tmp_path / "continuation", "success")
     runs = iter([first, replacement])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(runs)))
     receipt = await manager.start_message(session.id, "perform the operation")
     completion = await asyncio.wait_for(receipt.wait(), 2)
     assert completion.outcome.status == "success"
@@ -110,16 +111,14 @@ async def test_preparation_failure_can_retry_original_input(host, monkeypatch, t
     session = await manager.create_session(agent["id"], "Prepare", backend="codex")
 
     class Preparation(LostOutput):
-        input_may_have_run = False
-
-        async def start(self, prompt, *args, **kwargs):
-            self.prompts.append((prompt, None))
+        async def _prepare_scripted_input(self, prompt, resume_id):
+            self.prompts.append((prompt, resume_id))
             raise HarnessPreparationError("API Error: 503 Service Unavailable")
 
     preparation = Preparation(tmp_path / "unused", "transient")
     replacement = LostOutput(tmp_path / "effects", "success")
     runs = iter([preparation, replacement])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(runs)))
     receipt = await manager.start_message(session.id, "original input")
     completion = await asyncio.wait_for(receipt.wait(), 2)
     assert completion.outcome.status == "success"
@@ -135,7 +134,7 @@ async def test_conversation_id_does_not_enable_unsupported_continuation(host, mo
     first = LostOutput(tmp_path / "effects", "transient", "current-thread")
     replacement = LostOutput(tmp_path / "effects", "success")
     runs = iter([first, replacement])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: next(runs)))
     receipt = await manager.start_message(session.id, "perform the operation")
     assert (await asyncio.wait_for(receipt.wait(), 2)).outcome.status == "failed"
     assert not replacement.prompts and first.effect.read_text() == "effect\n"

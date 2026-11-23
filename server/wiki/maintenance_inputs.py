@@ -97,16 +97,18 @@ def validate_jobs(db):
         raise unavailable("job ledger is missing or incompatible")
     if _shape(db, "job_requests") != REQUEST_COLUMNS:
         raise unavailable("job ledger is missing or incompatible")
-    unique_request = any(row[2] and not row[4] and
-                         [column[2] for column in db.execute("SELECT * FROM pragma_index_info(?)", (row[1],))] == ["request_key"]
-                         for row in db.execute("PRAGMA index_list(jobs)"))
-    if not unique_request:
+    unique_keys = {
+        tuple(column[2] for column in db.execute("SELECT * FROM pragma_index_info(?)", (row[1],)))
+        for row in db.execute("PRAGMA index_list(jobs)") if row[2] and not row[4]
+    }
+    if ("request_key",) not in unique_keys:
         raise unavailable("job ledger constraints are incompatible")
+    return unique_keys
 
 
 def require_jobs(db):
     protocols.require(db, "maintenance_jobs")
-    validate_jobs(db)
+    return validate_jobs(db)
 
 def require(db):
     protocols.require(db, "maintenance_inputs")

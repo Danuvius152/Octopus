@@ -18,7 +18,17 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .. import fork_helpers
 from .. import monitor as _monitor
+from ..agent_configuration import AgentConfigurationError
 from ..config import settings
+from ..credential_bindings import CredentialBindingError
+from ..db.applications import ApplicationDeleting
+from ..db.base import DatabaseBusy
+from ..db.schedules import (
+    OneShotFire,
+    ScheduleChangedError,
+    ScheduleOriginChanged,
+    schedule_delivery_id,
+)
 from ..diagnostics import exception_diagnostic, safe_diagnostic
 from ..harness import (
     HarnessEvent,
@@ -64,6 +74,8 @@ from .owner_runtime import (
     WorkRetirement,
 )
 from .runtime_types import (
+    AdmissionIntegrityError,
+    PreviousWriterUnconfirmed,
     QuotaExceeded,
     SessionAdmissionBusy,
     SessionAdmissionClosed,
@@ -396,7 +408,7 @@ class TurnsMixin(SessionManagerBase):
         request_id: str | None = None, trusted_request: str | None = None,
         knowledge_context: KnowledgeContext | None = None,
         client_request_id: str | None = None, recovery_of_client_id: str | None = None,
-        schedule: dict[str, Any] | None = None, return_parent: AdmittedRequest | None = None,
+        schedule: OneShotFire | None = None, return_parent: AdmittedRequest | None = None,
     ) -> SubmissionReceipt:
         database = self.input_database()
         session = self.sessions.get(session_id)
@@ -461,8 +473,6 @@ class TurnsMixin(SessionManagerBase):
         Preparation is pure, may repeat across callers, and holds no mailbox,
         lifecycle lock or transaction. Wake-up and input COMMIT stay separate.
         """
-        from ..db.applications import ApplicationDeleting
-
         async def observe() -> SubmissionReceipt | ReturnUnconfirmed | None:
             try:
                 existing = await self.source_receipt(target.source, target.delivery_id, session_id=target.session_id)
@@ -534,45 +544,90 @@ class TurnsMixin(SessionManagerBase):
             result = ReturnRefused("busy", error)
         except (SessionAdmissionClosed, ApplicationDeleting) as error:
             result = ReturnRefused("admission_closed", error)
+        except AgentConfigurationError as error:
+            result = ReturnRefused("destination_unavailable", error)
         except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
             logger.warning("Return acknowledgment unavailable source=%s delivery=%s\n%s",
                            target.source, target.delivery_id, exception_diagnostic(error))
             result = ReturnUnconfirmed(error)
         return await reconcile(result)
 
-    async def start_one_shot(self, schedule: dict[str, Any], prompt: str, context: KnowledgeContext) -> tuple[str, SubmissionReceipt]:
+    async def start_one_shot(self, schedule: dict[str, Any], prompt: str, context: KnowledgeContext, *,
+                             registration_open: Callable[[], bool] | None = None) -> tuple[str, SubmissionReceipt]:
         """Prepare the target; Owner commits target, input and consumption once."""
-        from ..db.schedules import ScheduleChangedError
+        from ..submission_models import SubmissionConflict
 
-        delivery_id = f"schedule:{schedule['id']}:{schedule['run_at']}"
+        delivery_id = schedule_delivery_id(schedule["id"], schedule["run_at"])
         existing = await self.source_receipt("schedule", delivery_id)
         if existing is not None:
             return existing
         origin_id = schedule.get("origin_session_id")
+        relationship = self._session_relationship(origin_id) if isinstance(origin_id, str) else None
+        if relationship is not None and await relationship.wait_for_pending_changes():
+            raise ScheduleOriginChanged("The one-shot origin relationship settled; reread its binding")
+        version = relationship.version if relationship is not None else None
         origin = self.sessions.get(origin_id) if isinstance(origin_id, str) else None
-        if origin is not None:
-            receipt = await self.start_message(origin.id, prompt, source="schedule", delivery_id=delivery_id,
-                                               knowledge_context=context, schedule=schedule)
-            return origin.id, receipt
 
-        async def admit():
+        def validate_origin() -> None:
+            if (isinstance(origin_id, str) and relationship is not None
+                    and (relationship.version != version or self.sessions.get(origin_id) is not origin)):
+                raise ScheduleOriginChanged("The one-shot origin relationship changed during admission")
+
+        def validate_admission() -> None:
+            if registration_open is not None and not registration_open():
+                raise ScheduleChangedError("The one-shot registration has been replaced or closed")
+            validate_origin()
+
+        fire = OneShotFire(schedule, validate_admission)
+
+        async def admit_temporary() -> tuple[str, SubmissionReceipt]:
             candidate = await self._create_session(schedule["agent_id"], origin="schedule", persist=False)
             owner = self._session_owner(candidate)
             try:
                 request = QueuedPrompt(prompt, [], source="schedule", delivery_id=delivery_id, knowledge_context=context)
-                try:
-                    receipt = await owner.call_runtime(Submit(request, schedule=schedule))
-                except ScheduleChangedError:
-                    existing = await self.source_receipt("schedule", delivery_id)
-                    if existing is None:
-                        raise
-                    return existing
+                receipt = await owner.call_runtime(Submit(request, schedule=fire))
                 return candidate.id, receipt
             finally:
                 if candidate.id not in self.sessions:
                     await owner.close()
 
-        return await self._run_agent_operation(schedule["agent_id"], admit)
+        try:
+            if relationship is not None:
+                # The binding may have changed before we captured the phase,
+                # including when the old ID has since been restored.
+                current = await self.input_database().get_schedule_definition(schedule["id"])
+                validate_origin()
+                if current is None:
+                    raise ScheduleChangedError("Schedule disappeared before target preparation")
+                if current["origin_session_id"] != origin_id:
+                    raise ScheduleOriginChanged("The one-shot was rebound before target preparation")
+            if origin is not None:
+                receipt = await self.start_message(origin.id, prompt, source="schedule", delivery_id=delivery_id,
+                                                   knowledge_context=context, schedule=fire)
+                if not receipt.accepted:
+                    validate_origin()
+                return origin.id, receipt
+            return await self._run_agent_operation(schedule["agent_id"], admit_temporary)
+        except (AdmissionIntegrityError, AgentConfigurationError, ApplicationDeleting, CredentialBindingError,
+                DatabaseBusy, PreviousWriterUnconfirmed, QuotaExceeded, SessionAdmissionBusy, SessionAdmissionClosed,
+                SessionMailboxFull):
+            # No input was accepted. A phase that began during preparation
+            # can change the target and with it the reason for this refusal.
+            validate_origin()
+            raise
+        except (ScheduleChangedError, SubmissionConflict):
+            existing = await self.source_receipt("schedule", delivery_id)
+            if existing is None:
+                raise
+            return existing
+
+    async def wait_for_one_shot_admission(self, delivery_id: str) -> bool:
+        """Join original submitted commands before treating an empty lookup as final."""
+        replies = [reply for owner in self._session_owners.values() for reply in owner.one_shot_replies(delivery_id)]
+        if not replies:
+            return False
+        await asyncio.gather(*(asyncio.shield(reply) for reply in replies), return_exceptions=True)
+        return True
 
     async def await_session_execution(self, session_id: str, *, timeout: float | None = None) -> None:
         """Wait on captured execution/retirement resources, never a driver flag."""
@@ -777,11 +832,12 @@ class TurnsMixin(SessionManagerBase):
         if self.db:
             from dataclasses import replace
 
-            from ..context_models import align_context, context_target
+            from ..context_models import align_context
+            from .context import read_session_context_target
 
             async with self._configuration_boundary(session):
-                agent = await self._load_agent(session)
-                state = align_context(session.context_state, context_target(replace(session, claude_session_id=resume_id), agent))
+                target = await read_session_context_target(self.db, replace(session, claude_session_id=resume_id))
+                state = align_context(session.context_state, target) if target is not None else session.context_state
                 await self.db.update_session_field(session.id, claude_session_id=resume_id,
                     context_state=state.model_dump_json() if state else None)
                 if state != session.context_state:
@@ -1333,7 +1389,7 @@ class TurnsMixin(SessionManagerBase):
         """Fetch the session's owning agent row (or None for legacy/no-DB)."""
         if self.db is None or not session.agent_id:
             return None
-        return await self.db.get_agent(session.agent_id)
+        return await self.db.get_agent(session.agent_id, session.user_id)
 
     async def _load_connectors(
         self, agent: dict[str, Any] | None

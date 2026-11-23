@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { enterAccountCredentials } from "./current-account";
 import type { Message, PendingQuestion } from "../src/stores/sessionStore";
@@ -130,7 +131,7 @@ async function openChat(page: Page, history: number | ChatSnapshot = 40, pending
     else if (path === "/api/auth/login") data = { token: "follow-token" };
     else if (path === "/api/auth/identity") data = { user_id: "follow-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path.endsWith("/submissions")) data = { items: [], next_cursor: null };
     else if (path === `/api/sessions/${session.id}/messages`) { pages.push(route); return; }
@@ -763,7 +764,7 @@ test("a saved background result offers a return when its summary leaves the sele
   await expect(jump).toBeVisible();
 });
 
-for (const { label, offscreen = false, observesStart = true, clipping, mounted = false } of [
+for (const { label, offscreen = false, observesStart = true, clipping, mounted = false, reshaped = false } of [
   { label: "visible output" },
   { label: "offscreen output", offscreen: true },
   { label: "offscreen output without the start event", offscreen: true, observesStart: false },
@@ -772,6 +773,7 @@ for (const { label, offscreen = false, observesStart = true, clipping, mounted =
   { label: "ellipsis-replaced output in an offscreen mounted card", offscreen: true, clipping: "ellipsis", mounted: true },
   { label: "ellipsis-replaced output in an unmounted card", offscreen: true, clipping: "ellipsis" },
   { label: "one readable glyph in an unmounted card", offscreen: true, clipping: "one glyph" },
+  { label: "reshaped Arabic output in an offscreen mounted card", offscreen: true, mounted: true, reshaped: true },
 ]) {
 test(`a completed task's ${label} respects reading without fetching full output`, async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page, 4);
@@ -783,10 +785,21 @@ test(`a completed task's ${label} respects reading without fetching full output`
   const taskId = "background-preview";
   const startedAt = "2026-11-20T00:00:00Z";
   const prefix = clipping === "ellipsis" ? 18 : clipping === "one glyph" ? 17 : 110;
-  const preview = clipping ? "\u00a0".repeat(prefix) + "RESULT" : "A newly saved background output preview";
+  const joined = "\u0644\u0627";
+  const preview = reshaped ? "\u0644\u200d\u0627" :
+    clipping ? "\u00a0".repeat(prefix) + "RESULT" : "A newly saved background output preview";
+  const summaryPath = `**/api/sessions/${sessionId}/bg-task-summaries/${taskId}`;
+  const completion = { type: "bg_completed", task_id: taskId, status: "completed", completed_at: "2026-11-20T00:01:00Z", exit_code: 0 };
+  const taskSummary = (output: string) => ({ id: taskId, session_id: sessionId, command: "echo preview",
+    description: null, status: "completed", started_at: startedAt, completed_at: completion.completed_at,
+    exit_code: 0, output_preview: output, has_output: true, preview_truncated: false });
+  let summaryReads = 0;
+  let fullReads = 0;
+  let releaseSummary!: () => void;
+  const holdSummary = new Promise<void>((resolve) => { releaseSummary = resolve; });
   const reference = `/api/sessions/${sessionId}/messages/5`;
   await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
-    role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(mounted ? 9 : 55),
+    role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(reshaped ? 17 : mounted ? 9 : 55),
   } }));
   send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
   if (observesStart) send({ type: "bg_started", task_id: taskId, command: "echo preview", started_at: startedAt });
@@ -797,6 +810,27 @@ test(`a completed task's ${label} respects reading without fetching full output`
   await expect(toolRow).toBeInViewport();
   if (observesStart) await expect(scroller.getByRole("button", { name: "Expand bg task" })).toBeInViewport();
   else await expect(scroller.getByRole("button", { name: "Retry task summary" })).toBeInViewport();
+  const output = scroller.locator("[data-bg-output]");
+  if (reshaped) {
+    let releaseFirst!: () => void;
+    const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    await page.route(summaryPath, async (route) => {
+      const initial = ++summaryReads === 1;
+      await (initial ? holdFirst : holdSummary);
+      return route.fulfill({ json: taskSummary(initial ? joined : preview) });
+    });
+    try {
+      send(completion);
+      await expect.poll(() => summaryReads).toBe(1);
+      // The second event arrives while the first confirmation is in flight.
+      send(completion);
+      await settle();
+    } finally {
+      releaseFirst();
+    }
+    await expect(output).toHaveText(joined);
+    await expect.poll(() => summaryReads).toBe(2);
+  }
   if (offscreen) {
     await scroller.getByRole("button", { name: "View full message" }).click();
     if (mounted) {
@@ -815,25 +849,19 @@ test(`a completed task's ${label} respects reading without fetching full output`
   const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
   await expect(jump).toHaveCount(0);
 
-  let summaryReads = 0;
-  let fullReads = 0;
-  let releaseSummary!: () => void;
-  const holdSummary = new Promise<void>((resolve) => { releaseSummary = resolve; });
   await page.route(`**/api/sessions/${sessionId}/bg-tasks/${taskId}`, (route) => {
     fullReads++;
     return route.fulfill({ status: 503, json: {} });
   });
-  await page.route(`**/api/sessions/${sessionId}/bg-task-summaries/${taskId}`, async (route) => {
+  if (!reshaped) await page.route(summaryPath, async (route) => {
     summaryReads++;
     await holdSummary;
-    return route.fulfill({ json: { id: taskId, session_id: sessionId, command: "echo preview",
-      description: null, status: "completed", started_at: startedAt, completed_at: "2026-11-20T00:01:00Z",
-      exit_code: 0, output_preview: preview, has_output: true, preview_truncated: false } });
+    return route.fulfill({ json: taskSummary(preview) });
   });
   const summary = page.waitForResponse((response) => response.url().endsWith(`/bg-task-summaries/${taskId}`));
-  send({ type: "bg_completed", task_id: taskId, status: "completed", completed_at: "2026-11-20T00:01:00Z", exit_code: 0 });
+  if (!reshaped) send(completion);
   try {
-    await expect.poll(() => summaryReads).toBe(1);
+    await expect.poll(() => summaryReads).toBe(reshaped ? 2 : 1);
     await settle();
     await expect(jump).toHaveCount(0);
   } finally {
@@ -844,12 +872,10 @@ test(`a completed task's ${label} respects reading without fetching full output`
     await settle();
     const offers = await jump.count();
     if (mounted) {
-      const output = scroller.locator("[data-bg-output]");
       await expect(output).toBeAttached();
       await expect(output).not.toBeInViewport();
     }
     await scroller.press("End");
-    const output = scroller.locator("[data-bg-output]");
     await expect(output).toBeInViewport();
     const glyphSpace = await output.evaluate((element) => {
       const text = element.firstChild!;
@@ -881,11 +907,17 @@ test(`a completed task's ${label} respects reading without fetching full output`
     expect(offers).toBe(clipping === "one glyph" ? 1 : 0);
     return;
   }
+  if (reshaped) await expect(output).toHaveText(preview);
   if (offscreen) {
     await expect(jump).toBeVisible();
     await jump.click();
   }
   await expect(scroller.getByText(preview, { exact: true })).toBeInViewport({ ratio: 1 });
+  if (reshaped) {
+    const reshapedWidth = (await output.boundingBox())!.width;
+    await output.evaluate((element, text) => { (element.firstChild as Text).data = text; }, joined);
+    expect(reshapedWidth).toBeGreaterThan((await output.boundingBox())!.width);
+  }
   await expect(jump).toHaveCount(0);
   if (!offscreen) expect(await page.evaluate(() => window.getSelection()?.toString())).toBe("Saved row 4");
   expect(fullReads).toBe(0);
@@ -1428,9 +1460,39 @@ test("an unmounted empty Markdown image does not offer a return", async ({ page 
   await expect(jump).toBeVisible();
 });
 
-for (const kind of ["root reply", "first helper answer", "tool result"] as const) {
+async function expectToolPreviewSuffixClipped(preview: Locator) {
+  await expect(preview).toContainText("Clipped");
+  expect(await preview.evaluate((element) => {
+    const suffix = document.createRange();
+    const text = element.firstChild!;
+    suffix.setStart(text, text.textContent!.indexOf("Clipped"));
+    suffix.setEnd(text, text.textContent!.length);
+    const bounds = suffix.getBoundingClientRect();
+    return bounds.width > 0 && bounds.left >= element.getBoundingClientRect().right;
+  })).toBe(true);
+}
+
+function toolReturnResult(kind: "preview" | "error" | "image", seq: number) {
+  const output = kind === "preview" ? "Readable tool text" : "";
+  const savedPath = "/tmp/generated-image.png";
+  return {
+    text: kind === "preview" ? output : kind === "error" ? "Error" : savedPath,
+    event: { type: "tool_result", seq, output,
+      ...(kind === "error" ? { is_error: true } : {}),
+      ...(kind === "image" ? {
+        runtime_metadata: identity("root", "image"),
+        tool_input: { native_item: { type: "imageGeneration", status: "completed", savedPath } },
+      } : {}),
+    },
+  };
+}
+
+for (const kind of ["root reply", "first helper answer", "tool result", "tool error", "tool image"] as const) {
 test(`a new saved ${kind} outside the mounted rows offers a return`, async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page, 4);
+  if (kind === "tool result") {
+    await page.addStyleTag({ content: ".msg-tool-result .tool-preview { max-width: 19.5ch }" });
+  }
   const reference = "/api/sessions/follow-output/messages/5";
   await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
     role: "assistant", type: "text", seq: 5,
@@ -1445,12 +1507,25 @@ test(`a new saved ${kind} outside the mounted rows offers a return`, async ({ pa
   await settle();
   await expect(jump).toHaveCount(0);
   const movement = await trackTop(paragraph);
-  const reply = scroller.getByText("Newly saved response at the end", { exact: true });
+  const tool = kind === "tool result" ? toolReturnResult("preview", 11) :
+    kind === "tool error" ? toolReturnResult("error", 7) : kind === "tool image" ? toolReturnResult("image", 7) : undefined;
+  const response = tool?.text ?? "Newly saved response at the end";
+  const reply = scroller.getByText(response, { exact: true });
   send({ type: "assistant_text", seq: 6, content: "[reference]: https://example.invalid" });
   await settle();
   await expect(jump).toHaveCount(0);
-  if (kind === "tool result") send({ type: "tool_result", seq: 7, output: "Newly saved response at the end" });
-  else send({ type: "assistant_text", seq: 7, content: "Newly saved response at the end",
+  if (kind === "tool result") {
+    for (const [index, output] of [" ".repeat(120) + "Beyond the preview character limit",
+      "\u00a0".repeat(18) + "Clipped", "\u200b\u00a0\u200b", "\u2800"].entries()) {
+      const seq = 7 + index;
+      send({ type: "tool_result", seq, output });
+      await settle();
+      await expect(scroller.locator(`[data-message-key="message:${seq}"]`)).toHaveCount(0);
+      await expect(jump).toHaveCount(0);
+    }
+  }
+  if (tool) send(tool.event);
+  else send({ type: "assistant_text", seq: 7, content: response,
     ...(kind === "first helper answer" ? { runtime_metadata: identity("new-helper", "answer") } : {}) });
   await expect(jump).toBeVisible();
   await expect(reply).toHaveCount(0);
@@ -1459,6 +1534,71 @@ test(`a new saved ${kind} outside the mounted rows offers a return`, async ({ pa
   await jump.click();
   await expect(reply).toBeInViewport({ ratio: 1 });
   await expect.poll(gap).toBeLessThanOrEqual(2);
+  if (kind === "tool result") {
+    const limited = scroller.locator('[data-message-key="message:7"] .tool-preview');
+    const clipped = scroller.locator('[data-message-key="message:8"] .tool-preview');
+    await expect(limited).toHaveText("");
+    await expect(clipped).toBeInViewport({ ratio: 1 });
+    const remainingCells = await clipped.evaluate((element) => {
+      const text = element.firstChild!;
+      const start = text.textContent!.indexOf("Clipped");
+      const glyph = document.createRange();
+      glyph.setStart(text, start);
+      glyph.setEnd(text, start + 1);
+      const bounds = glyph.getBoundingClientRect();
+      return (element.getBoundingClientRect().right - bounds.left) / bounds.width;
+    });
+    expect(remainingCells).toBeGreaterThanOrEqual(1);
+    expect(remainingCells).toBeLessThan(2);
+    const paint = await clipped.screenshot();
+    await clipped.evaluate((element) => {
+      const text = element.firstChild as Text;
+      text.data = text.data.replace("Clipped", "Xlipped");
+    });
+    expect(paint.equals(await clipped.screenshot())).toBe(true);
+  }
+});
+}
+
+for (const kind of ["preview", "error", "image"] as const) {
+test(`mounted tool result can offer a return for its ${kind}`, async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 720 });
+  const { scroller, send, settle } = await openChat(page, 4);
+  const last = scroller.getByText("Saved row 4", { exact: true });
+  await last.evaluate((element) => window.getSelection()!.selectAllChildren(element));
+  const slack = await last.evaluate((element) => {
+    const row = element.closest("[data-message-key]")!;
+    return element.closest(".chat-messages")!.getBoundingClientRect().bottom - row.getBoundingClientRect().bottom;
+  });
+  await page.setViewportSize({ width: 900, height: 720 - Math.floor(slack) });
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  const row = (seq: number) => scroller.locator(`[data-message-key="message:${seq}"]`);
+  const clipped = row(5).locator(".tool-preview");
+  send({ type: "tool_result", seq: 5, output: "\u00a0".repeat(110) + "Clipped" });
+  await expect(clipped).toBeAttached();
+  await expect(clipped).not.toBeInViewport();
+  await expectToolPreviewSuffixClipped(clipped);
+  await settle();
+  await expect(jump).toHaveCount(0);
+
+  for (const [index, output] of ["\u200b\u00a0\u200b", "\u2800"].entries()) {
+    const seq = 6 + index;
+    send({ type: "tool_result", seq, output });
+    const preview = row(seq).locator(".tool-preview");
+    await expect(preview).toBeAttached();
+    await expect(preview).not.toBeInViewport();
+    await settle();
+    await expect(jump).toHaveCount(0);
+  }
+
+  const tool = toolReturnResult(kind, 8);
+  send(tool.event);
+  const readable = row(8).getByText(tool.text, { exact: true });
+  await expect(readable).toBeAttached();
+  await expect(readable).not.toBeInViewport();
+  await expect(jump).toBeVisible();
+  await jump.click();
+  await expect(readable).toBeInViewport({ ratio: 1 });
 });
 }
 

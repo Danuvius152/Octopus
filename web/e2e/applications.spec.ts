@@ -107,6 +107,132 @@ test.describe("Applications UI", () => {
     } finally { release(); }
   });
 
+  for (const action of ["restore", "delete", "archive"] as const) {
+    const oldKind = action === "archive" ? "application_updated" : "application_archived";
+    test(`a queued ${oldKind} frame cannot undo a confirmed App ${action}`, async ({ page, request }) => {
+      const agents = await (await request.get(`${API}/agents`, { headers })).json() as { id: string }[];
+      const created = await request.post(`${API}/applications`, {
+        headers: jsonHeaders, data: { name: "Delayed archive", description: "Exercise App metadata", agent_id: agents[0].id },
+      });
+      expect(created.status()).toBe(201);
+      const app = await created.json() as AppRow;
+
+      let capture = false;
+      let sendOldFrame: (() => void) | undefined;
+      await page.routeWebSocket("**/ws?*", (socket) => {
+        const server = socket.connectToServer();
+        server.onMessage((message) => {
+          const frame = JSON.parse(String(message));
+          if (frame.application_id !== app.id) socket.send(message);
+          else if (capture && frame.type === oldKind && (action !== "archive" || frame.application?.archived === false)) {
+            sendOldFrame = () => socket.send(message);
+          }
+        });
+        socket.onMessage((message) => server.send(message));
+      });
+
+      let holdReads = false;
+      let confirming = false;
+      let release!: () => void;
+      const confirmation = new Promise<void>((resolve) => { release = resolve; });
+      await page.route("**/api/applications", async (route) => {
+        if (holdReads) {
+          confirming = true;
+          await confirmation;
+        }
+        await route.continue();
+      });
+
+      try {
+        await login(page);
+        const sidebar = page.locator(".application-item", { hasText: app.name });
+        await sidebar.click();
+        capture = action !== "archive";
+        const archived = await request.post(`${API}/applications/${app.id}/archive`, { headers });
+        expect(archived.status()).toBe(200);
+        if (action === "archive") {
+          capture = true;
+          const restored = await request.post(`${API}/applications/${app.id}/unarchive`, { headers });
+          expect(restored.status()).toBe(200);
+        }
+        await expect.poll(() => Boolean(sendOldFrame)).toBe(true);
+
+        const endpoint = action === "restore" ? "/unarchive" : action === "archive" ? "/archive" : "";
+        const [receipt] = await Promise.all([
+          page.waitForResponse((response) => new URL(response.url()).pathname === `/api/applications/${app.id}${endpoint}` &&
+            response.request().method() === (action === "delete" ? "DELETE" : "POST")),
+          page.evaluate(async ({ id, action }) => {
+            const { applications } = await new Function("return import('/src/lib/applicationList.ts')")();
+            if (action === "restore") await applications.restore(id);
+            else if (action === "archive") await applications.archive(id);
+            else await applications.remove(id, false);
+          }, { id: app.id, action }),
+        ]);
+        expect(receipt.status()).toBe(action === "delete" ? 204 : 200);
+        // Wait for the list to accept the receipt or its confirming read before releasing the old frame.
+        if (action === "restore") await expect(sidebar).toHaveClass(/\bactive\b/);
+        else await expect(sidebar).toHaveCount(0);
+        await page.waitForFunction(async () => {
+          const { useSessionStore } = await new Function("return import('/src/stores/sessionStore.ts')")();
+          return useSessionStore.getState().applicationReads.live.stale === false;
+        });
+
+        holdReads = true;
+        sendOldFrame!();
+        await expect.poll(() => confirming).toBe(true);
+        if (action === "restore") {
+          await expect(sidebar).toHaveClass(/\bactive\b/);
+          await expect(page.locator(".application-view")).toBeVisible();
+        } else {
+          await expect(sidebar).toHaveCount(0);
+          await expect(page.locator(".application-view")).toHaveCount(0);
+        }
+        if (action === "delete") {
+          const archivedIds = await page.evaluate(async () => {
+            const { useSessionStore } = await new Function("return import('/src/stores/sessionStore.ts')")();
+            return useSessionStore.getState().archivedApplications.map((item: AppRow) => item.id);
+          });
+          expect(archivedIds).not.toContain(app.id);
+        }
+      } finally { release(); }
+    });
+  }
+
+  test("a real live creation receipt cannot reopen an App deleted before delivery", async ({ page, request }) => {
+    let captured: AppRow | undefined;
+    let posts = 0;
+    let release!: () => void;
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    await page.route("**/api/applications", async (route) => {
+      if (route.request().method() !== "POST") return route.continue();
+      posts++;
+      const receipt = await route.fetch();
+      expect(receipt.status()).toBe(201);
+      captured = await receipt.json() as AppRow;
+      await hold;
+      await route.fulfill({ response: receipt });
+    });
+    try {
+      await login(page);
+      await page.locator(".btn-application-add").click();
+      const name = "Deleted before creation receipt";
+      await page.getByLabel("Name", { exact: true }).fill(name);
+      await page.getByLabel(/What problem does this app solve/).fill("Test the WebSocket deletion and HTTP receipt order");
+      await page.getByRole("button", { name: "Start Build" }).click();
+      await expect.poll(() => captured?.id).toBeTruthy();
+      const sidebar = page.locator(".application-item", { hasText: name });
+      await expect(sidebar).toBeVisible();
+      const deletion = await request.delete(`${API}/applications/${captured!.id}`, { headers });
+      expect(deletion.status()).toBe(204);
+      await expect(sidebar).toHaveCount(0);
+      release();
+      await expect(page.getByRole("status").filter({ hasText: "The application was deleted." })).toBeVisible();
+      await expect(page.locator(".application-view")).toHaveCount(0);
+      await expect(sidebar).toHaveCount(0);
+      expect(posts).toBe(1);
+    } finally { release(); }
+  });
+
   test("the sidebar section opens the create pane and validates it", async ({
     page,
   }) => {

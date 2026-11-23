@@ -20,7 +20,7 @@ from server.sessions.commands import process_command
 from server.sessions.lifecycle import SessionArchiveFailed
 from server.sessions.presentation import session_info
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 SAMPLES = Path(__file__).parents[1] / "web/src/lib/wsProducerFixtures.json"
 
@@ -103,22 +103,22 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         session = manager.sessions[session.id]
         assert samples["session_unarchived"]["session"] == session_info(session).model_dump()
         class DiagnosticRun(FakeRunBase):
-            async def start(self, *args, **kwargs):
+            async def _start(self, *args, **kwargs):
                 self.alive = True
 
-            async def stream(self):
+            async def _stream(self):
                 yield HarnessEvent(type="error", error_code="backend_diagnostic", content="Original provider diagnostic")
                 yield HarnessEvent(type="result")
 
             def is_alive(self):
                 return self.alive
 
-            async def stop(self):
+            async def _stop_process(self):
                 self.alive = False
 
         # Restoring now establishes the real Owner before exposing live state.
         # Produce its diagnostic through execution, rather than writing beside it.
-        monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: DiagnosticRun())
+        monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: DiagnosticRun()))
         diagnostic = await manager.start_message(session.id, "Observe provider diagnostic", source="human")
         await asyncio.wait_for(diagnostic.wait(), 3)
         await manager.await_session_execution(session.id, timeout=3)
@@ -130,22 +130,22 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         entered = asyncio.Event()
 
         class ConflictRun(FakeRunBase):
-            async def start(self, *args, **kwargs):
+            async def _start(self, *args, **kwargs):
                 self.alive = True
                 entered.set()
 
-            async def stream(self):
+            async def _stream(self):
                 await release.wait()
                 yield HarnessEvent(type="result")
 
             def is_alive(self):
                 return self.alive
 
-            async def stop(self):
+            async def _stop_process(self):
                 self.alive = False
                 release.set()
 
-        monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: ConflictRun())
+        monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: ConflictRun()))
         receipt = await manager.start_message(session.id, "Conflicting original outcome", request_id="conflict-request")
         await asyncio.wait_for(entered.wait(), 3)
         _, next_seq, _ = await db.message_sequence_state(session.id)

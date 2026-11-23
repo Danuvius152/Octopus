@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { enterAccountCredentials } from "./current-account";
 
@@ -27,7 +28,7 @@ for (const backend of ["codex", "claude-code"]) {
       else if (path === "/api/auth/login") data = { token: "browser-token" };
       else if (path === "/api/auth/identity") data = { user_id: "compact-user", label: "Operator", is_admin: true };
       else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend, is_system: true, pinned: true, archived: false }];
-      else if (path === "/api/backends") data = { available: [backend], default: backend, models: { [backend]: [] } };
+      else if (path === "/api/backends") data = backendCatalogFixture([backend], backend);
       else if (path === "/api/sessions") data = [session];
       else if (path === `/api/sessions/${session.id}/submissions`) data = { items: [] };
       else if (path === `/api/sessions/${session.id}`) data = { ...session, messages: [], next_message_seq: 0,

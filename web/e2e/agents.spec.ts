@@ -1,6 +1,7 @@
 import { accountToken, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "./test";
 import { systemAgentId } from "./system-agent";
+import type { BackendCatalog } from "../src/api";
 
 const AGENTS_API = "http://localhost:8765/api/agents";
 const SESSIONS_API = "http://localhost:8765/api/sessions";
@@ -196,10 +197,14 @@ test.describe("Agents", () => {
   });
 
   test("sets an agent's default harness to Codex and it persists", async ({
-    page,
+    page, request,
   }) => {
-    // The codex CLI is on PATH in the test env, so /api/backends reports it
-    // and the Harness selector appears.
+    const headers = { Authorization: `Bearer ${accountToken()}` };
+    const response = await request.get("http://localhost:8765/api/backends", { headers });
+    expect(response.ok()).toBe(true);
+    const catalog: BackendCatalog = await response.json();
+    expect(catalog.supported).toContain("codex");
+    expect(catalog.available).toContain("claude-code");
     await page.locator(".btn-agent-add").click();
     await page.locator("#agent-name").fill("E2E Codex Agent");
     await expect(page.locator(".agent-backend-select")).toBeVisible();
@@ -221,6 +226,40 @@ test.describe("Agents", () => {
       "aria-checked",
       "true"
     );
+
+    await page.locator(".btn-agent-cancel").click();
+    const form = page.getByRole("group", { name: "New session" });
+    const openSessionForm = async () => {
+      await row.getByRole("button", { name: "New session for E2E Codex Agent" }).click();
+      await form.getByRole("button", { name: /working dir/ }).click();
+    };
+    const createSession = async (name: string, expectedEngine: string, override: string | null) => {
+      await form.getByPlaceholder("Session name").fill(name);
+      const receipt = page.waitForResponse((result) => result.request().method() === "POST"
+        && /\/api\/agents\/[^/]+\/sessions$/.test(new URL(result.url()).pathname));
+      await form.getByRole("button", { name: "Create session" }).click();
+      const created = await receipt;
+      expect(created.request().postDataJSON()).toMatchObject({ backend: override });
+      expect(created.status()).toBe(201);
+      const { id } = await created.json();
+      const saved = await request.get(`${SESSIONS_API}/${id}`, { headers });
+      expect(saved.ok()).toBe(true);
+      expect(await saved.json()).toMatchObject({ name, backend: expectedEngine });
+      await expect(form).toBeHidden();
+    };
+    await openSessionForm();
+    const engine = form.getByLabel("Engine", { exact: true });
+    const options = engine.locator("option");
+    await expect(engine).toHaveValue("");
+    await expect(options.first()).toContainText("Agent default (Codex");
+    await expect(options).toHaveCount(catalog.available.length + 1);
+    expect(await options.evaluateAll((rows) => rows.map((option) => (option as HTMLOptionElement).value)))
+      .toEqual(["", ...catalog.available]);
+    await createSession("Inherited Codex", "codex", null);
+
+    await openSessionForm();
+    await engine.selectOption("claude-code");
+    await createSession("Detected override", "claude-code", "claude-code");
   });
 
   test("the Default Agent cannot be archived from settings", async ({ page }) => {

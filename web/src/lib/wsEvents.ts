@@ -184,7 +184,7 @@ const definitions = [
   event("agent_deleted", { agent_id: id }),
   event("session_created", { ...inSession, session: optional(session) }),
   event("session_unarchived", { ...inSession, session, dispatch_state: optional(dispatch) }),
-  event("session_archived", { old_session_id: id, new_session_id: nullable(id), name: optional(text), ...settings,
+  event("session_archived", { old_session_id: id, new_session_id: optional(nullable(id)), name: optional(text), ...settings,
     dispatch_state: optional(dispatch), archive_result: optional(archiveResult) }),
   event("session_forked", { fork_session_id: id }),
   event("session_deleted", inSession),
@@ -210,9 +210,9 @@ function identitiesAgree(data: WsEvent): boolean {
     case "agent_archived":
       return data.agent === undefined || data.agent_id === data.agent.id && data.agent.archived;
     case "session_archived":
-      return (data.new_session_id === null || data.name !== undefined) &&
+      return data.new_session_id !== data.old_session_id &&
         (!data.archive_result || data.archive_result.old_session_id === data.old_session_id &&
-          data.archive_result.new_session_id === data.new_session_id);
+          (data.new_session_id === undefined || data.archive_result.new_session_id === data.new_session_id));
     case "session_created":
       return !data.session || data.session.id === data.session_id && !data.session.archived;
     case "session_unarchived":

@@ -7,6 +7,7 @@ classification routing, safe-revert, and dispatch-only replay wrapping.
 
 import asyncio
 import json
+import sqlite3
 import subprocess
 
 import pytest
@@ -20,7 +21,7 @@ from server.session_manager import ForkError, SessionManager
 from server.sessions import forking as sm_forking
 from server.sessions.publication import WorkPublication
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 
 @pytest.fixture
@@ -274,20 +275,20 @@ async def test_fork_refused_active_task(manager, monkeypatch):
     started, release = asyncio.Event(), asyncio.Event()
 
     class HeldParent(FakeRunBase):
-        async def start(self, *_args, **_kwargs):
+        async def _start(self, *_args, **_kwargs):
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await release.wait()
             yield HarnessEvent(type="result")
 
         async def interrupt(self):
             release.set()
 
-        async def stop(self):
+        async def _stop_process(self):
             release.set()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *_args, **_kwargs: HeldParent())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *_args, **_kwargs: HeldParent()))
     receipt = await manager.start_message(parent.id, "Keep this parent active")
     try:
         await asyncio.wait_for(started.wait(), 1)
@@ -384,23 +385,39 @@ async def test_recover_purges_initializing(manager, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_recover_keeps_initializing_when_cleanup_raises(manager, monkeypatch):
+async def test_startup_retains_failed_fork_cleanup_and_cleans_its_neighbor(manager, monkeypatch):
     parent = await _seed_parent(manager, backend="claude-code")
-    await manager.db.create_fork_session(
-        fork_id="orphan02", name="o", working_dir="/repo",
-        created_at="2026-06-08T00:00:00+00:00", parent_id=parent.id,
-        backend="claude-code", agent_id=parent.agent_id, credential_id=None,
-        resume_id="r", fork_after_seq=1,
-    )
+    db = manager.db
+    fork_ids = ("orphan-a", "orphan-b")
+    for fork_id in fork_ids:
+        await db.create_fork_session(
+            fork_id=fork_id, name="Interrupted fork", working_dir=parent.working_dir,
+            created_at="2026-06-08T00:00:00+00:00", parent_id=parent.id,
+            backend=parent.backend, agent_id=parent.agent_id, credential_id=None,
+            resume_id=fork_id, fork_after_seq=1, user_id=parent.user_id,
+        )
     harness = get_harness("claude-code")
+    before = {row["id"]: row for row in await db.load_incomplete_forks()}
+    messages = {fork_id: await db.load_messages(fork_id) for fork_id in fork_ids}
+    attempted = []
 
-    async def cleanup_boom(*a, **k):
-        raise OSError("disk full")
+    async def cleanup(working_dir, resume_id_hint, fork_id, **kwargs):
+        attempted.append(fork_id)
+        if len(attempted) == 1:
+            raise OSError("disk full")
 
-    monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", cleanup_boom)
-    await manager._recover_incomplete_forks()
-    rows = await manager.db.load_incomplete_forks()
-    assert any(r["id"] == "orphan02" for r in rows)  # still there for retry
+    monkeypatch.setattr(harness, "cleanup_incomplete_fork_artifacts", cleanup)
+    cold = SessionManager()
+    await cold.initialize(db)
+    failed, healthy = attempted
+    assert await db.load_incomplete_forks() == [before[failed]]
+    assert await db.load_messages(failed) == messages[failed]
+    assert await db.get_session_binding(healthy) is None
+    assert cold.get_session(failed, parent.user_id) is None
+
+    await SessionManager().initialize(db)
+    assert attempted == [failed, healthy, failed]
+    assert await db.get_session_binding(failed) is None
 
 
 @pytest.mark.asyncio
@@ -422,6 +439,30 @@ async def test_recover_finalizes_reverting(manager):
     note = json.loads(row["fork_metadata"])["first_turn_note"]
     assert "unknown" in note and "Inspect" in note
     assert "were NOT reverted" not in note and "WERE reverted" not in note
+
+
+async def test_startup_propagates_failure_to_persist_revert_recovery(manager):
+    parent = await _seed_parent(manager, backend="codex")
+    db = manager.db
+    await db.create_fork_session(
+        fork_id="reverting-fork", name="Reverting fork", working_dir=parent.working_dir,
+        created_at="2026-06-08T00:00:00+00:00", parent_id=parent.id,
+        backend=parent.backend, agent_id=parent.agent_id, credential_id=None,
+        resume_id=None, fork_after_seq=1, user_id=parent.user_id,
+    )
+    await db.update_session_field("reverting-fork", fork_status="reverting")
+    before = await db.load_incomplete_forks()
+    async with db.transaction(write=True) as tx:
+        await tx.execute(
+            "CREATE TRIGGER reject_revert_recovery BEFORE UPDATE OF fork_status ON sessions "
+            "WHEN OLD.id = 'reverting-fork' AND NEW.fork_status = 'ready' "
+            "BEGIN SELECT RAISE(ABORT, 'revert recovery write failed'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="revert recovery write failed"):
+        await SessionManager().initialize(db)
+
+    assert await db.load_incomplete_forks() == before
 
 
 # ------------------------------------------------------------------ persistence
@@ -548,16 +589,17 @@ class _FakeRun(FakeRunBase):
     """Records the dispatch prompt and emits a clean session_started+result."""
 
     def __init__(self):
+        super().__init__()
         self.started_prompt = None
 
-    async def start(self, prompt, working_dir, resume_id=None, credential=None):
+    async def _start(self, prompt, working_dir, resume_id=None, credential=None):
         self.started_prompt = prompt
 
-    async def stream(self):
+    async def _stream(self):
         yield HarnessEvent(type="session_started", session_id="newthread")
         yield HarnessEvent(type="result", session_id="newthread")
 
-    async def stop(self):
+    async def _stop_process(self):
         pass
 
     async def interrupt(self):
@@ -571,7 +613,7 @@ async def test_codex_first_turn_wraps_dispatch_only(manager, monkeypatch):
     assert fork.fork_needs_replay is True
 
     fake = _FakeRun()
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: fake))
 
     receipt = await manager.start_message(fork.id, "edited prompt")
     completion = await asyncio.wait_for(receipt.wait(), 2)

@@ -50,6 +50,8 @@ from server.session_manager import SessionManager, session_manager
 from server.users import UserManager
 from tests.accounts import create_account
 from tests.app_sse import app_sse_event
+from tests.fake_run import capture_model_runs
+from tests.session_runtime import wait_dispatch_idle
 from tests.submission import accepted_receipt
 
 # --------------------------------------------------------------- fixtures
@@ -232,6 +234,53 @@ async def test_ask_opens_a_conversation_and_returns_the_reply(aam, am, db, turns
     assert os.path.isdir(session.working_dir)
 
 
+async def test_app_directory_and_new_requests_isolate_a_bad_bound_agent(aam, am, db, turns):
+    row = await _make_app(am, db)
+    bound = await db.get_agent(row["agent_id"])
+    system = await db.get_system_agent(row["user_id"])
+    foreign = await UserManager(db).create_user(username="app-foreign", password="test-password")
+    await AgentManager(db).create_agent(name="Invisible", user_id=foreign["id"])
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE agents SET subagents = 'null' WHERE id = ?", (bound["id"],))
+
+    assert {entry["name"] for entry in await aam.list_agents(row["user_id"])} == {bound["name"], system["name"]}
+    with pytest.raises(AppAgentError) as error:
+        await aam.ask(row, message="Choose the bound agent")
+    assert error.value.status_code == 409
+    assert bound["id"] in str(error.value) and "subagents" in str(error.value)
+    result = await aam.ask(row, agent=system["name"].upper(), message="Choose the healthy neighbor")
+    assert aam.session_mgr.get_session(result["conversation_id"]).agent_id == system["id"]
+    await db.archive_agent(bound["id"])
+    fallback = await aam.ask(row, message="The binding is archived")
+    assert aam.session_mgr.get_session(fallback["conversation_id"]).agent_id == system["id"]
+
+
+async def test_app_continuation_with_bad_agent_keeps_its_original_receipt(aam, am, db, mgr, monkeypatch):
+    row = await _make_app(am, db)
+    runs = capture_model_runs(mgr, monkeypatch)
+    first = await aam.begin_turn(row, message="Original ask")
+    await wait_dispatch_idle(mgr, first.session_id)
+    await asyncio.wait_for(first.done.wait(), 3)
+    original = await aam.get_request_status(row["id"], first.session_id, first.request_id)
+    assert original["state"] == "completed"
+    assert [run.request_id for run in runs if run.session_id == first.session_id] == [first.request_id]
+
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE agents SET subagents = '[' WHERE id = ?", (row["agent_id"],))
+    with pytest.raises(AppAgentError, match="subagents") as error:
+        await aam.begin_turn(row, conversation_id=first.session_id, message="Refuse this ask")
+    assert error.value.status_code == 409 and row["agent_id"] in str(error.value)
+    assert (await aam.get_request_status(row["id"], first.session_id, first.request_id)) == original
+    assert [run.request_id for run in runs if run.session_id == first.session_id] == [first.request_id]
+
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE agents SET subagents = '[]' WHERE id = ?", (row["agent_id"],))
+    retry = await aam.begin_turn(row, conversation_id=first.session_id, message="Run after repair")
+    await wait_dispatch_idle(mgr, retry.session_id)
+    assert retry.session_id == first.session_id
+    assert [run.request_id for run in runs if run.session_id == first.session_id] == [first.request_id, retry.request_id]
+
+
 @pytest.mark.asyncio
 async def test_the_first_turn_carries_the_preamble_and_later_ones_do_not(
     aam, am, db, turns
@@ -278,9 +327,9 @@ async def test_agent_is_addressed_by_name_and_defaults_to_the_apps_own(
 
 @pytest.mark.asyncio
 async def test_listing_agents_says_who_can_be_addressed(aam, am, db, turns):
-    await _make_app(am, db)
-    await AgentManager(db).create_agent(name="Vera", description="researcher", user_id=(await db.get_system_agent())["user_id"])
-    listed = await aam.list_agents()
+    row = await _make_app(am, db)
+    await AgentManager(db).create_agent(name="Vera", description="researcher", user_id=row["user_id"])
+    listed = await aam.list_agents(row["user_id"])
     assert "Vera" in [a["name"] for a in listed]
     # Nothing about how an agent is wired up leaks to an app.
     assert set(listed[0]) == {"name", "description", "avatar", "is_default"}

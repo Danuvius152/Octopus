@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
+from .agent_configuration import AgentConfigurationError
 from .aio import complete_cleanup
 from .application_resources import (
     ApplicationResource,
@@ -43,7 +44,8 @@ from .application_resources import data_dir_for as data_dir_for
 from .application_resources import runtime_dir_for as runtime_dir_for
 from .config import settings
 from .crypto import is_sha256_hexdigest
-from .db.applications import ApplicationNameConflict
+from .db.applications import ApplicationNameConflict, ApplicationVisibilityField
+from .diagnostics import exception_diagnostic
 from .sessions.runtime_types import SessionAdmissionClosed
 from .sessions.submission import RequestCompletion
 from .workspace import paths_for
@@ -71,6 +73,12 @@ class ApplicationError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+class ApplicationDeletedDuringCreation(ApplicationError):
+    def __init__(self, app_id: str) -> None:
+        super().__init__("Application was deleted during creation", status_code=409)
+        self.app_id = app_id
 
 
 def app_scope_token(app_id: str) -> str:
@@ -355,7 +363,10 @@ class ApplicationManager:
         if row.get("deletion") is not None:
             raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
 
-    async def run_effect[T](self, app_id: str, user_id: str | None, operation: Callable[[], Awaitable[T]]) -> T:
+    async def run_effect[T](
+        self, app_id: str, user_id: str | None, operation: Callable[[], Awaitable[T]], *,
+        after_commit: Callable[[T], Awaitable[None]] | None = None,
+    ) -> T:
         """Order a new effect against deletion; retain its actual exit owner."""
         from .users import owner_is_available
 
@@ -363,6 +374,9 @@ class ApplicationManager:
             raise ApplicationError("ApplicationManager not bound", status_code=500)
 
         async def finish() -> T:
+            row = await self.get_application(app_id, user_id)
+            if row["user_id"] != user_id:
+                raise ApplicationError("Application owner is unavailable", status_code=403)
             if app_id in self._deletions:
                 raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
             async with self._build_updates.setdefault(app_id, asyncio.Lock()):
@@ -372,7 +386,10 @@ class ApplicationManager:
                     raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
                 if row.get("user_id") != user_id or not await owner_is_available(self._require_db(), user_id):
                     raise ApplicationError("Application owner is unavailable", status_code=403)
-                return await operation()
+                result = await operation()
+            if after_commit is not None:
+                await after_commit(result)
+            return result
 
         task = asyncio.create_task(finish(), name=f"application-effect-{app_id}")
         self.session_mgr._own_task(task)
@@ -459,6 +476,12 @@ class ApplicationManager:
 
     # ----------------------------------------------------------------- create
 
+    async def _read_created_application(self, app_id: str) -> dict[str, Any]:
+        row = await self._require_db().get_application(app_id)
+        if row is None:
+            raise ApplicationDeletedDuringCreation(app_id)
+        return row
+
     async def create_application(
         self,
         *,
@@ -473,7 +496,7 @@ class ApplicationManager:
         db = self._require_db()
         if self.session_mgr is None:
             raise ApplicationError("ApplicationManager not bound", status_code=500)
-        if not agent_id or await db.get_agent(agent_id) is None:
+        if not agent_id or await db.get_agent_identity(agent_id) is None:
             raise ApplicationError("Agent not found", status_code=404)
         task = asyncio.create_task(self._create_application(
             name=name, description=description, agent_id=agent_id, icon=icon,
@@ -492,7 +515,7 @@ class ApplicationManager:
                 row, session = await self._prepare_application(
                     name=name, description=description, agent_id=agent_id, icon=icon, entrypoint=entrypoint,
                 )
-        except SessionAdmissionClosed as error:
+        except (SessionAdmissionClosed, AgentConfigurationError) as error:
             raise ApplicationError(str(error), status_code=409) from error
         except ApplicationNameConflict as error:
             raise ApplicationError(
@@ -510,7 +533,7 @@ class ApplicationManager:
             try:
                 async with self.session_mgr.agent_operation(agent_id):
                     async with self._build_updates.setdefault(row["id"], asyncio.Lock()):
-                        current = await self.get_application(row["id"])
+                        current = await self._read_created_application(row["id"])
                         self.require_writable(current)
                         if current["session_id"] != session.id:
                             raise ApplicationError("Application builder changed during creation", status_code=409)
@@ -527,14 +550,15 @@ class ApplicationManager:
                     if not receipt.accepted:
                         handed_off = False
                         raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
+            except ApplicationDeletedDuringCreation:
+                raise
             except Exception as error:
-                row = await self._fail_creation(row["id"], session, error,
-                    request_id=request_id, known_unaccepted=not handed_off or isinstance(error, SessionAdmissionClosed))
+                row = await self._fail_creation(
+                    row["id"], session, error, request_id=request_id,
+                    known_unaccepted=not handed_off or isinstance(error, (SessionAdmissionClosed, AgentConfigurationError)),
+                )
                 await self._publish_creation("application_updated", row)
-        latest = await self._require_db().get_application(row["id"])
-        if latest is None:
-            raise ApplicationError("Application was deleted during creation", status_code=409)
-        return latest
+        return await self._read_created_application(row["id"])
 
     async def _prepare_application(
         self, *, name: str, description: str, agent_id: str, icon: str | None, entrypoint: str,
@@ -566,6 +590,7 @@ class ApplicationManager:
         now = _now()
         session = None
         created_dir = False
+        persisted = False
         try:
             # Coordinate the first binding with followup build/delete writers.
             # create_session only prepares storage; notification stays outside.
@@ -588,6 +613,7 @@ class ApplicationManager:
                         updated_at=now,
                         user_id=owner_id,
                     )
+                    persisted = True
 
                 session = await self.session_mgr.create_session(
                     agent_id=agent_id,
@@ -604,6 +630,8 @@ class ApplicationManager:
             if not created_dir:
                 raise
             stored = await db.get_application(app_id)
+            if persisted and stored is None:
+                raise ApplicationDeletedDuringCreation(app_id) from error
             if stored is None or (stored["user_id"], stored["app_dir"]) != (owner_id, app_dir):
                 try:
                     async with self._resource_updates:
@@ -617,7 +645,7 @@ class ApplicationManager:
                                            status_code=500) from cleanup
                 raise
             return await self._fail_creation(app_id, session, error, known_unaccepted=True), session
-        return await self.get_application(app_id), session
+        return await self._read_created_application(app_id), session
 
     async def _fail_creation(
         self, app_id: str, session: Session | None, error: Exception, *, request_id: str | None = None,
@@ -628,7 +656,7 @@ class ApplicationManager:
         db.health.require_healthy()
         logger.error("Application creation failed app=%s request=%s", app_id, request_id, exc_info=error)
         async with self._build_updates.setdefault(app_id, asyncio.Lock()):
-            row = await self.get_application(app_id)
+            row = await self._read_created_application(app_id)
             if row.get("deletion") is not None or session is not None and row["session_id"] not in {None, session.id}:
                 return row
             if row["status"] != STATUS_BUILDING:
@@ -657,7 +685,7 @@ class ApplicationManager:
                 row, fields, preparation_failure=True, unavailable_request_id=unavailable_request_id,
             )
             if projected is None:
-                return await self.get_application(app_id)
+                return await self._read_created_application(app_id)
         if known_unaccepted and session is not None:
             assert self.session_mgr is not None
             cleanup_error = None
@@ -670,13 +698,13 @@ class ApplicationManager:
                 cleanup_error = f"{message}; empty session {session.id} cleanup failed: {cleanup}"
             if removed or cleanup_error is not None:
                 async with self._build_updates.setdefault(app_id, asyncio.Lock()):
-                    row = await self.get_application(app_id)
+                    row = await self._read_created_application(app_id)
                     if row["session_id"] == session.id and row.get("deletion") is None:
                         if removed:
                             await db.project_application_terminal(row, {"session_id": None}, preparation_failure=True)
                         elif all(row[key] == fields[key] for key in ("status", "error", "updated_at")):
                             await db.project_application_terminal(row, {"error": cleanup_error}, preparation_failure=True)
-        return await self.get_application(app_id)
+        return await self._read_created_application(app_id)
 
     async def _publish_creation(self, kind: str, row: dict[str, Any]) -> None:
         try:
@@ -699,6 +727,8 @@ class ApplicationManager:
         try:
             async with self._build_updates.setdefault(app_id, asyncio.Lock()):
                 return await self._admit_build(app_id, prompt, user_id)
+        except AgentConfigurationError as error:
+            raise ApplicationError(f"The build did not start: {error}", status_code=409) from error
         finally:
             async def publish() -> None:
                 row = await self._require_db().get_application(app_id, user_id)
@@ -832,60 +862,52 @@ class ApplicationManager:
         assert updated is not None  # written immediately above
         return updated
 
-    # ---------------------------------------------------------------- archive
+    # ---------------------------------------------------- archive and sidebar pins
 
     async def set_archived(
         self, app_id: str, archived: bool, user_id: str | None = None
     ) -> dict[str, Any]:
-        """Archive an application (it leaves the sidebar) or restore it.
-
-        Archiving keeps the row AND the files, so restoring is instant and the
-        app renders exactly as it did — that's the whole point of archiving
-        rather than deleting. A restore refuses a name a live application has
-        taken since, matching create's uniqueness rule.
-        """
-        db = self._require_db()
-        row = await self.get_application(app_id, user_id)
-        if bool(row["archived"]) == archived:
-            assert row is not None  # just written above
-            return row
-        try:
-            await db.update_application(app_id, archived=int(archived), updated_at=_now())
-        except ApplicationNameConflict as error:
-            raise ApplicationError(
-                "An active application already uses this name. Rename this application before restoring it.",
-                status_code=409,
-            ) from error
-        if not archived:
-            # Restoring is choosing to use it again: it comes back to the
-            # sidebar (where it was, if it was pinned when it left).
-            await db.set_application_pinned(app_id, True)
-        updated = await db.get_application(app_id)
-        await self._broadcast_application(
-            "application_archived" if archived else "application_updated",
-            updated,
-        )
-        assert updated is not None  # written immediately above
-        return updated
-
-    # ------------------------------------------------------------------ pins
+        """Keep the archived App's files and restore it to the sidebar."""
+        return await self._set_visibility(app_id, user_id, field="archived", value=archived)
 
     async def set_pinned(
         self, app_id: str, pinned: bool, user_id: str | None = None
     ) -> dict[str, Any]:
-        """Pin an application to the sidebar or unpin it (sidebar-pins.md).
+        """Change the sidebar shortcut while leaving the App available."""
+        return await self._set_visibility(app_id, user_id, field="pinned", value=pinned)
 
-        Only where it is *shown* changes — an unpinned app still serves, its
-        backend still runs, and the Applications page still lists it.
-        """
+    async def _set_visibility(
+        self, app_id: str, user_id: str | None, *, field: ApplicationVisibilityField, value: bool,
+    ) -> dict[str, Any]:
         db = self._require_db()
-        row = await self.get_application(app_id, user_id)
-        if row["archived"]:
-            raise ApplicationError("Restore the application before pinning it")
-        await db.set_application_pinned(app_id, pinned)
-        updated = await db.get_application(app_id)
-        await self._broadcast_application("application_updated", updated)
-        assert updated is not None  # written immediately above
+        if user_id is None:
+            user_id = (await self.get_application(app_id))["user_id"]
+
+        async def commit() -> tuple[dict[str, Any], bool]:
+            try:
+                result = await db.set_application_visibility(app_id, user_id, field=field, value=value, updated_at=_now())
+            except ApplicationNameConflict as error:
+                raise ApplicationError(
+                    "An active application already uses this name. Rename this application before restoring it.",
+                    status_code=409,
+                ) from error
+            if result == "missing":
+                raise ApplicationError("Application not found", status_code=404)
+            if result == "deleting":
+                raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
+            if result == "owner_unavailable":
+                raise ApplicationError("Application owner is unavailable", status_code=403)
+            if result == "archived":
+                raise ApplicationError("Restore the application before pinning it")
+            return result
+
+        async def publish(result: tuple[dict[str, Any], bool]) -> None:
+            row, changed = result
+            if changed:
+                kind = "application_archived" if field == "archived" and value else "application_updated"
+                await self._broadcast_application(kind, row)
+
+        updated, _ = await self.run_effect(app_id, user_id, commit, after_commit=publish)
         return updated
 
     async def reorder_pins(
@@ -1295,7 +1317,7 @@ class ApplicationManager:
     async def _broadcast_application(self, kind: str, row: dict[str, Any] | None) -> None:
         if self.session_mgr is None or row is None:
             return
-        if kind not in {"application_updated", "application_deleted"}:
+        if kind == "application_created":
             await self._deliver_application(kind, row)
             return
         app_id = row["id"]
@@ -1306,12 +1328,21 @@ class ApplicationManager:
             try:
                 current = await self._require_db().get_application(app_id)
                 last_row = row
+                archive_requested = kind == "application_archived"
                 while True:
                     if current is None:
-                        await self._deliver_application("application_deleted", last_row)
+                        notice = "application_deleted"
                     else:
+                        archived = current["archived"] and (archive_requested or not last_row["archived"])
+                        notice = "application_archived" if archived else "application_updated"
                         last_row = current
-                        await self._deliver_application("application_updated", current)
+                        archive_requested = False
+                    try:
+                        await self._deliver_application(notice, last_row)
+                    except Exception as error:
+                        # A subscriber may have committed another effect before failing.
+                        logger.error("Application notification failed app=%s kind=%s\n%s", app_id, notice,
+                                     exception_diagnostic(error, secrets=(settings.auth_token,)))
                     latest = await self._require_db().get_application(app_id)
                     if latest == current:
                         break
@@ -1337,6 +1368,7 @@ class ApplicationManager:
             # it is rather than leaving the bus to guess from a session that
             # is not there (multi-tenancy.md §7).
             user_id=row.get("user_id"),
+            wrap_required_cancellation=True,
         )
 
 

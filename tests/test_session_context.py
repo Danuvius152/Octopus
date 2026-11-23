@@ -123,6 +123,32 @@ async def test_root_current_context_survives_detail_and_restart(native_runtime, 
         await restarted.close_session_owners()
 
 
+@pytest.mark.parametrize(("field", "bad_value"), [("mcp_servers", "null"), ("model", b"not SQLite text")])
+async def test_saved_context_survives_bad_agent_configuration(native_runtime, tmp_path, field, bad_value):
+    manager, database, session, _, _, _ = native_runtime
+    await start_output(native_runtime)
+    inject(tmp_path, usage(), item(ROOT, "turn-1", "final", "Original answer"), terminal())
+    await wait_dispatch_idle(manager, session.id)
+    original = await context_when(manager, session, lambda state: state.validity == "valid")
+    async with database.transaction(write=True) as tx:
+        await tx.execute(f"UPDATE agents SET {field} = ? WHERE id = ?", (bad_value, session.agent_id))
+
+    restarted = SessionManager()
+    try:
+        await restarted.initialize(database, previous_writers_retired=True)
+        await restarted.archive_session(session.id, replace=False)
+        await restarted.unarchive_session(session.id, session.user_id)
+        restarted.wake_contexts(session.agent_id, session.user_id)
+        updated = await restarted.update_session_configuration(session.id, {"name": "Retained session"}, session.user_id)
+        detail = await get_session(restarted, session.id, user_id=session.user_id)
+        assert updated.name == "Retained session"
+        assert detail.context_state == original
+        assert detail.context_pending is (field == "model")
+        assert any(message.content == "Original answer" for message in detail.messages)
+    finally:
+        await restarted.close_session_owners()
+
+
 async def test_archive_preserves_original_message_tail_context(native_runtime, tmp_path):
     manager, _, session, mode, _, _ = native_runtime
     mode[0] = "control_stop_tail"
@@ -368,14 +394,25 @@ async def test_unarchive_aligns_defaults_before_returning_a_live_session(native_
     assert len(starts) == 1
 
 
-async def test_reset_invalidates_the_original_attempt_before_late_context(native_runtime, tmp_path):
-    manager, _, session, _, _, _ = native_runtime
+@pytest.mark.parametrize(("malformed_default", "has_sample"), [(False, True), (True, True), (True, False)])
+async def test_reset_invalidates_the_original_attempt_before_late_context(native_runtime, tmp_path, malformed_default, has_sample):
+    manager, database, session, _, _, _ = native_runtime
     await start_output(native_runtime)
-    inject(tmp_path, usage())
-    before = await context_when(manager, session, lambda state: state.validity == "valid")
+    original_revision = 0
+    if has_sample:
+        inject(tmp_path, usage())
+        before = await context_when(manager, session, lambda state: state.validity == "valid")
+        original_revision = before.binding_revision
+    if malformed_default:
+        async with database.transaction(write=True) as tx:
+            await tx.execute("UPDATE agents SET model = ? WHERE id = ?", (b"not a model", session.agent_id))
     await manager.reset_session(session.id)
     after = (await get_session(manager, session.id, user_id=session.user_id)).context_state
-    assert after.validity == "stale" and after.binding_revision > before.binding_revision
+    assert after.validity == "stale" and after.binding_revision > original_revision
+    if malformed_default:
+        async with database.transaction(write=True) as tx:
+            await tx.execute("UPDATE agents SET model = NULL WHERE id = ?", (session.agent_id,))
+        assert (await get_session(manager, session.id, user_id=session.user_id)).context_state == after
 
 
 async def test_agent_route_wakes_context_owner_after_committing_defaults(native_runtime, tmp_path, monkeypatch):

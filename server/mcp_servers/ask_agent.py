@@ -139,16 +139,18 @@ async def limit_batch(message: str, ctx: Context) -> dict[str, str]:
 
 
 @mcp.tool(name="adopt_ticket_batch_update")
-async def adopt_batch_update(message: str, ctx: Context) -> dict[str, str]:
-    """Keep a separate human input that supplements the authorized ticket batch.
+async def adopt_batch_update(message: str, ctx: Context, progress_only: bool = False) -> dict[str, str]:
+    """Keep a queued human input within the active ticket batch.
 
-    Pass the exact current human message before acting on its requirements.
-    Use this for a supplement to the active batch. Treat a separate task as a
-    new request. Use limit_ticket_batch when the user directs you to stop
-    after accepting the current ticket.
+    Pass the exact current human message. Set progress_only only for a pure status
+    question without instructions, restrictions, commands or attachments. The
+    question keeps its own execution and the original batch can resume afterward.
+    Leave progress_only false for a supplement and adopt it before acting on its
+    requirements. Treat a separate task as a new request. Use limit_ticket_batch
+    when the user directs you to stop after accepting the current ticket.
     """
     manager, scope = _ticket_runtime(ctx)
-    return await adopt_ticket_batch_update(manager, scope, message)
+    return await adopt_ticket_batch_update(manager, scope, message, progress_only=progress_only)
 
 
 @mcp.tool(name="handoff")

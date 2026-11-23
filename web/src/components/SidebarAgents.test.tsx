@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../test-support/backendCatalog";
 /**
  * Renderer tests for the Agents sidebar section — specifically its fold state.
  *
@@ -8,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { SidebarAgents } from "./SidebarAgents";
 import { AgentFormPage } from "./AgentFormPage";
@@ -73,7 +74,6 @@ function mount() {
     activeAgentId: null,
     activeSessionId: null,
     credentials: [],
-    availableBackends: ["claude-code"],
     mainView: "chat",
     sidebarCollapsed: false,
   });
@@ -92,7 +92,7 @@ beforeEach(() => {
     const u = String(url);
     if (u.includes("/api/agents")) return jsonRes(AGENTS);
     if (u.includes("/api/sessions")) return jsonRes(SESSIONS);
-    if (u.includes("/api/backends")) return jsonRes({ available: ["claude-code"] });
+    if (u.includes("/api/backends")) return jsonRes(backendCatalogFixture(["claude-code"]));
     return jsonRes([]);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -359,7 +359,7 @@ describe("SidebarAgents fold state", () => {
             status: "running",
           }),
         ]);
-      if (u.includes("/api/backends")) return jsonRes({ available: ["claude-code"] });
+      if (u.includes("/api/backends")) return jsonRes(backendCatalogFixture(["claude-code"]));
       return jsonRes([]);
     });
     const { container } = mount();
@@ -399,7 +399,7 @@ describe("SidebarAgents pins (sidebar-pins.md)", () => {
       const u = String(url);
       if (u.includes("/api/agents")) return jsonRes(agents);
       if (u.includes("/api/sessions")) return jsonRes(sessions);
-      if (u.includes("/api/backends")) return jsonRes({ available: ["claude-code"] });
+      if (u.includes("/api/backends")) return jsonRes(backendCatalogFixture(["claude-code"]));
       return jsonRes([]);
     });
     useSessionStore.setState({
@@ -409,7 +409,6 @@ describe("SidebarAgents pins (sidebar-pins.md)", () => {
       activeAgentId: null,
       activeSessionId: null,
       credentials: [],
-      availableBackends: ["claude-code"],
       mainView: "chat",
       sidebarCollapsed: false,
       pendingQuestions: {},
@@ -461,6 +460,47 @@ describe("SidebarAgents pins (sidebar-pins.md)", () => {
     // The agent that is only here because its session is open is unfolded,
     // so the open session is visible under it.
     await waitFor(() => expect(screen.getByText("ideas")).toBeTruthy());
+  });
+
+  it("uses the same running controls for the Default Agent and both pin states", async () => {
+    const agents = [
+      agent({ pinned: true }),
+      agent({ id: "ag2", name: "Builder", is_system: false, pinned: true }),
+      agent({ id: "ag3", name: "Runner", is_system: false, pinned: false }),
+      agent({ id: "ag4", name: "Transient", is_system: false, pinned: false }),
+    ];
+    const sessions = [
+      session({ id: "default", status: "running" }),
+      session({ id: "build", agent_id: "ag2", status: "running", origin: "application" }),
+      session({ id: "delegated", name: "Hidden delegate", agent_id: "ag2", status: "running", origin: "delegation" }),
+      session({ id: "app", agent_id: "ag2", status: "running", origin: "app" }),
+      session({ id: "open", agent_id: "ag3", status: "running" }),
+      session({ id: "transient", agent_id: "ag4", status: "running" }),
+    ];
+    await act(async () => { mountWith(agents, sessions, { activeSessionId: "open" }); });
+    const row = (name: string) => within(screen.getByText(name, { exact: true }).closest<HTMLElement>(".agent-item")!);
+
+    for (const [name, count] of [["Octo", 1], ["Builder", 2], ["Runner", 1]] as const) {
+      expect(row(name).getByText(`${count} running`)).toBeVisible();
+      expect(row(name).getByRole("button", { name: `New session for ${name}` })).toBeVisible();
+      expect(row(name).queryByRole("button", { name: /^(Pin|Unpin) / })).toBeNull();
+    }
+    fireEvent.click(screen.getByText("Builder", { exact: true }));
+    expect(screen.queryByText("Hidden delegate")).toBeNull();
+
+    const builderOnly = sessions.map((s) => s.id === "delegated" ? { ...s, status: "idle" as const } : s);
+    act(() => useSessionStore.setState({ sessions: builderOnly }));
+    expect(row("Builder").getByText("1 running")).toBeVisible();
+    expect(row("Builder").queryByRole("button", { name: /Unpin/ })).toBeNull();
+
+    act(() => useSessionStore.setState({
+      sessions: sessions.map((s) => s.origin === "app" ? s : { ...s, status: "idle" }),
+    }));
+    expect(screen.queryByText(/\d+ running/)).toBeNull();
+    expect(row("Octo").queryByRole("button", { name: /^(Pin|Unpin) / })).toBeNull();
+    expect(row("Builder").getByRole("button", { name: "Unpin Builder from the sidebar" })).toBeVisible();
+    expect(row("Runner").getByRole("button", { name: "Pin Runner to the sidebar" })).toBeVisible();
+    expect(screen.queryByText("Transient", { exact: true })).toBeNull();
   });
 
   it("unpin POSTs; the Default Agent offers no unpin", async () => {

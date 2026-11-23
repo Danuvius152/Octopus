@@ -48,7 +48,7 @@ def _install_research_provider(monkeypatch, on_start):
         class Run(FakeRunBase):
             run_lease_id = uuid.uuid4().hex
 
-            async def start(self, prompt, *args, **kwargs):
+            async def _start(self, prompt, *args, **kwargs):
                 if config.session_id is not None:
                     register_run(self.run_lease_id, config.session_id, config.user_id, config.work_id)
                 await on_start(config, prompt, self)
@@ -56,16 +56,16 @@ def _install_research_provider(monkeypatch, on_start):
             def set_idle_handler(self, handler):
                 pass
 
-            async def stream(self):
+            async def _stream(self):
                 yield HarnessEvent(type="result", is_error=False)
 
-            async def stop(self):
+            async def _stop_process(self):
                 revoke_run(self.run_lease_id)
 
             async def interrupt(self):
                 revoke_run(self.run_lease_id)
 
-        return Run()
+        return Run(backend=harness.backend, config=config)
 
     monkeypatch.setattr(harness, "create_run", create)
 

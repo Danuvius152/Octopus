@@ -8,27 +8,46 @@ changed.
 
 from __future__ import annotations
 
-import json
+import logging
 import sqlite3
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from ..agent_configuration import (
+    AGENT_CONFIGURATION_FIELDS,
+    AgentConfigurationError,
+    decode_agent_configuration,
+    encode_agent_configuration,
+)
 from ..config import settings
-from .base import DatabaseBase, _load_json_list
+from .base import DatabaseBase
 from .schema import _DEFAULT_MCP_SERVERS
 from .transaction import Transaction
+
+logger = logging.getLogger(__name__)
+
+
+async def _insert_agent(tx: Transaction, agent_id: str, fields: dict[str, Any]) -> None:
+    fields = encode_agent_configuration(agent_id, fields)
+    columns = ", ".join(fields)
+    placeholders = ", ".join("?" for _ in fields)
+    await tx.execute(
+        f"INSERT INTO agents (id, {columns}, pin_order) VALUES (?, {placeholders}, "
+        f"{DatabaseBase._NEXT_PIN_ORDER.format(table='agents')})",
+        (agent_id, *fields.values()),
+    )
 
 
 async def create_default_agent(tx: Transaction, *, user_id: str, created_at: str) -> None:
     """The account transaction also owns its initial protected definition."""
-    await tx.execute(
-        "INSERT INTO agents (id,user_id,name,is_system,mcp_servers,backend,created_at,updated_at,pin_order) "
-        "VALUES (?,?, 'Octo',1,?,?,?,?, "
-        "(SELECT COALESCE(MAX(pin_order),0)+1 FROM agents))",
-        (uuid.uuid4().hex[:12], user_id, json.dumps(_DEFAULT_MCP_SERVERS),
-         settings.default_backend, created_at, created_at),
-    )
+    await _insert_agent(tx, uuid.uuid4().hex[:12], {
+        "user_id": user_id, "name": "Octo", "is_system": 1,
+        "description": "", "avatar": None, "system_prompt": "", "model": None,
+        "reasoning_effort": None, "service_tier": None, "credential_id": None,
+        "mcp_servers": _DEFAULT_MCP_SERVERS, "subagents": [], "backend": settings.default_backend,
+        "tool_allow": "", "tool_deny": "", "created_at": created_at, "updated_at": created_at,
+    })
 
 
 async def _require_connector_agent(tx: Transaction, agent_id: str, user_id: str | None) -> None:
@@ -122,16 +141,11 @@ class AgentsMixin(DatabaseBase):
 
     def _row_to_agent(self, row: sqlite3.Row) -> dict[str, Any]:
         agent = self._AGENT_COLS.read(row)
-        try:
-            agent["mcp_servers"] = json.loads(agent["mcp_servers"]) if agent["mcp_servers"] else []
-        except (json.JSONDecodeError, TypeError):
-            agent["mcp_servers"] = []
-        for field in ("description", "system_prompt", "tool_allow", "tool_deny"):
-            agent[field] = agent[field] or ""
+        agent.update(decode_agent_configuration(agent["id"], {
+            field: agent[field] for field in AGENT_CONFIGURATION_FIELDS
+        }))
         for field in ("is_system", "archived", "pinned"):
             agent[field] = bool(agent[field])
-        agent["backend"] = agent["backend"] or "claude-code"
-        agent["subagents"] = _load_json_list(agent["subagents"])
         return agent
 
     async def save_agent(
@@ -157,37 +171,41 @@ class AgentsMixin(DatabaseBase):
         user_id: str | None = None,
     ) -> None:
         async with self.transaction(write=True) as tx:
-            servers_json = json.dumps(
-                mcp_servers if mcp_servers is not None else _DEFAULT_MCP_SERVERS
-            )
-            await tx.execute(
-                "INSERT INTO agents "
-                "(id, name, description, avatar, system_prompt, model, "
-                " credential_id, backend, mcp_servers, tool_allow, tool_deny, "
-                " is_system, archived, created_at, updated_at, subagents, user_id, "
-                " reasoning_effort, service_tier, pinned, pin_order) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, "
-                f" {self._NEXT_PIN_ORDER.format(table='agents')})",
-                (
-                    agent_id, name, description, avatar, system_prompt, model,
-                    credential_id, backend or settings.default_backend, servers_json,
-                    tool_allow, tool_deny, int(bool(is_system)),
-                    created_at, updated_at, json.dumps(subagents or []), user_id, reasoning_effort,
-                    service_tier,
-                ),
-            )
+            await _insert_agent(tx, agent_id, {
+                "name": name, "description": description, "avatar": avatar,
+                "system_prompt": system_prompt, "model": model, "credential_id": credential_id,
+                "backend": settings.default_backend if backend is None else backend,
+                "mcp_servers": _DEFAULT_MCP_SERVERS if mcp_servers is None else mcp_servers,
+                "tool_allow": tool_allow, "tool_deny": tool_deny, "is_system": int(is_system),
+                "created_at": created_at, "updated_at": updated_at,
+                "subagents": [] if subagents is None else subagents, "user_id": user_id,
+                "reasoning_effort": reasoning_effort, "service_tier": service_tier,
+            })
 
     async def load_agents(
         self, *, include_archived: bool = False, user_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Agents, optionally only one account's (multi-tenancy.md §5).
+        rows = await self._load_agent_rows(include_archived=include_archived, user_id=user_id)
+        return [self._row_to_agent(row) for row in rows]
 
-        `user_id=None` means "no scoping asked for" — the boot-time backfills
-        want every row. A *request* passes one, and so does the delegation
-        manager, which resolves a target agent by name within the delegating
-        session's own account (§7): a name is not a way to reach into another
-        account and run a turn there.
-        """
+    async def load_agents_for_display(
+        self, *, include_archived: bool = False, user_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        rows = await self._load_agent_rows(include_archived=include_archived, user_id=user_id)
+        return self._agents_for_display(rows)
+
+    def _agents_for_display(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        agents = []
+        for row in rows:
+            try:
+                agents.append(self._row_to_agent(row))
+            except AgentConfigurationError as exc:
+                logger.warning("%s", exc)
+        return agents
+
+    async def _load_agent_rows(
+        self, *, include_archived: bool, user_id: str | None
+    ) -> list[sqlite3.Row]:
         async with self.transaction(write=False) as tx:
             query = (
                 f"SELECT {self._AGENT_COLS} FROM agents a"
@@ -202,52 +220,87 @@ class AgentsMixin(DatabaseBase):
             if where:
                 query += " WHERE " + " AND ".join(where)
             query += " ORDER BY a.is_system DESC, a.created_at"
-            cursor = await tx.execute(query, params)
-            rows = await cursor.fetchall()
-            return [self._row_to_agent(row) for row in rows]
+            return list(await tx.fetch_all(query, params))
 
     async def get_agent(
         self, agent_id: str, user_id: str | None = None
     ) -> dict[str, Any] | None:
         """One agent, or None — including when it exists and belongs to someone
         else, which a caller must not be able to tell from "no such agent"."""
+        row = await self._get_agent_row(agent_id, user_id, str(self._AGENT_COLS))
+        return self._row_to_agent(row) if row is not None else None
+
+    async def _get_agent_row(
+        self, agent_id: str, user_id: str | None, columns: str, *, match_owner: bool = False,
+    ) -> sqlite3.Row | None:
         async with self.transaction(write=False) as tx:
-            sql = f"SELECT {self._AGENT_COLS} FROM agents a WHERE a.id = ?"
+            sql = f"SELECT {columns} FROM agents a WHERE a.id = ?"
             params: list[Any] = [agent_id]
-            if user_id is not None:
-                sql += " AND a.user_id = ?"
+            if match_owner or user_id is not None:
+                sql += " AND a.user_id IS ?"
                 params.append(user_id)
-            cursor = await tx.execute(sql, params)
-            row = await cursor.fetchone()
-            return self._row_to_agent(row) if row else None
+            return await tx.fetch_one(sql, params)
 
-    async def get_agent_by_name(
-        self,
-        name: str,
-        *,
-        include_archived: bool = False,
-        user_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """One agent by name, within an account.
-
-        Scoped because the uniqueness it guards is per account (see the
-        `agents_name_unique` index): unscoped, the second person to want an
-        agent called "Octo" would be told somebody else already had one.
-        """
+    async def get_live_agent_configuration(self, agent_id: str, user_id: str | None) -> dict[str, Any] | None:
         async with self.transaction(write=False) as tx:
-            query = (
-                f"SELECT {self._AGENT_COLS} FROM agents a "
-                "WHERE a.name = ?"
+            row = await tx.fetch_one(
+                f"SELECT {self._AGENT_COLS} FROM agents a WHERE a.id = ? AND a.user_id IS ? AND a.archived = 0",
+                (agent_id, user_id),
             )
-            params: list[Any] = [name]
-            if not include_archived:
-                query += " AND a.archived = 0"
-            if user_id is not None:
-                query += " AND a.user_id = ?"
-                params.append(user_id)
-            cursor = await tx.execute(query, params)
-            row = await cursor.fetchone()
-            return self._row_to_agent(row) if row else None
+        return self._row_to_agent(row) if row is not None else None
+
+    async def get_agent_identity(self, agent_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        fields = ("id", "name", "user_id", "archived", "is_system")
+        row = await self._get_agent_row(agent_id, user_id, ", ".join(fields))
+        return dict(zip(fields, row, strict=True)) if row is not None else None
+
+    async def get_agent_context_fields(self, agent_id: str, user_id: str | None) -> dict[str, Any] | None:
+        fields = ("model", "credential_id", "context_settings_revision")
+        row = await self._get_agent_row(agent_id, user_id, ", ".join(fields), match_owner=True)
+        return dict(zip(fields, row, strict=True)) if row is not None else None
+
+    async def get_agent_credential_id(self, agent_id: str, user_id: str | None) -> str | None:
+        row = await self._get_agent_row(agent_id, user_id, "credential_id", match_owner=True)
+        return decode_agent_configuration(agent_id, {"credential_id": row[0]})["credential_id"] if row else None
+
+    async def find_live_agent_id(self, name: str, user_id: str | None) -> str | None:
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT id FROM agents WHERE name = ? AND user_id IS ? AND archived = 0", (name, user_id),
+            )
+            return row[0] if row else None
+
+    async def list_live_agent_directory(self, user_id: str | None) -> list[dict[str, Any]]:
+        fields = ("name", "description", "avatar", "is_system")
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                f"SELECT {', '.join(fields)} FROM agents WHERE user_id IS ? AND archived = 0 "
+                "ORDER BY is_system DESC, created_at", (user_id,),
+            )
+        return [dict(zip(fields, row, strict=True)) for row in rows]
+
+    async def list_account_agent_ids(self, user_id: str) -> list[str]:
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all("SELECT id FROM agents WHERE user_id = ?", (user_id,))
+        return [row[0] for row in rows]
+
+    async def match_live_agents(self, name: str, user_id: str | None) -> list[tuple[str, str]]:
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                "SELECT id, name FROM agents WHERE user_id IS ? AND archived = 0 ORDER BY is_system DESC, created_at",
+                (user_id,),
+            )
+        # SQLite's built-in lower() only folds ASCII. Keep the public name rules.
+        wanted = name.strip().lower()
+        return [(agent_id, label) for agent_id, label in rows if isinstance(label, str) and label.lower() == wanted]
+
+    async def resolve_app_agent_identity(self, agent_id: str | None, user_id: str | None) -> tuple[str, str] | None:
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT id, name FROM agents WHERE user_id IS ? AND archived = 0 AND (id = ? OR is_system = 1) "
+                "ORDER BY (id IS ?) DESC, created_at LIMIT 1", (user_id, agent_id, agent_id),
+            )
+            return (row[0], row[1]) if row else None
 
     async def get_system_agent(
         self, user_id: str | None = None
@@ -286,22 +339,23 @@ class AgentsMixin(DatabaseBase):
         return {k: v for k, v in fields.items() if k in allowed and (v is not None or k in nullable)}
 
     async def update_agent(self, agent_id: str, **fields: Any) -> None:
+        self.health.require_healthy()
         fields = self.normalize_agent_update(fields)
+        if not fields:
+            return
+        updates = encode_agent_configuration(agent_id, fields)
+        if "archived" in updates:
+            updates["archived"] = int(bool(updates["archived"]))
         async with self.transaction(write=True) as tx:
             context_fields = ("backend", "model", "credential_id")
-            previous = await tx.fetch_one("SELECT backend,model,credential_id FROM agents WHERE id=?", (agent_id,))
-            updates: dict[str, Any] = {}
-            for k, v in fields.items():
-                if k in ("mcp_servers", "subagents"):
-                    updates[k] = json.dumps(v if v is not None else [])
-                elif k == "archived":
-                    updates[k] = int(bool(v))
-                else:
-                    updates[k] = v
-            if not updates:
+            columns = ", ".join(AGENT_CONFIGURATION_FIELDS)
+            row = await tx.fetch_one(f"SELECT {columns} FROM agents WHERE id = ?", (agent_id,))
+            if row is None:
                 return
-            if previous is not None and any(key in updates and (updates[key] or None) != (previous[index] or None)
-                                            for index, key in enumerate(context_fields)):
+            previous = dict(zip(AGENT_CONFIGURATION_FIELDS, row, strict=True))
+            decode_agent_configuration(agent_id, {key: value for key, value in previous.items() if key not in updates})
+            if any(key in updates and (updates[key] or None) != (previous[key] or None)
+                   for key in context_fields):
                 await tx.execute("UPDATE agents SET context_settings_revision=context_settings_revision+1 WHERE id=?", (agent_id,))
             updates["updated_at"] = datetime.now(UTC).isoformat()
             set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -338,11 +392,24 @@ class AgentsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             await self._set_pinned(tx, "agents", agent_id, pinned)
 
-    async def reorder_agent_pins(self, ordered_ids: list[str]) -> None:
-        """The sidebar order of the pinned agents — see `_reorder_pins`."""
+    async def reorder_agent_pins(
+        self, ordered_ids: list[str], *, user_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Validate membership and commit the sidebar order together."""
         async with self.transaction(write=True) as tx:
-            current = await self._ordered_pins(tx, "agents")
-            await self._reorder_pins(tx, "agents", ordered_ids, current)
+            current = await self._ordered_pins(tx, "agents", user_id=user_id)
+            stray = [identifier for identifier in ordered_ids if identifier not in current]
+            if stray:
+                raise ValueError(f"Not a pinned agent: {', '.join(stray)}")
+            await self._reorder_pins(tx, "agents", ordered_ids, current, user_id=user_id)
+            scope = " AND a.user_id = ?" if user_id is not None else ""
+            rows = await tx.fetch_all(
+                f"SELECT {self._AGENT_COLS} FROM agents a WHERE a.archived = 0{scope} "
+                "ORDER BY a.is_system DESC, a.created_at",
+                () if user_id is None else (user_id,),
+            )
+        agents = self._agents_for_display(rows)
+        return agents, [a for a in agents if a["id"] in current and a["pin_order"] != current[a["id"]]]
 
     async def delete_agent(self, agent_id: str) -> bool:
         """Hard-delete an agent. FK ON DELETE CASCADE removes its sessions,

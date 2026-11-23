@@ -38,6 +38,7 @@ from tests.native_app_server import (
     terminal,
     until,
 )
+from tests.schedule_support import dispatch_schedule
 from tests.session_runtime import wait_dispatch_idle
 from tests.test_app_response_recovery import native_app_http as native_app_http
 from tests.test_ask_mcp import pending_question
@@ -264,7 +265,7 @@ async def test_failed_native_schedule_consumes_only_its_original_fire(native_run
     runner = ScheduleRunner(manager, database)
     await save_schedule(database, schedule_id="original-native-fire", agent_id=parent.agent_id, name="One fire",
                         prompt="Run once", run_at="2026-11-01T01:00:00+00:00", created_at="2026-11-01")
-    firing = asyncio.create_task(runner._fire("original-native-fire"))
+    firing = asyncio.create_task(dispatch_schedule(runner, "original-native-fire"))
     try:
         await until(lambda: any(session._run.backend is not None and session._run.backend.active_turn is not None
                                for session in manager.sessions.values()))
@@ -278,7 +279,7 @@ async def test_failed_native_schedule_consumes_only_its_original_fire(native_run
         saved = await database.read_session_result(session.id, pending.request_id)
         assert saved.outcome.status == "failed"
         assert await database.get_schedule_definition("original-native-fire") is None
-        await runner._fire("original-native-fire")
+        await dispatch_schedule(runner, "original-native-fire")
         assert len(starts) == 1
     finally:
         await asyncio.gather(firing, return_exceptions=True)

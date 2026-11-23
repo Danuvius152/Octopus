@@ -14,7 +14,7 @@ beforeEach(() => {
   useSessionStore.getState().setToken("");
   useSessionStore.getState().setToken("view-token");
   useSessionStore.setState({ mainView: "chat", activeSessionId: a.id, sessions: [a, b], archivedSessions: [], agents: [], messages: {},
-    pendingQuestions: {}, streamingText: {}, dispatchStates: {}, dispatchUnavailable: {}, pendingForks: {}, credentials: [], backendModels: {}, viewer: null });
+    pendingQuestions: {}, streamingText: {}, dispatchStates: {}, dispatchUnavailable: {}, pendingForks: {}, credentials: [], viewer: null });
   reads.length = 0;
   vi.stubGlobal("fetch", vi.fn(async (url: unknown, init?: RequestInit) => {
     if (String(url).endsWith("/showme/resolve") || init?.method === "PATCH") {

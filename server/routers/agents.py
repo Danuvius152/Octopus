@@ -22,6 +22,7 @@ from ..models import (
     SessionInfo,
 )
 from ..sessions.presentation import session_info
+from .request_validation import SafeInputValidationRoute
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -71,7 +72,6 @@ async def list_agents(
     return [AgentRead(**a) for a in agents]
 
 
-@router.post("", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     session_manager: SessionMgr, req: AgentCreate, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
@@ -89,6 +89,10 @@ async def create_agent(
     return AgentRead(**agent)
 
 
+router.add_api_route("", create_agent, methods=["POST"], response_model=AgentRead,
+                     status_code=status.HTTP_201_CREATED, route_class_override=SafeInputValidationRoute)
+
+
 @router.put("/pin-order", response_model=list[AgentRead])
 async def reorder_agent_pins(
     session_manager: SessionMgr, req: PinOrderRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
@@ -96,17 +100,13 @@ async def reorder_agent_pins(
     """The sidebar order of the pinned agents (sidebar-pins.md). Returns
     every live agent, so the caller replaces its list in one step."""
     mgr = _get_manager()
-    before = {
-        a["id"]: a["pin_order"] for a in await mgr.list_agents(user_id=user_id)
-    }
     try:
-        agents = await mgr.reorder_pins(req.ids, user_id)
+        agents, changed = await mgr.reorder_pins(req.ids, user_id)
     except AgentError as e:
         raise _agent_http_error(e)
     # Only the rows whose position moved need to travel to other clients.
-    for a in agents:
-        if a["pin_order"] != before.get(a["id"]):
-            await _publish(session_manager, "agent_updated", a)
+    for agent in changed:
+        await _publish(session_manager, "agent_updated", agent)
     return [AgentRead(**a) for a in agents]
 
 
@@ -118,7 +118,6 @@ async def get_agent(agent_id: str, user_id: ScopeUser = None, _: str = Depends(v
     return AgentRead(**agent)
 
 
-@router.patch("/{agent_id}", response_model=AgentRead)
 async def update_agent(
     session_manager: SessionMgr,
     agent_id: str,
@@ -134,6 +133,10 @@ async def update_agent(
         raise _agent_http_error(e)
     await _publish(session_manager, "agent_updated", agent)
     return AgentRead(**agent)
+
+
+router.add_api_route("/{agent_id}", update_agent, methods=["PATCH"], response_model=AgentRead,
+                     route_class_override=SafeInputValidationRoute)
 
 
 @router.post("/{agent_id}/archive", response_model=AgentRead)
@@ -220,7 +223,7 @@ async def delete_agent(
 
 @router.get("/{agent_id}/sessions", response_model=list[SessionInfo])
 async def list_agent_sessions(session_manager: SessionMgr, agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    if await _get_manager().get_agent(agent_id, user_id) is None:
+    if await _get_manager().db.get_agent_identity(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     return [
         session_info(s)
@@ -240,38 +243,14 @@ async def create_agent_session(
 ):
     """Preferred path to start a session — the agent comes from the URL, so
     the body's `agent_id` (if any) is ignored."""
-    from .sessions import _check_credential_binding
+    from .sessions import create_owned_session
 
-    # Scoped, and *enforced*: the lookup was already scoped, but a `None` fell
-    # through to `create_session` below, which takes the session's owner from
-    # the agent — so another account's agent id planted a session in their
-    # account. Found by the isolation suite.
-    agent = await _get_manager().get_agent(agent_id, user_id)
-    if agent is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-    # Inherit the agent's default backend when the request doesn't pin one.
-    backend = (
-        req.backend.value
-        if req.backend is not None
-        else agent.get("backend") or "claude-code"
-    )
-    await _check_credential_binding(session_manager, req.credential_id, backend, user_id)
-    try:
-        s = await session_manager.create_session(
-            agent_id,
-            req.name,
-            req.working_dir,
-            credential_id=req.credential_id,
-            backend=backend,
-        )
-    except ValueError as e:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    return session_info(s, message_count=0)
+    return await create_owned_session(session_manager, agent_id, user_id, req)
 
 
 @router.get("/{agent_id}/schedules", response_model=list[ScheduleInfo])
 async def list_agent_schedules(agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    if await _get_manager().get_agent(agent_id, user_id) is None:
+    if await _get_manager().db.get_agent_identity(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     from .schedules import _get_db, to_schedule_info
 
@@ -299,7 +278,7 @@ async def create_agent_schedule(
     edit, human = schedule_edit(request, session_manager, req.prompt, user_id=user_id,
                             selected=req.wiki_mode, session_id=req.session_id)
     context = derive(edit, req.prompt, selected=req.wiki_mode).execution
-    if await _get_manager().get_agent(agent_id, user_id) is None:
+    if await _get_manager().db.get_agent_identity(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
     await validate_schedule_target(agent_id, req.session_id)
@@ -340,19 +319,18 @@ async def create_agent_schedule_from_text(
     )
     edit, human = schedule_edit(request, session_manager, req.text, user_id=user_id,
                             selected=req.wiki_mode, session_id=req.session_id)
-    agent = await _get_manager().get_agent(agent_id, user_id)
-    if agent is None:
+    db = _get_manager().db
+    if await db.get_agent_identity(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
     # A rejected relationship must not launch even a one-shot parse.
     await validate_schedule_target(agent_id, req.session_id)
-    # The AI parse runs on the agent's own harness (claude-code or codex —
-    # both support one-shot, D2), with its own model + credential resolved in
-    # the shape that harness needs. No backend-kind branching.
-    harness = get_harness(agent.get("backend"))
-    cred_id, backend, db = agent.get("credential_id"), harness.profile.backend, session_manager.db
-
     async def run_parser(ctx):
+        agent = await db.get_live_agent_configuration(agent_id, user_id)
+        if agent is None:
+            raise HTTPException(409, "Agent is unavailable for schedule parsing")
+        backend, cred_id = agent["backend"], agent["credential_id"]
+        harness = get_harness(backend)
         try:
             credential = await session_manager.resolve_credential_by_id(
                 cred_id, backend=backend, context=f"schedule-parse agent {agent_id}",
@@ -361,18 +339,15 @@ async def create_agent_schedule_from_text(
         except ValueError as error:
             raise ScheduleParseError(str(error)) from error
         return await harness.run_oneshot(replace(
-            ctx, credential=credential,
+            ctx, credential=credential, model=agent["model"] or None,
+            reasoning_effort=agent["reasoning_effort"] or None, service_tier=agent["service_tier"] or None,
             authorize_spawn=partial(db.require_run_authority, user_id, cred_id, backend),
         ))
     try:
         parsed = await parse_schedule_text(
             req.text,
-            harness=harness,
             timezone=req.timezone,
             now_iso=req.now,
-            model=agent.get("model") or None,
-            reasoning_effort=agent.get("reasoning_effort") or None,
-            service_tier=agent.get("service_tier") or None,
             runner=run_parser,
         )
     except ScheduleParseError as e:

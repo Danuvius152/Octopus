@@ -393,15 +393,15 @@ async def test_followup_retires_old_question_writer_only_after_confirmed_takeove
             await delegations.confirm_recording()
         if takeover == 'concurrent-refusals':
             await manager.archive_session(first.delegation_id, replace=False)
-            get_agent, auto_archive = manager.db.get_agent, manager.auto_archive_scheduled_session
+            get_identity, auto_archive = manager.db.get_agent_identity, manager.auto_archive_scheduled_session
             preparing, archive_entered, submitting = asyncio.Event(), asyncio.Event(), asyncio.Event()
             prepare_release, archive_release, submit_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-            async def pause_parent_read(agent_id):
+            async def pause_parent_read(agent_id, user_id=None):
                 if agent_id == parent.agent_id and not preparing.is_set():
                     preparing.set()
                     await prepare_release.wait()
-                return await get_agent(agent_id)
+                return await get_identity(agent_id, user_id)
 
             async def pause_archive(session_id, *, expected_session, **kwargs):
                 assert expected_session is manager.get_session(session_id)
@@ -415,7 +415,7 @@ async def test_followup_retires_old_question_writer_only_after_confirmed_takeove
                     await submit_release.wait()
                 return await lose_question_ack(session_id, prompt, **kwargs)
 
-            monkeypatch.setattr(manager.db, 'get_agent', pause_parent_read)
+            monkeypatch.setattr(manager.db, 'get_agent_identity', pause_parent_read)
             monkeypatch.setattr(manager, 'auto_archive_scheduled_session', pause_archive)
             a = asyncio.create_task(delegations.follow_up_delegation(
                 parent_session_id=parent.id, delegation_id=first.delegation_id, request='first refused followup',
@@ -451,7 +451,7 @@ async def test_followup_retires_old_question_writer_only_after_confirmed_takeove
                 submit_release.set()
                 await asyncio.gather(a, *([b] if b else []), return_exceptions=True)
                 delegations.reopen_session(parent.id)
-                monkeypatch.setattr(manager.db, 'get_agent', get_agent)
+                monkeypatch.setattr(manager.db, 'get_agent_identity', get_identity)
                 monkeypatch.setattr(manager, 'auto_archive_scheduled_session', auto_archive)
                 monkeypatch.setattr(manager, 'start_message', lose_question_ack)
             await manager.unarchive_session(first.delegation_id)

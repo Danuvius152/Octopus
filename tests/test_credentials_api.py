@@ -681,10 +681,10 @@ async def test_backends_lists_a_model_shortlist_per_backend(client):
     """The picker's options come from the harness profile, not the frontend."""
     c, _db = client
     body = (await c.get("/api/backends", headers=c.headers)).json()
-    assert "claude-code" in body["available"]
+    assert "claude-code" in body["supported"]
     assert body["models"]["claude-code"] == ["opus", "sonnet", "haiku"]
     # Every listed backend has an entry, even when its shortlist is empty.
-    assert set(body["models"]) == set(body["available"])
+    assert set(body["models"]) == set(body["supported"])
 
 
 @pytest.mark.asyncio

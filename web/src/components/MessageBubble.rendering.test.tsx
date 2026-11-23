@@ -146,7 +146,7 @@ beforeEach(() => {
   mockChatViewport();
   useSessionStore.getState().setToken("");
   useSessionStore.setState({ activeSessionId: session.id, mainView: "chat", sessions: [session], archivedSessions: [],
-    agents: [], credentials: [], backendModels: {},
+    agents: [], credentials: [],
     messages: { [session.id]: [{ role: "assistant", type: "text", seq: 1, content: saved }] },
     streamingText: {}, streamingItems: {}, pendingQuestions: {}, subagents: {}, dispatchStates: {}, dispatchUnavailable: {},
   });

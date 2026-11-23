@@ -329,11 +329,14 @@ async def test_committed_deletion_unregisters_after_http_waiter_cancels(client, 
         assert runner._scheduler.get_job(schedule_id) is None
 
 
-@pytest.mark.parametrize("operation", ["create", "edit", "delete"])
-async def test_registration_failure_reports_committed_identity_in_http_and_mcp(client, monkeypatch, caplog, operation):
+@pytest.mark.parametrize(("operation", "one_shot"), [
+    ("create", False), ("edit", False), ("edit", True), ("delete", False), ("delete", True),
+])
+async def test_registration_failure_reports_committed_identity_in_http_and_mcp(client, monkeypatch, caplog, operation, one_shot):
     import httpx
 
     from server.mcp_servers.schedule import _error
+    from tests.schedule_support import schedule_job
 
     runner = schedules_mod._get_runner()
     runner._scheduler.pause()
@@ -341,13 +344,21 @@ async def test_registration_failure_reports_committed_identity_in_http_and_mcp(c
     body = {"agent_id": agent["id"], "name": "registration failure", "prompt": "check", "interval_seconds": 3600}
     if operation != "create":
         created = await client.post("/api/schedules", json=body)
+        assert created.status_code == 201, created.text
         schedule_id = created.json()["id"]
+        if one_shot:
+            updated = await client.patch(f"/api/schedules/{schedule_id}", json={"run_at": "2099-01-01T01:00:00Z"})
+            assert updated.status_code == 200, updated.text
+            original_next_run = updated.json()["next_run_at"]
+            assert original_next_run is not None
+        job_id = schedule_job(runner, schedule_id).id
 
     def fail_registration(*args, **kwargs):
         raise RuntimeError("injected APScheduler registration failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr(runner._scheduler, "remove_job" if operation == "delete" else "add_job", fail_registration)
+        effect = "remove_job" if operation == "delete" or one_shot else "add_job"
+        patch.setattr(runner._scheduler, effect, fail_registration)
         if operation == "create":
             response = await client.post("/api/schedules", json=body)
         elif operation == "edit":
@@ -371,9 +382,22 @@ async def test_registration_failure_reports_committed_identity_in_http_and_mcp(c
         assert row["name"] == ("committed edit" if operation == "edit" else body["name"])
     message = _error(httpx.Response(503, json=response.json()), operation)
     assert detail["detail"] in message and schedule_id in message
+    if operation == "edit" and one_shot:
+        assert runner._scheduler.get_job(job_id) is not None
+        listed, = (await client.get("/api/schedules")).json()
+        assert listed["id"] == schedule_id and listed["enabled"] and listed["name"] == "committed edit"
+        assert listed["next_run_at"] is None
     # Recover registration by the original identity, without another create or fire.
     await runner.reconcile(schedule_id)
-    assert (runner._scheduler.get_job(schedule_id) is None) == (operation == "delete")
+    if operation == "delete":
+        assert runner._scheduler.get_job(job_id) is None
+        assert runner.next_run_at(schedule_id) is None
+    elif one_shot:
+        assert runner._scheduler.get_job(job_id) is None
+        listed, = (await client.get("/api/schedules")).json()
+        assert listed["id"] == schedule_id and listed["next_run_at"] == original_next_run
+    else:
+        assert runner.next_run_at(schedule_id) is not None
 
 
 @pytest.mark.asyncio

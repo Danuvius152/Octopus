@@ -41,7 +41,11 @@ FINISH_TICKET_INSTRUCTIONS = (
 TICKET_BATCH_CANDIDATE_INSTRUCTIONS = (
     "Read the human message below before continuing. If it directs you to complete acceptance of the current "
     "ticket and stop the batch, call mcp__ask_agent__limit_ticket_batch with the exact human message. "
-    "If it supplements the authorized batch, call mcp__ask_agent__adopt_ticket_batch_update with the exact message. "
+    "If it only asks about this batch's progress, call mcp__ask_agent__adopt_ticket_batch_update "
+    "with the exact message and progress_only=true, then answer the question. "
+    "Use progress_only only for a pure question without instructions, restrictions, commands or attachments. "
+    "For a supplement to the authorized batch, call mcp__ask_agent__adopt_ticket_batch_update "
+    "with the exact message and leave progress_only false. "
     "A separate task is a new request."
 )
 
@@ -170,8 +174,9 @@ async def _confirmed_batch_inputs(db: Database, origin: RequestRef,
             return None
         proposed = carrier == amending and carrier != origin.request_id and confirmed.adopted_for is None
         if (confirmed.adopted_for == origin.request_id or proposed) and confirmed.primary is not None:
-            steers.append(confirmed.primary)
-            adopted.add(confirmed.primary[1].reference.request_id)
+            if not confirmed.progress_only:
+                steers.append(confirmed.primary)
+                adopted.add(confirmed.primary[1].reference.request_id)
         elif confirmed.original.origin != origin:
             return None
         if carrier == origin.request_id:
@@ -421,11 +426,13 @@ async def limit_ticket_batch(manager: SessionManager, scope: McpScope, message: 
     return await manager._session_owner(session).call_runtime(ApplyTicketBatchInstruction(scope, message, limit=True))
 
 
-async def adopt_ticket_batch_update(manager: SessionManager, scope: McpScope, message: str) -> dict[str, str]:
+async def adopt_ticket_batch_update(manager: SessionManager, scope: McpScope, message: str, *,
+                                    progress_only: bool = False) -> dict[str, str]:
     from .owner_runtime import ApplyTicketBatchInstruction
 
     session = _main_chat(manager, scope)
-    return await manager._session_owner(session).call_runtime(ApplyTicketBatchInstruction(scope, message, limit=False))
+    return await manager._session_owner(session).call_runtime(
+        ApplyTicketBatchInstruction(scope, message, limit=False, progress_only=progress_only))
 
 
 async def ticket_handoff(manager: SessionManager, scope: McpScope, handoff_id: str,

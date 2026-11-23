@@ -308,10 +308,10 @@ async def test_create_session_rejects_credential_backend_mismatch(client):
 
 
 @pytest.mark.asyncio
-async def test_list_backends_includes_claude_code(client):
+async def test_list_backends_reports_claude_code_support(client):
     resp = await client.get("/api/backends", headers=client.headers)
     assert resp.status_code == 200
-    assert "claude-code" in resp.json()["available"]
+    assert "claude-code" in resp.json()["supported"]
 
 
 @pytest.mark.asyncio

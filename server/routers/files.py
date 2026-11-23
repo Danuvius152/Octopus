@@ -89,14 +89,16 @@ async def resolve_showme(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
     assert session_manager.db is not None
-    agent = await session_manager.db.get_agent(session.agent_id, user_id)
-    if agent is None:
+    if await session_manager.db.get_agent_identity(session.agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
     direct = resolve_local_path(req.text, session.working_dir)
     if direct is not None:
         return ShowMeResolveResponse(path=direct)
 
+    agent = await session_manager.db.get_agent(session.agent_id, user_id)
+    if agent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     harness = get_harness(session.backend)
     # Resolve through the same path the turn engine uses so the harness gets a
     # proper HarnessCredential (decrypted, OAuth-refreshed for Claude, or

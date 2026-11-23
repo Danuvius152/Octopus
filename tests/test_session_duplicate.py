@@ -21,7 +21,7 @@ from server.session_manager import ForkError, SessionManager
 from server.session_manager import session_manager as global_sm
 from server.sessions import forking as sm_forking
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 
 @pytest.fixture
@@ -284,20 +284,20 @@ async def test_duplicate_refused_active_task(manager, tmp_path, monkeypatch):
     started, release = asyncio.Event(), asyncio.Event()
 
     class HeldParent(FakeRunBase):
-        async def start(self, *_args, **_kwargs):
+        async def _start(self, *_args, **_kwargs):
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await release.wait()
             yield HarnessEvent(type="result")
 
         async def interrupt(self):
             release.set()
 
-        async def stop(self):
+        async def _stop_process(self):
             release.set()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *_args, **_kwargs: HeldParent())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *_args, **_kwargs: HeldParent()))
     receipt = await manager.start_message(parent.id, "Keep this parent active")
     try:
         await asyncio.wait_for(started.wait(), 1)

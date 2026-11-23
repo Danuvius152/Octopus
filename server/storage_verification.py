@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .account_baseline import persistent_database_file
+from .agent_configuration import (
+    AGENT_CONFIGURATION_FIELDS,
+    AgentConfigurationError,
+    decode_agent_configuration,
+)
+from .harness import all_backends
 from .sqlite_schema import definition, statements
 
 if TYPE_CHECKING:
@@ -37,8 +43,8 @@ def _reader(path: Path) -> Iterator[sqlite3.Connection]:
             raise RuntimeError(f"Storage relationships are inconsistent: {path}")
 
 
-def verify_main(db: sqlite3.Connection) -> int:
-    """Require the complete current layout without the startup upgrade path."""
+def verify_main_layout_and_facts(db: sqlite3.Connection) -> int:
+    """Check the layout and retained facts common to full and account inspection."""
     from .db.schema import _SCHEMA, CURRENT_VERSION
 
     version = db.execute("PRAGMA user_version").fetchone()[0]
@@ -59,6 +65,45 @@ def verify_main(db: sqlite3.Connection) -> int:
     for (identity,) in db.execute("SELECT external_account_id FROM connector_installations WHERE kind='github'"):
         if not isinstance(identity, str) or re.fullmatch(r"[1-9][0-9]*", identity) is None:
             raise RuntimeError("Primary database contains an invalid current GitHub identity")
+    return version
+
+
+@contextmanager
+def _configuration_text(db: sqlite3.Connection) -> Iterator[None]:
+    # Keep undecodable TEXT distinguishable from valid text and BLOBs. SQLite's
+    # default decoding exception can include the stored value.
+    original = db.text_factory
+    db.text_factory = lambda raw: raw.decode("utf-8", errors="surrogateescape")
+    try:
+        yield
+    finally:
+        db.text_factory = original
+
+
+def verify_agent_configurations(db: sqlite3.Connection, *, user_id: str | None = None) -> None:
+    columns = ", ".join(AGENT_CONFIGURATION_FIELDS)
+    query = f"SELECT id, {columns} FROM agents"
+    where, parameters = ("", ()) if user_id is None else (" WHERE user_id=?", (user_id,))
+    with _configuration_text(db):
+        for agent_id, *values in db.execute(query + where, parameters):
+            try:
+                decode_agent_configuration(agent_id, dict(zip(AGENT_CONFIGURATION_FIELDS, values, strict=True)))
+            except AgentConfigurationError as error:
+                raise RuntimeError(str(error)) from None
+
+
+def verify_main(db: sqlite3.Connection) -> int:
+    """Verify the actual full primary database before publication or restore."""
+    version = verify_main_layout_and_facts(db)
+    verify_agent_configurations(db)
+    backends = set(all_backends())
+    origins = {"user", "schedule", "wiki", "delegation", "fork", "application", "app"}
+    with _configuration_text(db):
+        for session_id, backend, origin in db.execute("SELECT id, backend, origin FROM sessions"):
+            if backend not in backends:
+                raise RuntimeError(f"Session {session_id}: invalid backend")
+            if origin not in origins:
+                raise RuntimeError(f"Session {session_id}: invalid origin")
     return version
 
 

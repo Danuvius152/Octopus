@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .config import Settings
-from .db.portability import read_account, rebind_account, snapshot_account
+from .db.portability import (
+    read_account,
+    rebind_account,
+    snapshot_account,
+    verify_account_archive_rows,
+)
 from .service_installation import (
     _DIRECTORIES,
     _FILES,
@@ -32,6 +37,7 @@ from .storage_verification import _reader, verify_main
 
 FORMAT = 1
 PATH_SETTINGS = (*_DIRECTORIES, *_FILES)
+_SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 
 
 def software_version() -> str:
@@ -106,6 +112,13 @@ def _empty_targets(home: Path, roots: list[str]) -> None:
                 raise ValueError(f"Target path traverses a symlink: {parent}")
         if path.exists() or path.is_symlink():
             raise ValueError(f"Migration target is not empty: {path}")
+
+
+def _require_no_database_sidecars(path: Path) -> None:
+    for suffix in _SQLITE_SIDECARS:
+        sidecar = path.with_name(path.name + suffix)
+        if sidecar.exists() or sidecar.is_symlink():
+            raise ValueError(f"Account import cannot include a SQLite sidecar: {sidecar}")
 
 
 def _minimal_roots(paths: list[Path]) -> list[Path]:
@@ -268,7 +281,7 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
     roots = [account]
     excluded = {account / "codex", *(Path(os.environ.get(variable) or Path.home() / default).expanduser().resolve()
                  for variable, default in _PROVIDER_HOMES.values()),
-                *(Path(str(paths["db_path"]) + suffix) for suffix in ("", "-wal", "-shm", "-journal")), paths["master_key_file"]}
+                *(Path(str(paths["db_path"]) + suffix) for suffix in ("", *_SQLITE_SIDECARS)), paths["master_key_file"]}
     for app in applications:
         if app["status"] == "building" and app.get("deletion") is None:
             raise ValueError("Application build must settle on the source before exporting")
@@ -523,15 +536,19 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
         values = manifest["config"] | {name: map_path(manifest["config"][name]) for name in PATH_SETTINGS}
         config = Settings.model_validate(values)
         db_relative = _relative(Path(config.db_path), home)
+        if any(db_relative + suffix in manifest["entries"] for suffix in _SQLITE_SIDECARS):
+            raise ValueError("Account archive contains a SQLite sidecar")
         key_relative = _relative(Path(config.master_key_file), home)
+        user_id = manifest["user_id"]
         key = package.read("files/" + key_relative).decode().strip()
         with closing(sqlite3.connect(":memory:")) as reader:
             reader.row_factory = sqlite3.Row
             reader.deserialize(package.read("files/" + db_relative))
-            applications = read_account(reader, manifest["user_id"], key=key)["applications"]
+            applications = read_account(reader, user_id, key=key)["applications"]
         roots = manifest["roots"]
         env_relative = db_relative + ".import.env"
         _empty_targets(home, [*roots, env_relative])
+        _require_no_database_sidecars(home / db_relative)
         existing = home
         while not existing.exists():
             existing = existing.parent
@@ -559,36 +576,41 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
                     path = staging / name
                     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     path.symlink_to(os.path.relpath(home / entry["target"], (home / name).parent))
-            db_relative = _relative(Path(config.db_path), home)
-            key = (staging / _relative(Path(config.master_key_file), home)).read_text().strip()
-            with _reader(staging / db_relative) as reader:
-                from .crypto import decrypt
-
-                verify_main(reader)
-                user = reader.execute("SELECT dek_wrapped FROM users WHERE id=?", (manifest["user_id"],)).fetchone()
-                if user is None:
-                    raise ValueError("Archive is missing its declared account")
-                decrypt(user[0], key)
             app_addresses, absent_app_paths = _verify_application_archive(
                 applications, manifest.get("applications"), entries, roots, source_home,
             )
-            rebind_account(staging / db_relative, map_path, {app_id: str(home / path) for app_id, path in app_addresses.items()})
+            staged_database = staging / db_relative
+            rebind_account(staged_database, user_id, map_path, {app_id: str(home / path) for app_id, path in app_addresses.items()})
             if manifest["wiki"]:
                 from .wiki.portability import rebind_wiki
 
-                rebind_wiki(staging, home, source_home, manifest["wiki"], Path(config.users_root) / manifest["user_id"] / "wiki")
+                rebind_wiki(staging, home, source_home, manifest["wiki"], Path(config.users_root) / user_id / "wiki")
             staged_env = staging / env_relative
             staged_env.parent.mkdir(parents=True, exist_ok=True)
             staged_env.write_text(_service_environment(config))
             staged_env.chmod(0o600)
+            _require_no_database_sidecars(staged_database)
+            key = (staging / key_relative).read_text().strip()
+            with _reader(staged_database) as reader:
+                from .crypto import decrypt
+
+                verify_account_archive_rows(reader, user_id)
+                verify_main(reader)
+                user = reader.execute("SELECT dek_wrapped FROM users WHERE id=?", (user_id,)).fetchone()
+                if user is None:
+                    raise ValueError("Archive is missing its declared account")
+                decrypt(user[0], key)
+            _require_no_database_sidecars(staged_database)
             _sync_tree(staging)
             owner = InstallationOwner(config)
             owner.acquire_offline()
             marker = Path(config.db_path).with_name(Path(config.db_path).name + ".importing")
+            marker_created = False
             published: list[Path] = []
             complete = False
             try:
                 _empty_targets(home, [*roots, env_relative])
+                _require_no_database_sidecars(home / db_relative)
                 # Check the completed staging tree and the ordinary target
                 # directories it will join. Required content was verified
                 # solely against the archive declarations above.
@@ -598,6 +620,7 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
                         raise ValueError(f"Undeclared application path already exists: {home / path}")
                 _ensure_directory(marker.parent, home)
                 with marker.open("x") as stream:
+                    marker_created = True
                     json.dump({"archive": str(Path(archive).absolute()), "roots": roots, "environment": env_relative}, stream)
                     stream.flush()
                     os.fsync(stream.fileno())
@@ -635,7 +658,7 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
                     else:
                         path.unlink()
                     _sync_directory(path.parent)
-                if marker.exists():
+                if marker_created and marker.exists():
                     marker.unlink()
                     _sync_directory(marker.parent)
                 raise

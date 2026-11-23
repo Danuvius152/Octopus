@@ -24,7 +24,7 @@ beforeEach(() => {
   sessionStorage.clear();
   useSessionStore.getState().setToken("chat-draft-test");
   useSessionStore.setState({ activeSessionId: a.id, sessions: [a, b], archivedSessions: [], agents: [], messages: {},
-    pendingQuestions: {}, streamingText: {}, dispatchStates: {}, dispatchUnavailable: {}, pendingForks: {}, credentials: [], backendModels: {} });
+    pendingQuestions: {}, streamingText: {}, dispatchStates: {}, dispatchUnavailable: {}, pendingForks: {}, credentials: [] });
   vi.stubGlobal("fetch", vi.fn(async () => Response.json([])));
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); useSessionStore.getState().setToken(""); });

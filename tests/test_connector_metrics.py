@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from server.mcp_servers.connectors import _shared, custom, github, gmail
 from server.monitor import Event, MetricsStore, query
 from tests.connector_runtime import clock as clock
+from tests.connector_runtime import connector_tool as connector_tool
 from tests.connector_runtime import provider_transport as provider_transport
 
 
@@ -57,15 +58,15 @@ async def test_committed_post_with_bad_resource_structure_keeps_unknown_effect(p
     assert event == (0, "resource_decode")
 
 
-@pytest.mark.parametrize("tool,arguments,body", [
-    (github.get_file, {"repo": "owner/name", "path": "file"}, {"encoding": "base64", "content": "a"}),
-    (gmail.get, {"message_id": "original"}, {"payload": {"mimeType": "text/plain", "body": {"data": "a"}}}),
-    (gmail.search, {"query": "original"}, {"messages": [{}]}),
-])
-async def test_resource_decode_failure_is_the_only_sample(provider_transport, metrics, tool, arguments, body):
+@pytest.mark.parametrize("connector_tool,arguments,body", [
+    pytest.param((github, "get_file"), {"repo": "owner/name", "path": "file"}, {"encoding": "base64", "content": "a"}, id="get_file"),
+    pytest.param((gmail, "get"), {"message_id": "original"}, {"payload": {"mimeType": "text/plain", "body": {"data": "a"}}}, id="get"),
+    pytest.param((gmail, "search"), {"query": "original"}, {"messages": [{}]}, id="search"),
+], indirect=["connector_tool"])
+async def test_resource_decode_failure_is_the_only_sample(provider_transport, metrics, connector_tool, arguments, body):
     requests = []
     provider_transport(lambda request: requests.append(request) or httpx.Response(200, json=body))
-    assert "Error:" in await tool(**arguments)
+    assert "Error:" in await connector_tool(**arguments)
     assert len(requests) == 1
     await metrics.drain()
     assert await (await metrics.conn.execute("SELECT ok, error_code FROM events")).fetchall() == [(0, "resource_decode")]

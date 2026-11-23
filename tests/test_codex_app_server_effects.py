@@ -25,6 +25,7 @@ from tests.native_app_server import (
     terminal,
     until,
 )
+from tests.schedule_support import dispatch_schedule
 from tests.test_scheduler import save_schedule
 from tests.test_wiki_completion_handoff import original_job
 from tests.wiki_job_runtime import client as client
@@ -138,7 +139,7 @@ async def test_schedule_records_original_result_and_archives_only_after_retireme
     runner = ScheduleRunner(manager, database)
     await save_schedule(database, schedule_id="native-schedule", agent_id=parent.agent_id,
         name="Native schedule", prompt="Use native waiting", interval_seconds=60, created_at="2026-11-01T00:00:00+00:00")
-    operation = asyncio.create_task(runner._fire("native-schedule"))
+    operation = asyncio.create_task(dispatch_schedule(runner, "native-schedule"))
     try:
         await until(lambda: any(s.origin == "schedule" and s._run.backend is not None
                                and s._run.backend.active_turn is not None for s in manager.sessions.values()))

@@ -17,7 +17,7 @@ from server.routers.sessions import router as sessions_router
 from server.service_installation import configure_service, read_service_profile
 from server.sessions import SessionManager
 from server.users import UserManager
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.test_service_layout import account_installation as account_installation
 
 
@@ -69,23 +69,23 @@ async def test_first_account_spill_keeps_managed_installation_restartable(manage
     received = []
 
     class RecordingRun(FakeRunBase):
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             received.append(prompt)
 
-        def stream(self):
+        def _stream(self):
             async def events():
                 yield HarnessEvent(type="session_started", session_id="account-spill")
                 yield HarnessEvent(type="text", content="Complete")
                 yield HarnessEvent(type="result", session_id="account-spill", cost=0.0, num_turns=1)
             return events()
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
             pass
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args: RecordingRun())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args: RecordingRun()))
     original = "[bg-task-result] " + "完整输入" * (LARGE_PROMPT_THRESHOLD_BYTES // 12 + 1)
     assert len(original.encode("utf-8")) > LARGE_PROMPT_THRESHOLD_BYTES
     receipt = await manager.start_message(session.id, original)

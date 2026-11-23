@@ -829,8 +829,10 @@ async def test_cancel_reaps_a_descendant_that_ignores_sigterm(manager, db, tmp_p
     monkeypatch.setattr("server.bg_tasks._TERM_GRACE_SECONDS", 0.03)
     await _make_session_row(db, "s1", str(tmp_path))
     child_code = (
-        "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        "open('child.pid','w').write(str(os.getpid())); time.sleep(30)"
+        "import os,signal,time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "pid_file=Path('child.pid.tmp'); pid_file.write_text(str(os.getpid())); "
+        "pid_file.rename('child.pid'); time.sleep(30)"
     )
     parent_code = (
         f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child_code!r}]); "

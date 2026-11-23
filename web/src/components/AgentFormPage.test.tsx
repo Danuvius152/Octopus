@@ -10,6 +10,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { AgentFormPage } from "./AgentFormPage";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { connectorInstallations } from "../lib/connectorInstallations";
+import { backendCatalogFixture } from "../test-support/backendCatalog";
 import { deferred } from "../test-support/deferred";
 import { refreshAgents } from "../lib/refreshAgents";
 import {
@@ -57,9 +58,7 @@ function mount(
     pageTab,
     credentials: [],
     connectorInstallations: [],
-    availableBackends: ["claude-code", "codex"],
-    defaultBackend,
-    backendToolPolicies: { "claude-code": { allow: false, deny: true }, codex: { allow: false, deny: false } },
+    backendCatalog: { status: "ready", catalog: backendCatalogFixture(undefined, defaultBackend) },
     mainView: "agent-form",
   });
   return render(<AgentFormPage onToggleSidebar={() => {}} />);
@@ -870,7 +869,7 @@ describe("AgentFormPage", () => {
   it("applies a late default without clearing the draft's name", () => {
     mount();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "My agent" } });
-    act(() => useSessionStore.setState({ defaultBackend: "codex" }));
+    act(() => useSessionStore.setState({ backendCatalog: { status: "ready", catalog: backendCatalogFixture(undefined, "codex") } }));
     expect(screen.getByRole("radio", { name: /Codex/ }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("My agent");
   });
@@ -878,7 +877,7 @@ describe("AgentFormPage", () => {
   it("preserves an explicit backend choice when the install default arrives", () => {
     mount();
     fireEvent.click(screen.getByRole("radio", { name: /Claude/ }));
-    act(() => useSessionStore.setState({ defaultBackend: "codex" }));
+    act(() => useSessionStore.setState({ backendCatalog: { status: "ready", catalog: backendCatalogFixture(undefined, "codex") } }));
     expect(screen.getByRole("radio", { name: /Claude/ }).getAttribute("aria-checked")).toBe("true");
   });
 
@@ -1328,6 +1327,7 @@ function showConnectorInstallations(...ids: string[]) {
 }
 
 function emptyRead(url: unknown): Response {
+  if (String(url).endsWith("/api/backends")) return json(backendCatalogFixture());
   if (String(url).includes("include_archived=true")) {
     const state = useSessionStore.getState();
     return json([...state.agents, ...state.archivedAgents]);

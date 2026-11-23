@@ -149,6 +149,21 @@ async def test_full_fork_saves_actual_native_id_without_starting_a_turn(fork_sou
     assert (await database.read_session_result(branch.id, receipt.request_id)).fragments == ("Native answer",)
 
 
+async def test_full_fork_copies_history_with_bad_agent_tools_but_refuses_new_input(fork_source, tmp_path):
+    runtime, original = fork_source
+    manager, database, parent, _, _, _ = runtime
+    async with database.transaction(write=True) as tx:
+        await tx.execute("UPDATE agents SET mcp_servers = 'null' WHERE id = ?", (parent.agent_id,))
+
+    before = (tmp_path / "native-business.jsonl").read_bytes()
+    branch = await manager.duplicate_session(parent.id, user_id=parent.user_id)
+    assert branch.working_dir != parent.working_dir and Path(branch.working_dir).is_dir()
+    assert (await database.read_session_result(branch.id, original.request_id)).fragments == ("Native answer",)
+    refused = await submit_client_message(manager, branch.id, "Do not execute", [], "bad-agent-input", wiki_mode=None)
+    assert not refused["accepted"] and parent.agent_id in refused["message"] and "mcp_servers" in refused["message"]
+    assert (tmp_path / "native-business.jsonl").read_bytes() == before
+
+
 @pytest.mark.parametrize("failure", ["fork_lost_ack", "fork_error_after_creation", "fork_wrong_identity"])
 async def test_unknown_creation_keeps_saga_and_never_deletes_the_hint(fork_source, tmp_path, monkeypatch, failure):
     runtime, _ = fork_source

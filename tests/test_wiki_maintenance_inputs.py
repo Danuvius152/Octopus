@@ -244,14 +244,15 @@ def test_initialized_job_ledger_loss_is_never_recreated_empty(prepared, missing)
     enqueue(jobs, docs["a"])
     with jobs.store.connect() as db:
         db.execute("DROP TABLE " + missing)
-    with pytest.raises(WikiError, match="job ledger") as unavailable:
-        WikiJobs(None)
-    assert unavailable.value.status == 503
     with pytest.raises(WikiError, match="job ledger"):
         with jobs.store.connect() as db:
             inputs.ready(db, [docs["a"]["id"]])
     with jobs.store.connect() as db:
         assert missing not in inputs.names(db)
+    registry.close()
+    with pytest.raises(WikiError, match="job ledger") as unavailable:
+        WikiJobs(None)
+    assert unavailable.value.status == 503
 
 
 def test_missing_initialized_input_protocol_fails_without_cache_repair(prepared):

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
+from ..agent_configuration import AgentConfigurationError, decode_agent_configuration
 from ..context_models import (
+    ContextInvalidationReason,
     ContextSample,
     ContextState,
+    ContextTarget,
     align_context,
     context_binding,
     context_target,
@@ -15,6 +20,31 @@ from ..context_models import (
 from ..harness import HarnessEvent
 from .base import Session, SessionManagerBase
 from .runtime_types import _Attempt
+
+if TYPE_CHECKING:
+    from ..database import Database
+
+logger = logging.getLogger(__name__)
+
+
+async def read_session_context_target(db: Database, session: Session) -> ContextTarget | None:
+    """Align saved observations using only binding facts that the session inherits."""
+    agent_id = session.agent_id
+    inherited = [field for field in ("model", "credential_id") if not getattr(session, field)]
+    if agent_id is None or not inherited:
+        return context_target(session, None)
+    agent = await db.get_agent_context_fields(agent_id, session.user_id)
+    if agent is None:
+        return context_target(session, None)
+    try:
+        decode_agent_configuration(agent_id, {field: agent[field] for field in inherited})
+        revision = agent["context_settings_revision"]
+        if type(revision) is not int or revision < 0:
+            raise AgentConfigurationError(agent_id, "context_settings_revision")
+    except AgentConfigurationError as exc:
+        logger.warning("Context alignment unavailable for session %s: %s", session.id, exc)
+        return None
+    return context_target(session, agent)
 
 
 class ContextMixin(SessionManagerBase):
@@ -26,18 +56,34 @@ class ContextMixin(SessionManagerBase):
                     owner.refresh_context()
 
     async def _reset_context_owned(self, session: Session) -> None:
-        assert self.db is not None
-        async with self._configuration_boundary(session):
-            agent = await self._load_agent(session)
-            await self._save_context(session, invalidate_context(session.context_state,
-                context_target(session, agent), "native_context_changed", binding=True))
+        await self._invalidate_context_owned(session, "native_context_changed", binding=True)
 
     async def _unconfirmed_context_owned(self, session: Session) -> None:
+        await self._invalidate_context_owned(session, "operation_unconfirmed")
+
+    async def _invalidate_context_owned(
+        self, session: Session, reason: ContextInvalidationReason, *, binding: bool = False,
+    ) -> None:
         assert self.db is not None
         async with self._configuration_boundary(session):
-            agent = await self._load_agent(session)
-            await self._save_context(session, invalidate_context(session.context_state,
-                context_target(session, agent), "operation_unconfirmed"))
+            state = session.context_state
+            target = await read_session_context_target(self.db, session)
+            if target is None:
+                # The effect still invalidates the last observed binding even
+                # while damaged defaults prevent capturing a current one.
+                if state is not None:
+                    target = state.binding_target
+                elif (owner := self._require_session_writer(session)) is not None:
+                    execution = owner.runtime.current
+                    if execution is not None and execution.prepared is not None:
+                        captured = execution.prepared.context_binding
+                        target = ContextTarget(
+                            native_session_id=session.claude_session_id,
+                            effective_config_key=captured.effective_config_key,
+                            agent_settings_revision=captured.agent_settings_revision,
+                        )
+            if target is not None:
+                await self._save_context(session, invalidate_context(state, target, reason, binding=binding))
 
     async def context_snapshot(self, session: Session) -> tuple[ContextState | None, bool]:
         # Diagnostic reads do not depend on the execution writer's progress.
@@ -47,18 +93,15 @@ class ContextMixin(SessionManagerBase):
             return None, False
         assert self.db is not None
         async with self.db.configuration_lock:
-            agent = await self._load_agent(session)
+            target = await read_session_context_target(self.db, session)
             state = session.context_state
             pending = state is not None and (
-                state.binding_target != context_target(session, agent) or self.session_owner_failed(session.id))
-        if pending:
+                state.binding_target != target or self.session_owner_failed(session.id))
+        if pending and target is not None:
             owner = self._session_owners.get(id(session))
             if owner is not None:
                 owner.refresh_context()
         return state, pending
-
-    async def _align_context_locked(self, session: Session, agent: dict | None) -> None:
-        await self._save_context(session, align_context(session.context_state, context_target(session, agent)))
 
     async def _save_context(self, session: Session, state: ContextState | None) -> None:
         if state == session.context_state:
@@ -73,8 +116,10 @@ class ContextMixin(SessionManagerBase):
     async def _read_context_owned(self, session: Session) -> ContextState | None:
         assert self.db is not None
         async with self._configuration_boundary(session):
-            agent = await self._load_agent(session)
-            await self._align_context_locked(session, agent)
+            if session.context_state is not None:
+                target = await read_session_context_target(self.db, session)
+                if target is not None:
+                    await self._save_context(session, align_context(session.context_state, target))
             return session.context_state
 
     async def _accept_context(self, session: Session, attempt: _Attempt, event: HarnessEvent) -> None:
@@ -93,9 +138,10 @@ class ContextMixin(SessionManagerBase):
         attempt.context_observation_seq = source.observation_seq
         assert self.db is not None
         async with self._configuration_boundary(session):
-            agent = await self._load_agent(session)
-            await self._align_context_locked(session, agent)
-            target = context_target(session, agent)
+            target = await read_session_context_target(self.db, session)
+            if target is None:
+                return
+            await self._save_context(session, align_context(session.context_state, target))
             current = context_binding(target, session.context_state)
             if (captured.binding_revision != current.binding_revision
                     or captured.effective_config_key != current.effective_config_key

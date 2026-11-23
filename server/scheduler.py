@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 from zoneinfo import ZoneInfoNotFoundError
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
@@ -13,6 +15,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+from .agent_configuration import AgentConfigurationError
+from .credential_bindings import CredentialBindingError
+from .db.applications import ApplicationDeleting
+from .db.base import DatabaseBusy
 from .knowledge import RequestingWorkClosedError, decode_context
 from .models import SessionStatus
 from .schedule_ai import (
@@ -22,6 +28,15 @@ from .schedule_ai import (
     local_timezone,
 )
 from .schedule_targets import ScheduleTargetError, resolve_schedule_target
+from .service_health import ServiceUnavailable
+from .sessions.runtime_types import (
+    QuotaExceeded,
+    SessionAdmissionBusy,
+    SessionAdmissionClosed,
+    SessionMailboxFull,
+    SessionOwnerUnavailable,
+)
+from .sessions.submission import TemporaryScheduleReceipt
 
 if TYPE_CHECKING:
     from server.database import Database
@@ -29,11 +44,41 @@ if TYPE_CHECKING:
     from server.session_manager import SessionManager
     from server.sessions.submission import SubmissionReceipt
 
-from .db.schedules import ScheduleChangedError
+from .db.schedules import (
+    ScheduleChangedError,
+    ScheduleOriginChanged,
+    schedule_delivery_id,
+    stored_run_at,
+)
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
 
 logger = logging.getLogger(__name__)
+_RETRY_DELAY = timedelta(seconds=5)
+
+
+@dataclass(frozen=True)
+class _ScheduleTiming:
+    run_at: str | None = None
+    cron: str | None = None
+    interval_seconds: int | None = None
+    timezone: str | None = None
+
+    @classmethod
+    def capture(cls, row: dict) -> _ScheduleTiming:
+        if row.get("run_at") is not None:
+            return cls(run_at=row["run_at"])
+        if row.get("cron"):
+            return cls(cron=row["cron"], timezone=row.get("timezone") or "UTC")
+        return cls(interval_seconds=row["interval_seconds"], timezone=row.get("timezone"))
+
+
+@dataclass(eq=False)
+class _ScheduleRegistration:
+    schedule_id: str
+    job_id: str
+    timing: _ScheduleTiming
+    admission_revoked: bool = False
 
 
 class ScheduleRegistrationError(RuntimeError):
@@ -55,6 +100,7 @@ class ScheduleRunner:
         self._db = db
         self._closing = False
         self._registration_lock = asyncio.Lock()
+        self._registrations: dict[str, _ScheduleRegistration] = {}
         self._control_tasks: set[asyncio.Task[None]] = set()
         self._shutdown_controls: tuple[asyncio.Task[None], ...] = ()
         self._shutdown_tasks: tuple[asyncio.Future, ...] | None = None
@@ -63,10 +109,12 @@ class ScheduleRunner:
     def next_run_at(self, schedule_id: str) -> str | None:
         """ISO timestamp of the next fire, straight from APScheduler's own
         trigger state — the only place that knows it for a cron in an
-        arbitrary timezone. None when the schedule is disabled (no job) or the
-        scheduler hasn't started yet."""
+        arbitrary timezone. None without an armed and eligible registration."""
         try:
-            job = self._scheduler.get_job(schedule_id)
+            registration = self._registrations.get(schedule_id)
+            if registration is not None and registration.admission_revoked:
+                return None
+            job = self._scheduler.get_job(registration.job_id if registration is not None else schedule_id)
         except Exception:
             return None
         run_time = getattr(job, "next_run_time", None) if job else None
@@ -111,30 +159,39 @@ class ScheduleRunner:
         await sweep()
 
     def _add_job(self, row: dict, *, not_before: datetime | None = None) -> None:
-        # Already admitted controls can finish while new launches are closed.
-        # Recurrence priority: run_at (one-time) > cron > interval.
-        common = dict(id=row["id"], args=[row["id"]], replace_existing=True)
-        if row.get("run_at"):
-            run_date = datetime.fromisoformat(row["run_at"])
-            if run_date.tzinfo is None:
-                run_date = run_date.replace(tzinfo=UTC)
-            self._scheduler.add_job(self._fire, DateTrigger(run_date=max(run_date, not_before or datetime.now(UTC))),
-                                    misfire_grace_time=None, **common)
-        elif row.get("cron"):
+        timing = _ScheduleTiming.capture(row)
+        schedule_id = row["id"]
+        # Periodic jobs share the instance limit across edits. Each date arm
+        # gets its own executor slot even if its predecessor is still unwinding.
+        job_id = f"{schedule_id}:date:{uuid4().hex}" if timing.run_at is not None else schedule_id
+        registration = _ScheduleRegistration(schedule_id, job_id, timing)
+        common = dict(id=job_id, args=[registration], replace_existing=True)
+        if timing.run_at is not None:
+            run_date = max(stored_run_at(timing.run_at), not_before or datetime.now(UTC))
+            self._scheduler.add_job(self._fire, DateTrigger(run_date=run_date), misfire_grace_time=None, **common)
+        elif timing.cron is not None:
             # cron_trigger, not CronTrigger.from_crontab: crontab counts
             # day-of-week from Sunday and APScheduler from Monday
             # (schedule_ai._crontab_dow_field).
             try:
-                trigger = cron_trigger(row["cron"], row.get("timezone") or "UTC")
+                trigger = cron_trigger(timing.cron, timing.timezone or "UTC")
             except (ValueError, ZoneInfoNotFoundError) as exc:
                 raise ScheduleParseError(f"Invalid stored cron: {exc}") from exc
             self._scheduler.add_job(self._fire, trigger, **common)
         else:
-            trigger = interval_trigger(row["interval_seconds"], now=datetime.now(UTC),
-                                       tz=row.get("timezone") or local_timezone())
+            trigger = interval_trigger(timing.interval_seconds, now=datetime.now(UTC), tz=timing.timezone or local_timezone())
             self._scheduler.add_job(self._fire, trigger, **common)
+        self._registrations[schedule_id] = registration
 
-    async def _fire(self, schedule_id: str) -> None:
+    def _owns_registration(self, registration: _ScheduleRegistration) -> bool:
+        return (not self._closing and not registration.admission_revoked
+                and self._registrations.get(registration.schedule_id) is registration)
+
+    def _forget_date(self, registration: _ScheduleRegistration) -> None:
+        if self._owns_registration(registration):
+            self._registrations.pop(registration.schedule_id)
+
+    async def _fire(self, registration: _ScheduleRegistration) -> None:
         """Run the schedule's prompt for this fire.
 
         Delivery modes (docs/implemented/scheduled-runs.md):
@@ -156,45 +213,127 @@ class ScheduleRunner:
         A one-shot is removed only by the target/input admission transaction.
         Returning or losing this callback cannot consume an unaccepted fire.
         """
-        if self._closing:
+        if not self._owns_registration(registration):
             return
-        now = datetime.now(UTC).isoformat()
-        row = await self._schedule_row(schedule_id)
-        # Only the current durable row can authorize a fire or supply text.
-        if row is None or not row["enabled"]:
+        if registration.timing.run_at is not None:
+            await self._fire_date(registration, registration.timing.run_at)
             return
-        if (reason := await self._target_unavailable_reason(row)) is not None:
-            logger.warning("Schedule %s suppressed: %s", schedule_id, reason)
-            if not self._closing:
-                await self.reconcile(schedule_id)
+        fired_at = datetime.now(UTC).isoformat()
+        try:
+            row = await self._capture_fire(registration)
+        except (TimeoutError, ConnectionError, ServiceUnavailable):
+            logger.warning("Schedule %s: could not capture periodic fire", registration.schedule_id, exc_info=True)
             return
+        if row is not None:
+            await self._fire_periodic(row, fired_at)
+
+    async def _capture_fire(self, registration: _ScheduleRegistration) -> dict | None:
+        row = await self._db.get_schedule_definition(registration.schedule_id)
+        if (not self._owns_registration(registration) or row is None or not row["enabled"]
+                or _ScheduleTiming.capture(row) != registration.timing):
+            return None
+        reason = await self._target_unavailable_reason(row)
+        if reason is not None:
+            logger.warning("Schedule %s suppressed: %s", registration.schedule_id, reason)
+            async with self._registration_lock:
+                if self._owns_registration(registration):
+                    await self._register(registration.schedule_id)
+            return None
+        if registration.timing.run_at is not None and not self._owns_registration(registration):
+            return None
+        return row
+
+    async def _fire_date(self, registration: _ScheduleRegistration, run_at: str) -> None:
+        schedule_id = registration.schedule_id
+        delivery_id = schedule_delivery_id(schedule_id, run_at)
+        while self._owns_registration(registration):
+            try:
+                row = await self._capture_fire(registration)
+            except ServiceUnavailable:
+                return
+            except (TimeoutError, ConnectionError):
+                logger.info("Schedule %s: definition temporarily unreadable", schedule_id)
+                await self._recover_date(registration, delivery_id)
+                return
+            if row is None:
+                self._forget_date(registration)
+                return
+            context = decode_context(row.get("knowledge_context"))
+            assert context is not None  # Validated with the captured target.
+            try:
+                _, receipt = await self._session_mgr.start_one_shot(
+                    row, self._compose_prompt(row, row["prompt"]), context,
+                    registration_open=lambda: self._owns_registration(registration),
+                )
+            except ScheduleOriginChanged:
+                # Rebinding keeps this fire and its original registration.
+                continue
+            except ServiceUnavailable:
+                return
+            except (AgentConfigurationError, CredentialBindingError):
+                logger.warning("Schedule %s: Agent configuration prevents admission", schedule_id)
+                await self._recover_date(registration, delivery_id)
+                return
+            except (ApplicationDeleting, DatabaseBusy, ScheduleChangedError, QuotaExceeded,
+                    SessionAdmissionBusy, SessionAdmissionClosed, SessionMailboxFull):
+                await self._recover_date(registration, delivery_id)
+                return
+            except (TimeoutError, ConnectionError, SessionOwnerUnavailable):
+                logger.warning("Schedule %s: admission acknowledgment unconfirmed", schedule_id)
+                await self._recover_date(registration, delivery_id, unconfirmed=True)
+                return
+            if not receipt.accepted:
+                await self._recover_date(registration, delivery_id)
+                return
+            self._forget_date(registration)
+            if isinstance(receipt, TemporaryScheduleReceipt):
+                await asyncio.shield(receipt.retirement)
+            return
+
+    async def _recover_date(self, registration: _ScheduleRegistration, delivery_id: str, *, unconfirmed: bool = False) -> None:
+        """Keep the original date responsibility until it is settled or rearmed."""
+        while not self._closing:
+            try:
+                self._db.health.require_healthy()
+                if unconfirmed:
+                    if await self._session_mgr.source_receipt("schedule", delivery_id) is not None:
+                        break
+                    if await self._session_mgr.wait_for_one_shot_admission(delivery_id):
+                        # The original Owner could commit after the empty read.
+                        continue
+                if not self._owns_registration(registration):
+                    return
+                async with self._registration_lock:
+                    if not self._owns_registration(registration) or self._scheduler.get_job(registration.job_id) is not None:
+                        return
+                    current = await self._db.get_schedule_definition(registration.schedule_id)
+                    if (current is None or not current["enabled"]
+                            or _ScheduleTiming.capture(current) != registration.timing
+                            or await self._target_unavailable_reason(current) is not None
+                            or await self._session_mgr.source_receipt("schedule", delivery_id) is not None):
+                        break
+                    # Control writes can commit while target and input are being
+                    # observed. Install only against the last definition read.
+                    if await self._db.get_schedule_definition(registration.schedule_id) != current:
+                        continue
+                    self._db.health.require_healthy()
+                    if self._owns_registration(registration) and self._db.health.state != "stopping":
+                        self._add_job(current, not_before=datetime.now(UTC) + _RETRY_DELAY)
+                    return
+            except ServiceUnavailable:
+                return
+            except (TimeoutError, ConnectionError):
+                await asyncio.sleep(_RETRY_DELAY.total_seconds())
+        self._forget_date(registration)
+
+    async def _fire_periodic(self, row: dict, fired_at: str) -> None:
+        schedule_id = row["id"]
         agent_id = row["agent_id"]
         origin_session_id = row.get("origin_session_id")
-        run_at = row.get("run_at")
         prompt = row["prompt"]
         body = self._compose_prompt(row, prompt)
         context = decode_context(row.get("knowledge_context"))
         assert context is not None  # Target validation checked this exact definition snapshot.
-
-        if run_at is not None:
-            target = None
-            try:
-                target, receipt = await self._session_mgr.start_one_shot(row, body, context)
-                if not receipt.accepted:
-                    logger.info("Schedule %s retained: session admission is closed", schedule_id)
-                    return
-                if target != origin_session_id:
-                    await self._completion_recorded(schedule_id, target, receipt)
-            except Exception:
-                logger.exception("One-shot %s was not acknowledged; its durable input determines consumption", schedule_id)
-            finally:
-                if target is not None and target != origin_session_id:
-                    await self._session_mgr.auto_archive_scheduled_session(target)
-                if not self._closing and self._scheduler.running:
-                    # Admission alone consumes the original source. Reconcile
-                    # current state before retrying an unconsumed one-shot.
-                    await self.reconcile(schedule_id, not_before=datetime.now(UTC) + timedelta(seconds=5))
-            return
 
         if origin_session_id and self._session_mgr.get_session(origin_session_id):
             if self._backlogged(origin_session_id):
@@ -213,7 +352,7 @@ class ScheduleRunner:
                     return
                 await self._db.update_schedule(
                     schedule_id,
-                    last_run_at=now,
+                    last_run_at=fired_at,
                     last_run_session_id=origin_session_id,
                 )
             except ValueError as e:
@@ -256,7 +395,7 @@ class ScheduleRunner:
                 return
             if not await self._completion_recorded(schedule_id, session.id, receipt):
                 return
-            await self._db.update_schedule(schedule_id, last_run_at=now)
+            await self._db.update_schedule(schedule_id, last_run_at=fired_at)
         except ValueError as e:
             _mon_record(_MonEvent(kind="schedule_fire", agent_id=agent_id,
                                  ok=False, error_code="overlap_skip",
@@ -292,15 +431,6 @@ class ScheduleRunner:
             await store.prune()
         except Exception:
             logger.warning("metrics retention sweep failed", exc_info=True)
-
-    async def _schedule_row(self, schedule_id: str) -> dict | None:
-        """The schedule's current row, or None if it was deleted between the
-        job firing and this lookup."""
-        try:
-            return await self._db.get_schedule_definition(schedule_id)
-        except Exception:
-            logger.exception("Schedule %s: could not read its row", schedule_id)
-            return None
 
     @staticmethod
     def _compose_prompt(row: dict | None, prompt: str) -> str:
@@ -361,8 +491,7 @@ class ScheduleRunner:
     async def delete(self, schedule_id: str) -> None:
         await self._change(schedule_id, lambda: self._db.delete_schedule(schedule_id))
 
-    async def _change(self, schedule_id: str, write: Callable[[], Awaitable[None]] | None = None,
-                      *, not_before: datetime | None = None) -> None:
+    async def _change(self, schedule_id: str, write: Callable[[], Awaitable[None]] | None = None) -> None:
         """Take ownership before the first DB/registration wait, until convergence.
 
         Each edit is a distinct operation. Cancelling a waiter cannot cancel an
@@ -374,9 +503,14 @@ class ScheduleRunner:
         async def finish() -> None:
             if write is not None:
                 await write()
+                # Revoke date admission as soon as the write is acknowledged.
+                # Reconciliation still needs the old ID to confirm removal.
+                registration = self._registrations.get(schedule_id)
+                if registration is not None and registration.timing.run_at is not None:
+                    registration.admission_revoked = True
             try:
                 async with self._registration_lock:
-                    await self._register(schedule_id, not_before=not_before)
+                    await self._register(schedule_id)
             except Exception as exc:
                 raise ScheduleRegistrationError(schedule_id) from exc
             if write is not None:
@@ -398,11 +532,11 @@ class ScheduleRunner:
         task.add_done_callback(retired)
         await asyncio.shield(task)
 
-    async def reconcile(self, schedule_id: str, *, not_before: datetime | None = None) -> None:
+    async def reconcile(self, schedule_id: str) -> None:
         """Rebuild only this identity's trigger from its current definition."""
-        await self._change(schedule_id, not_before=not_before)
+        await self._change(schedule_id)
 
-    async def _register(self, schedule_id: str, *, not_before: datetime | None = None) -> None:
+    async def _register(self, schedule_id: str) -> None:
         # The DB definition is authoritative even when a later edit/deletion
         # overtook this operation. No SQL transaction spans target validation.
         while True:
@@ -411,14 +545,14 @@ class ScheduleRunner:
             if current is None or not current["enabled"]:
                 return
             reason = await self._target_unavailable_reason(current)
-            if reason is None and current.get("run_at"):
+            if reason is None and current.get("run_at") is not None:
                 try:
-                    datetime.fromisoformat(current["run_at"])
-                except ValueError:
+                    stored_run_at(current["run_at"])
+                except (OverflowError, ValueError):
                     reason = "invalid_run_at"
             if reason is None:
                 try:
-                    self._add_job(current, not_before=not_before)
+                    self._add_job(current)
                 except ScheduleParseError as exc:
                     reason = f"invalid_recurrence: {exc}"
                 else:
@@ -437,12 +571,16 @@ class ScheduleRunner:
             return
 
     def _remove_job(self, schedule_id: str) -> None:
+        registration = self._registrations.get(schedule_id)
+        if registration is None:
+            return
         try:
-            self._scheduler.remove_job(schedule_id)
+            self._scheduler.remove_job(registration.job_id)
         except JobLookupError:
             # No job registered — a disabled schedule never had one, and
             # removing twice is how delete-after-disable arrives here.
             pass
+        self._registrations.pop(schedule_id)
 
     async def _target_unavailable_reason(self, row: dict) -> str | None:
         """Observe this fire's target without mutating current registration."""
@@ -523,3 +661,4 @@ class ScheduleRunner:
                     errors.append(error)
         if errors:
             raise ExceptionGroup("scheduler callback cleanup failed", errors)
+        self._registrations.clear()

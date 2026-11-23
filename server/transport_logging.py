@@ -1,6 +1,9 @@
-"""Keep request queries out of Uvicorn's transport logs."""
+"""Protect sensitive request data before transport log formatting."""
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 _REQUEST_TARGET_ARGUMENT = {
     ("uvicorn.access", '%s - "%s %s HTTP/%s" %d'): 2,
@@ -43,3 +46,31 @@ def protect_request_logs() -> None:
     # both see the redacted fields, including in the plain Uvicorn CLI.
     for name in ("uvicorn.access", "uvicorn.error", "uvicorn.asgi"):
         logging.getLogger(name).addFilter(_request_log_filter)
+
+
+_http_client_logs_suppressed = ContextVar("http_client_logs_suppressed", default=False)
+
+
+class _HttpClientLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _http_client_logs_suppressed.get()
+
+
+_http_client_log_filter = _HttpClientLogFilter()
+
+
+@contextmanager
+def suppress_http_client_logs() -> Iterator[None]:
+    # HTTPX logs the full URL. HTTPcore formats peer headers and network
+    # errors before emitting debug records. Filter at each emitting logger
+    # because ancestor logger filters do not run on propagated records.
+    for name in (
+        "httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+        "httpcore.proxy", "httpcore.socks",
+    ):
+        logging.getLogger(name).addFilter(_http_client_log_filter)
+    token = _http_client_logs_suppressed.set(True)
+    try:
+        yield
+    finally:
+        _http_client_logs_suppressed.reset(token)

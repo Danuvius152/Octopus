@@ -43,6 +43,7 @@ from ..app_backends import (
 )
 from ..app_proxy import own_response
 from ..applications import (
+    ApplicationDeletedDuringCreation,
     ApplicationError,
     ApplicationManager,
     is_app_scope_token,
@@ -137,10 +138,14 @@ async def create_application(
     # The owner comes from the agent, so the agent has to be the caller's — the
     # same rule a session follows, and for the same reason.
     assert session_manager.db is not None
-    if await session_manager.db.get_agent(req.agent_id, user_id) is None:
+    if await session_manager.db.get_agent_identity(req.agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     try:
         app_row = await _get_manager().create_application(**req.model_dump())
+    except ApplicationDeletedDuringCreation as e:
+        raise HTTPException(e.status_code, {
+            "code": "application_deleted_during_creation", "application_id": e.app_id, "message": e.message,
+        }) from e
     except ApplicationError as e:
         raise _http_error(e)
     return _read(app_row)

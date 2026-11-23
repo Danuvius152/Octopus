@@ -122,6 +122,8 @@ SessionOwner 等原轮成功、旧 Harness 和读写资源退出，复核原人�
 
 最后一票交接的 `pointers.next_phase="final_acceptance"` 在首输入确认后生效，省略该字段表示接收方是实施票。正常关批要求该批次仍有效且已确认进入最终验收。遇到待处理的人工输入，先判定其范围并处理。独立发出的同批补充通过 `mcp__ask_agent__adopt_ticket_batch_update` 绑定到原批次，Owner 核对原文与当前输入。Octo 记录最终检查及已授权交付的结果后调用 `mcp__ask_agent__finish_ticket_batch`。Owner 持久关闭该批次的自动续办，同一关闭请求可重试。尚未写入主聊天和关批后才到达的结果保留在原任务，重启后仍按关闭状态判定。
 
+排成独立轮的纯进度询问使用 `mcp__ask_agent__adopt_ticket_batch_update`，传入完整原文及 `progress_only: true`，随后在该轮答复。含有要求、限制、命令或附件的消息按实际范围处理。Owner 在确认投递后持久保存分类。同类确认可以重试，分类一经保存即固定。询问保留原聊天记录、执行授权和接纳 steer 的原有条件。原批次重建授权时跳过询问正文，仍核对同轮内所有已确认的 steer。限批可以引用同轮已确认的限批 steer，进度询问继续按自己的执行授权答复。后台结果在当前输入结算后沿原授权回传。重启时，已保存的分类可作为回传证据，答复执行仍按自身的投递和终态判定。Stop 仍可持久关闭原批次。
+
 用户要求验收当票后停止时，Octo 在该人工轮或已确认的 steer 中用原文调用 `mcp__ask_agent__limit_ticket_batch`。在范围判定期间，尚未写入对话的旧复审等当前人工输入结算，已接纳的输入沿原回执等待。Owner 检查当前作用域和精确的人类输入，在同一事务把当前批次限制在当票验收，并登记采纳的输入归属。它撤回待启动的交接，关闭该批次的新交接，保留当票验收所需的自动返回。独立任务结算后旧回传失效，显式 Stop 也能在范围判定期间关闭旧批次。已越过交接边界的回执保留在原任务。Octo 记录当票验收后调用 `mcp__ask_agent__finish_ticket_batch`，关闭该批次的后续回执并报告结果。重启和解除归档按保存的原请求及范围恢复这项限制。
 
 手动 compact 沿用当前批次授权，等待正在执行的工作及其资源结束。已排队的 compact 按原队列优先级先维护旧原生历史，Owner 再复核待启动的交接。交接已占用执行位时，compact 等有新原生历史的确认才能登记。inline steer 会撤回待启动交接，让原轮处理新约束。补充已确认且原授权仍有效时，原轮可用新 ID 重申同一边界。旧 ID 保留 `withdrawn`。重申要求旧交接明确未发送且无首输入或可能发送的证据，其他冲突返回原编号。
@@ -347,9 +349,10 @@ root completion; it does not resume execution or change an existing outcome.
 
 `driver_state` / `wait_driver()` 只观察原输入的驱动收束。Stop 将未启动输入保留
 队列时，该输入仍 pending；未知 steer 即使先返回 unavailable，其观察仍跟随原
-承载 driver。`attempts` 返回有原身份的资源引用；`wait_resources()` 先等原 driver
-不再添加 attempt，再等这些原资源的实际退出。资源仍存活、退出失败和缺少证明
-分别保持 pending、failed、unavailable；等待失败也可传播原异常。
+承载 driver。`attempts` 中每个资源引用都持有原 Run 的退出观察。
+`wait_resources()` 先等原 driver 结束，再等这些原资源实际退出。原退出任务
+尚未完成、完成成功或失败时，观察分别为 pending、proven 和 failed。等待失败
+会传播原异常。
 
 请求驱动结束允许 Claude 宿主供 B 复用，不能据此把 A 捕获的宿主报为已退出。
 观察 A 或取消其等待不调用 stop，也不停止 B；资源引用由原消费者持有至观察责任

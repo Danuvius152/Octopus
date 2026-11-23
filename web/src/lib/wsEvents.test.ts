@@ -112,12 +112,17 @@ it.each([
 });
 
 it("feeds real producers into their original consumers without inventing missing Research cards", () => {
+  const app = decodeWsEvent(producers.application_updated);
+  if (app.kind !== "event" || app.event.type !== "application_updated") throw new Error("Expected an application update fixture");
+  useSessionStore.setState({ applications: [{ ...app.event.application, status: "ready", pinned: false }] });
   handleWsMessage(producers.agent_updated);
   handleWsMessage(producers.application_updated);
   handleWsMessage(producers.assistant_text);
   handleWsMessage(producers.research_failed);
   expect(useSessionStore.getState().agents[0].id).toBe("agent");
-  expect(useSessionStore.getState().applications[0].id).toBe("application");
+  expect(useSessionStore.getState().applications[0]).toMatchObject({
+    id: "application", status: app.event.application.status, pinned: false,
+  });
   expect(useSessionStore.getState().messages.session[0].content).toBe("Complete text");
   expect(useSessionStore.getState().research.session).toBeUndefined();
 });

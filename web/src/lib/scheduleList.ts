@@ -10,6 +10,17 @@ interface Read {
 }
 export interface ScheduleFromTextInput { agent_id: string; text: string; timezone: string; session_id: string }
 
+export function selectNextScheduleRun(schedules: readonly Schedule[]): Date | null {
+  let earliest: Date | null = null;
+  for (const { enabled, next_run_at } of schedules) {
+    if (!enabled || !next_run_at) continue;
+    const next = new Date(next_run_at);
+    if (Number.isNaN(next.getTime())) continue;
+    if (!earliest || next < earliest) earliest = next;
+  }
+  return earliest;
+}
+
 /** Notifications invalidate this domain; they never supply inferred schedule rows. */
 export class ScheduleList {
   private socket: object | null = null;

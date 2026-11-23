@@ -145,13 +145,21 @@ async def test_http_and_ws_share_typed_durable_compact_without_alias_or_recovery
         await client.post(endpoint, json={"client_request_id": "before", "content": "Keep this input"})
         await wait_dispatch_idle(manager, session.id)
         mode[0] = "compact_ack_last"
+        operation = {"client_request_id": "compact-ws", "operation": {"kind": "compact"}}
         async with session_socket(manager, session) as submit:
-            accepted = await submit({"session_id": session.id, "client_request_id": "compact-ws", "operation": {"kind": "compact"}})
+            accepted = await submit({"session_id": session.id, **operation})
             assert accepted["accepted"] and accepted["operation"] == "compact"
         await wait_dispatch_idle(manager, session.id)
         status = (await client.get(endpoint + "/compact-ws")).json()
         assert status["outcome"]["compact"]["effect"] == "applied" and status["input"] == {"kind": "compact"}
         assert "final_answer" not in status["outcome"] or status["outcome"]["final_answer"] is None
+        duplicate = await client.post(endpoint, json=operation)
+        assert duplicate.status_code == 200
+        replay = duplicate.json()
+        assert replay["accepted"] is True and replay["request_id"] == accepted["request_id"] == status["request_id"]
+        assert replay["execution"]["state"] == "done" and replay["outcome"]["compact"]["effect"] == "applied"
+        row = await database.get_client_submission(session.id, "compact-ws")
+        assert row["request_id"] == accepted["request_id"] and row["payload"]["operation"] == {"kind": "compact"}
         conflict = (await client.post(endpoint, json={"client_request_id": "compact-ws", "content": "/compact"})).json()
         assert conflict["code"] == "submission_conflict" and not conflict["accepted"]
         mixed = await client.post(endpoint, json={"client_request_id": "mixed", "operation": {"kind": "compact"}, "attachment_ids": ["unwanted"]})

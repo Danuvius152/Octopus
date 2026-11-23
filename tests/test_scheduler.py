@@ -1,7 +1,7 @@
 """Tests for the agent-scoped ScheduleRunner (agent-refactor.md §5.3/§5.6)."""
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -15,6 +15,8 @@ from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import capture_model_runs
+from tests.schedule_support import dispatch_schedule, schedule_job
+from tests.session_runtime import wait_dispatch_idle
 from tests.submission import accepted_receipt
 
 
@@ -418,7 +420,7 @@ async def test_fire_materializes_scheduled_session_and_auto_archives(
         created_at="2026-01-01T00:00:00+00:00",
     )
 
-    await runner._fire("sch1")
+    await dispatch_schedule(runner, "sch1")
 
     # A fresh session ran the prompt under the agent...
     assert len(runs) == 1
@@ -463,9 +465,9 @@ async def test_fire_creates_a_fresh_session_for_each_durable_schedule_run(setup,
         schedule_id="schX", agent_id=agent["id"], name="repeat", prompt="first",
         interval_seconds=3600, created_at="2026-10-17T00:00:00+00:00",
     )
-    await runner._fire("schX")
+    await dispatch_schedule(runner, "schX")
     await db.update_schedule("schX", prompt="second")
-    await runner._fire("schX")
+    await dispatch_schedule(runner, "schX")
 
     # Two fires → two distinct fresh sessions.
     assert len(created_sessions) == 2
@@ -514,7 +516,7 @@ async def test_fire_appends_into_live_origin_session(setup, monkeypatch):
         origin_session_id=origin.id,
     )
 
-    await runner._fire("sch1")
+    await dispatch_schedule(runner, "sch1")
 
     # Ran in the origin session, not a fresh one.
     assert started["session_id"] == origin.id
@@ -551,7 +553,7 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
         origin_session_id="ghost-session-that-was-deleted",
     )
 
-    await runner._fire("sch2")
+    await dispatch_schedule(runner, "sch2")
 
     # A fresh schedule-origin session ran the prompt and was auto-archived.
     assert len(runs) == 1
@@ -571,10 +573,11 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_add_job_captures_only_schedule_identity(setup):
-    """The current durable row supplies the target and prompt when fired."""
+async def test_periodic_job_uses_the_current_durable_prompt(setup, monkeypatch):
+    """The registration captures timing while SQLite supplies the instructions."""
     mgr, db, runner = setup
     agent = await db.get_system_agent()
+    runs = capture_model_runs(mgr, monkeypatch)
     await save_schedule(db,
         schedule_id="sch3",
         agent_id=agent["id"],
@@ -587,9 +590,25 @@ async def test_add_job_captures_only_schedule_identity(setup):
     row = (await db.load_schedules())[0]
     await runner.reconcile(row["id"])
 
-    job = runner._scheduler.get_job("sch3")
-    assert job is not None
-    assert job.args == (row["id"],)
+    await db.update_schedule(row["id"], prompt="Current instructions")
+    await dispatch_schedule(runner, row["id"])
+    assert len(runs) == 1 and runs[0].prompt.endswith("Current instructions")
+
+
+async def test_interval_retains_its_cadence_when_host_timezone_changes(setup, monkeypatch):
+    manager, db, runner = setup
+    agent = await db.get_system_agent()
+    runs = capture_model_runs(manager, monkeypatch)
+    monkeypatch.setattr(scheduler, "local_timezone", lambda: "UTC")
+    await save_schedule(db, schedule_id="original-zone", agent_id=agent["id"], name="Interval",
+                        prompt="Keep the original cadence", interval_seconds=3600, created_at="2020-01-01")
+    await runner.initialize(paused=True)
+    old_job = schedule_job(runner, "original-zone")
+    next_fire = runner.next_run_at("original-zone")
+    monkeypatch.setattr(scheduler, "local_timezone", lambda: "Asia/Taipei")
+    await dispatch_schedule(runner, "original-zone")
+    assert len(runs) == 1 and runs[0].prompt.endswith("Keep the original cadence")
+    assert schedule_job(runner, "original-zone") is old_job and runner.next_run_at("original-zone") == next_fire
 
 
 @pytest.fixture
@@ -604,6 +623,43 @@ def schedule_clock(monkeypatch):
     monkeypatch.setattr(scheduler, "datetime", Clock)
     monkeypatch.setattr(apscheduler_base, "datetime", Clock)
     return Clock
+
+
+@pytest.mark.parametrize("live", [False, True])
+async def test_periodic_last_run_time_is_the_callback_entry_before_database_read(setup, schedule_clock, monkeypatch, live):
+    manager, db, runner = setup
+    entered_at = datetime(2035, 1, 1, 1, tzinfo=UTC)
+    schedule_clock.current = entered_at
+    agent = await db.get_system_agent()
+    origin = await manager.create_session(agent["id"]) if live else None
+    runs = capture_model_runs(manager, monkeypatch)
+    await save_schedule(db, schedule_id="entry-time", agent_id=agent["id"], name="Periodic reminder", prompt="Check status",
+                        interval_seconds=3600, created_at=entered_at.isoformat(), origin_session_id=origin.id if origin else None)
+    await runner.initialize(paused=True)
+    reading, release = asyncio.Event(), asyncio.Event()
+    read = db.get_schedule_definition
+
+    async def hold_first_read(schedule_id):
+        if schedule_id == "entry-time" and not reading.is_set():
+            reading.set()
+            await release.wait()
+        return await read(schedule_id)
+
+    monkeypatch.setattr(db, "get_schedule_definition", hold_first_read)
+    firing = asyncio.create_task(dispatch_schedule(runner, "entry-time"))
+    try:
+        await asyncio.wait_for(reading.wait(), 3)
+        schedule_clock.current += timedelta(seconds=30)
+        release.set()
+        await asyncio.wait_for(firing, 3)
+        current = await read("entry-time")
+        assert current["last_run_at"] == "2035-01-01T01:00:00+00:00"
+        if origin is not None:
+            await wait_dispatch_idle(manager, origin.id)
+        assert len(runs) == 1 and current["last_run_session_id"] == runs[0].session_id
+    finally:
+        release.set()
+        await asyncio.gather(firing, return_exceptions=True)
 
 
 @pytest.mark.parametrize(
@@ -728,7 +784,7 @@ async def test_initialize_retains_and_registers_missed_run_at_schedules(setup):
 
     remaining = await db.load_schedules()
     assert {r["id"] for r in remaining} == {"missed1", "recurring1"}
-    assert runner._scheduler.get_job("missed1") is not None
+    assert runner.next_run_at("missed1") is not None
     assert runner._scheduler.get_job("recurring1") is not None
 
 
@@ -885,11 +941,11 @@ async def test_run_at_schedule_registers_date_trigger(setup):
     row = (await db.load_schedules())[0]
     await runner.reconcile(row["id"])
 
-    job = runner._scheduler.get_job("once1")
+    job = schedule_job(runner, "once1")
     assert job is not None
     assert isinstance(job.trigger, DateTrigger)
-    # The durable run_at still controls once-only cleanup when this ID fires.
-    assert job.args == ("once1",)
+    assert job.id != "once1"
+    assert job.trigger.run_date == datetime.fromisoformat(run_at)
 
 
 @pytest.mark.asyncio
@@ -906,13 +962,13 @@ async def test_run_at_schedule_deleted_after_fire(setup, monkeypatch):
         name="one-time",
         prompt="do it once",
         created_at="2026-01-01T00:00:00+00:00",
-        run_at="2030-01-15T09:00:00+00:00",
+        run_at="2020-01-15T09:00:00+00:00",
         recurrence_label="Once on Jan 15 at 9:00 AM",
     )
     assert len(await db.load_schedules()) == 1
 
     # Successful durable admission consumes the one-shot.
-    await runner._fire("once2")
+    await dispatch_schedule(runner, "once2")
 
     # Row gone from DB.
     assert await db.load_schedules() == []
@@ -934,19 +990,71 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
         name="one-time",
         prompt="remind me",
         created_at="2026-01-01T00:00:00+00:00",
-        run_at="2030-01-15T09:00:00+00:00",
+        run_at="2020-01-15T09:00:00+00:00",
         recurrence_label="Once on Jan 15 at 9:00 AM",
         origin_session_id=origin.id,
     )
     assert len(await db.load_schedules()) == 1
 
-    await runner._fire("once3")
+    await dispatch_schedule(runner, "once3")
 
-    from tests.session_runtime import wait_dispatch_idle
     await wait_dispatch_idle(mgr, origin.id)
     assert [run.session_id for run in runs] == [origin.id]
     # DB row auto-deleted after the one-time fire.
     assert await db.load_schedules() == []
+
+
+@pytest.mark.parametrize("backend", ["claude-code", "codex"])
+async def test_rewind_keeps_the_relationship_pending_between_fork_reservation_and_archive(setup, monkeypatch, backend):
+    manager, db, runner = setup
+    agent = await db.get_system_agent()
+    old = await manager.create_session(agent["id"], backend=backend)
+    await db.append_message(session_id=old.id, seq=0, role="user", type="text", content="Rewind here")
+    run_at = "2020-01-01T01:00:00Z"
+    await save_schedule(db, schedule_id="rewind-rebind", agent_id=agent["id"], name="Rewind reminder",
+                        prompt="Run once", created_at="2019-01-01T00:00:00Z", run_at=run_at,
+                        origin_session_id=old.id)
+    await runner.initialize(paused=True)
+    runs = capture_model_runs(manager, monkeypatch)
+    handoff, release_archive = asyncio.Event(), asyncio.Event()
+    fire_captured = asyncio.Event()
+    archive = manager._archive_original
+    start = manager.start_one_shot
+    delivery_id = f"schedule:rewind-rebind:{run_at}"
+
+    async def observe_fire(*args, **kwargs):
+        fire_captured.set()
+        return await start(*args, **kwargs)
+
+    async def hold_rewind_archive(*args, **kwargs):
+        handoff.set()
+        await release_archive.wait()
+        return await archive(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_archive_original", hold_rewind_archive)
+    monkeypatch.setattr(manager, "start_one_shot", observe_fire)
+    rewind = asyncio.create_task(manager.fork_session(old.id, 0))
+    firing = None
+    try:
+        await asyncio.wait_for(handoff.wait(), 3)
+        assert manager.get_session(old.id) is old
+        firing = asyncio.create_task(dispatch_schedule(runner, "rewind-rebind"))
+        await asyncio.wait_for(fire_captured.wait(), 3)
+        assert not (await asyncio.wait({firing}, timeout=.1))[0]
+        assert await manager.source_receipt("schedule", delivery_id) is None
+        assert (await db.get_schedule_definition("rewind-rebind"))["origin_session_id"] == old.id
+
+        release_archive.set()
+        successor = await asyncio.wait_for(rewind, 3)
+        await asyncio.wait_for(firing, 3)
+        target, receipt = await manager.source_receipt("schedule", delivery_id)
+        assert target == successor.id and receipt.accepted
+        assert (await asyncio.wait_for(receipt.wait(), 3)).outcome.status == "success"
+        assert [run.session_id for run in runs] == [successor.id]
+        assert manager.get_session(old.id) is None and schedule_job(runner, "rewind-rebind") is None
+    finally:
+        release_archive.set()
+        await asyncio.gather(rewind, *([firing] if firing else []), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1097,7 +1205,7 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
         created_at="2026-01-01T00:00:00+00:00",
     )
 
-    firing = asyncio.create_task(runner._fire("busy1"))
+    firing = asyncio.create_task(dispatch_schedule(runner, "busy1"))
     resumed = None
     try:
         async with asyncio.timeout(2):
@@ -1106,12 +1214,12 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
         first_sid = (await db.load_schedules())[0]["last_run_session_id"]
         assert first_sid == runs[0].session_id
         assert mgr.session_is_executing(mgr.get_session(first_sid))
-        await runner._fire("busy1")
+        await dispatch_schedule(runner, "busy1")
         assert len(runs) == 1, "a second run started while the first was going"
 
         runs[0].release.set()
         await asyncio.wait_for(firing, 2)
-        resumed = asyncio.create_task(runner._fire("busy1"))
+        resumed = asyncio.create_task(dispatch_schedule(runner, "busy1"))
         async with asyncio.timeout(2):
             while len(runs) != 2:
                 await asyncio.sleep(0)
@@ -1142,7 +1250,7 @@ async def test_a_gone_or_idle_previous_session_never_blocks(setup, monkeypatch):
     )
     await db.update_schedule("gone1", last_run_session_id="deleted-long-ago")
 
-    await runner._fire("gone1")
+    await dispatch_schedule(runner, "gone1")
     assert len(runs) == 1
 
 
@@ -1172,16 +1280,16 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
         async with asyncio.timeout(2):
             while not runs:
                 await asyncio.sleep(0)
-        await runner._fire("chat1")
+        await dispatch_schedule(runner, "chat1")
         first = mgr.dispatch_snapshot(origin.id)["items"]
         assert len(first) == 1 and first[0]["source"] == "schedule"
         assert first[0]["summary"].endswith("summarize")
-        await runner._fire("chat1")
+        await dispatch_schedule(runner, "chat1")
         assert mgr.dispatch_snapshot(origin.id)["items"] == first, "a second fire queued behind the first"
         assert len(runs) == 1
 
         assert await asyncio.wait_for(mgr.cancel_request(origin.id, first[0]["request_id"]), 1)
-        await runner._fire("chat1")
+        await dispatch_schedule(runner, "chat1")
         second = mgr.dispatch_snapshot(origin.id)["items"]
         assert len(second) == 1 and second[0]["source"] == "schedule"
         assert second[0]["request_id"] != first[0]["request_id"]
@@ -1211,7 +1319,7 @@ async def test_fresh_fire_is_admitted_and_owned_by_dispatch(setup, monkeypatch):
         prompt="scheduled work", interval_seconds=3600,
         created_at="2026-10-17T00:00:00+00:00",
     )
-    firing = asyncio.create_task(runner._fire("owned-schedule"))
+    firing = asyncio.create_task(dispatch_schedule(runner, "owned-schedule"))
     try:
         await asyncio.wait_for(entered.wait(), 2)
         original = [row for row in await db.load_messages(captured["session_id"]) if row["role"] == "user"]

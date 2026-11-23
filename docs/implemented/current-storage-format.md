@@ -217,8 +217,13 @@ A [ticket batch](input-reliability.md#ticket-handoffs) records its state on the
 original human input and marks its adopted automatic returns in their input
 payloads. A separate human input can record `ticket_batch_candidate_for`.
 Adopting that input as a same-batch supplement stores the original request ID
-in `ticket_batch_update_for`. The same transaction that limits the batch records
-the confirmed human input ID
+in `ticket_batch_update_for`. A pure progress question stores the same binding
+with `ticket_batch_progress_only: true` after its delivery is confirmed. Without
+that flag, a `ticket_batch_update_for` record represents a supplement. The flag
+excludes the question from the batch's authorization text and from acceptance
+limit evidence. Confirmed steer messages keep their own evidence. These fields
+stay in the existing `client_submissions` backup scope. The same transaction
+that limits the batch records the confirmed human input ID
 on the batch and, when adopting the separate input, sets `finish_ticket_batch_for`
 on that input. A handoff stores its stable ID, parent request, previous native
 history and confirmed new native ID in its input payload. `handoff_phase`
@@ -444,6 +449,15 @@ source and candidate declarations. The candidate's read-only verifier checks
 structure, integrity, foreign keys and typed retained facts; a matching marker
 alone is insufficient.
 
+Candidate publication and complete restore validate every retained Agent using
+the persisted configuration rules shared by Agent writes and reads. The
+verifier checks raw session `backend` and `origin` values before any read
+projection can supply defaults. Registered backend kinds are valid regardless
+of CLI discovery. Configuration errors identify the record and field. The
+result applies to the inspected database snapshot, including its committed WAL.
+Ordinary startup retains the format and account baseline checks. It can open
+current-format data that has yet to pass this offline inspection.
+
 An authorized finite conversion commits its intended values, constraints and
 marker together and compares all other retained facts. Unknown COMMIT/ROLLBACK
 keeps business closed. Reentry inspects actual committed facts under the same
@@ -495,8 +509,11 @@ identities without creating a second execution authority.
 的相关规则，明确排除项并验证往返；不预造迁移插件框架。
 
 源端只导出稳定资料：未决写入交原 owner 收束；稳定副本完成后恢复源端，再压缩。
-导入先核验，再私有暂存、重绑明确的系统路径和本机身份，持久化后启用。不以单库
-一致性冒充跨资源快照，不扫描改写任意正文/第三方代码，不把源执行过程搬到目标。
+导出保留既有全库结构、事实和关系检查，Agent 配置字段按本次选中的账户行核验。
+导入先核验归档，再私有暂存并重绑明确的系统路径和本机身份。发布前用同一套账户
+归档筛选规则核对整个暂存库，拒绝额外账户、越界关联和排除表中的行，对即将发布的
+全部 Agent 检查持久配置。归档主库是独立 SQLite 文件，安装锁内复查目标无恢复旁文件。
+每次核验只证明实际检查过的资料。
 
 ## Verification
 
@@ -504,6 +521,7 @@ identities without creating a second execution authority.
 | --- | --- |
 | Exact current marker, empty initialization and incompatible-format refusal | `server/db/schema.py`, `server/wiki/schema.py`, `tests/test_database_format.py` |
 | Full retained catalog, constraints and typed facts | `server/storage_verification.py`, `server/wiki/storage_verification.py` |
+| Raw session bindings, Agent field checks and account transfer scope | `tests/test_storage_publication.py`, `tests/test_application_portability.py` |
 | Current messages, native evidence and committed outcome references | `tests/test_native_input_evidence.py`, `tests/test_session_results.py` |
 | Archived projections and range reads | `tests/test_archive_reads.py`, `server/db/sessions.py` |
 | Collection, exclusions and restoration | `server/portability.py`, `server/db/portability.py`, `server/wiki/portability.py` |

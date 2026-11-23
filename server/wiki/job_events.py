@@ -203,7 +203,8 @@ def initialize(db):
 
 def require(db):
     protocols.require(db, "wiki_job_events", 4)
-    maintenance_inputs.require_jobs(db)
+    if ("id",) not in maintenance_inputs.require_jobs(db):
+        raise maintenance_inputs.unavailable("job ledger constraints are incompatible")
     expected = TABLES | INDEXES | TRIGGERS | job_triggers()
     actual = dict(db.execute("SELECT name,sql FROM sqlite_master"))
     if any(canonical(actual.get(name)) != canonical(sql) for name, sql in expected.items()):

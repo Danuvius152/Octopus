@@ -6,18 +6,30 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from pydantic import ValidationError
+
 from ..attachments import AttachmentUnavailable, validate_message_attachments
+from ..service_health import ServiceUnavailable
 from ..session_operations import adopted_ticket_batch
-from .runtime_types import QuotaExceeded
+from ..submission_models import (
+    ClientSubmissionStatus,
+    CompactInProgress,
+    InputAdmissionNotReady,
+)
+from .runtime_types import PreviousWriterUnconfirmed, QuotaExceeded
 
 if TYPE_CHECKING:
     from ..database import Database
     from ..knowledge import AdmittedRequest, KnowledgeContext
+    from ..submission_models import ClientSubmissionRequest
     from . import SessionManager
     from .base import PendingInput, SessionRequest
+    from .submission import SubmissionReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +68,7 @@ class ConfirmedExecution:
     primary: tuple[int, AdmittedRequest] | None
     steers: list[tuple[int, AdmittedRequest]]
     adopted_for: str | None
+    progress_only: bool
 
 
 def confirmed_human_input(session_id: str, user_id: str | None, row: dict[str, Any],
@@ -149,7 +162,8 @@ def confirmed_execution_from_inputs(session_id: str, snapshot: dict[str, Any], *
                 return None
             context = merged
             steers.append(member)
-        return ConfirmedExecution(base, context, primary, steers, adopted_ticket_batch(original["payload"]))
+        return ConfirmedExecution(base, context, primary, steers, adopted_ticket_batch(original["payload"]),
+                                  original["payload"].get("ticket_batch_progress_only", False))
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -157,8 +171,11 @@ def confirmed_execution_from_inputs(session_id: str, snapshot: dict[str, Any], *
 def _files(session_id: str, identifiers: list[str], *, user_id: str) -> list[dict[str, Any]]:
     result = []
     for record in validate_message_attachments(session_id, identifiers, user_id=user_id):
-        with record.path.open("rb") as stream:
-            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        try:
+            with record.path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        except OSError as error:
+            raise AttachmentUnavailable() from error
         result.append({"id": record.id, "filename": record.filename, "size": record.size,
                        "mime_type": record.mime_type, "sha256": digest})
     return result
@@ -258,33 +275,72 @@ async def submission_status(manager: SessionManager, session_id: str, client_id:
     return status_from_row(session_id, row) if row is not None else None
 
 
-async def submit_client_compact(manager: SessionManager, session_id: str, client_id: str) -> dict[str, Any]:
-    from ..submission_models import CompactInProgress
+async def submit_client_operation(manager: SessionManager, session_id: str,
+                                  request: ClientSubmissionRequest) -> dict[str, Any]:
+    from ..wiki.tasks import explicit_mode
 
+    operation = request.session_operation()
+    if operation.kind == "compact":
+        return await submit_client_compact(manager, session_id, request.client_request_id)
+    return await submit_client_message(
+        manager, session_id, operation.content, operation.attachment_ids, request.client_request_id,
+        wiki_mode=explicit_mode(operation.content, operation.wiki_mode),
+        recovery_of_client_id=request.recovery_of_client_id,
+    )
+
+
+async def _submit_client_input(manager: SessionManager, session_id: str, client_id: str, digest: str,
+                               admit: Callable[[], Awaitable[SubmissionReceipt]], *, closed_message: str) -> dict[str, Any]:
     base = {"session_id": session_id, "client_request_id": client_id}
     try:
-        existing = await manager.input_database().get_client_submission(session_id, client_id)
-        if existing is not None:
-            if existing["payload_sha256"] != input_digest({"kind": "compact"}):
-                return {**base, "accepted": False, "code": "submission_conflict",
-                        "message": "This submission identity already belongs to different input."}
-            return status_from_row(session_id, existing)
-        receipt = await manager.start_compact(session_id, client_request_id=client_id)
-        if not receipt.accepted:
-            return {**base, "accepted": False, "disposition": receipt.disposition,
-                    "message": "This conversation is closed to new operations."}
-        result = await submission_status(manager, session_id, client_id)
-        assert result is not None
-        return result
-    except CompactInProgress as error:
-        return {**base, "accepted": False, "code": error.code, "message": str(error),
-                "canonical_request_id": error.request_id, "canonical_client_request_id": error.client_id}
-    except (QuotaExceeded, ValueError) as error:
-        return {**base, "accepted": False, "code": getattr(error, "code", "admission_refused"), "message": str(error)}
-    except Exception:
-        logger.exception("Compaction admission is unconfirmed session=%s client=%s", session_id, client_id)
+        database = manager.input_database()
+    except InputAdmissionNotReady as error:
+        return {**base, "accepted": False, "code": error.code, "message": str(error)}
+
+    try:
+        row = await database.get_client_submission(session_id, client_id)
+        if row is None:
+            try:
+                receipt = await admit()
+            except (QuotaExceeded, ValueError) as error:
+                # The Owner can encounter an original receipt that committed
+                # after our first read. Establish its state before refusing.
+                database.health.require_healthy()
+                row = await database.get_client_submission(session_id, client_id)
+                if row is None:
+                    refusal = {**base, "accepted": False, "code": getattr(error, "code", "admission_refused"),
+                               "message": str(error)}
+                    if isinstance(error, CompactInProgress):
+                        refusal.update(canonical_request_id=error.request_id, canonical_client_request_id=error.client_id)
+                    return refusal
+            else:
+                if not receipt.accepted:
+                    return {**base, "accepted": False, "disposition": receipt.disposition, "message": closed_message}
+                row = await database.get_client_submission(session_id, client_id)
+                assert row is not None
+        if row["payload_sha256"] != digest:
+            return {**base, "accepted": False, "code": "submission_conflict",
+                    "message": "This submission identity already belongs to different input."}
+        status = ClientSubmissionStatus.model_validate(status_from_row(session_id, row))
+        return status.model_dump(mode="json", exclude_unset=True)
+    except ServiceUnavailable:
+        raise
+    except Exception as error:
+        # An ending Owner may wrap the original failure when waking its waiter.
+        # Check the captured database's health in memory before classifying it.
+        database.health.require_healthy()
+        logger.error("Client submission admission is unconfirmed session=%s client=%s error=%s",
+                     session_id, client_id, type(error).__name__, exc_info=not isinstance(error, ValidationError))
         return {**base, "accepted": False, "state": "unknown", "code": "admission_unknown",
-                "message": "Compaction admission is unconfirmed. Confirm this original submission; it will not be resent automatically."}
+                "message": "Input saving is unconfirmed. Keep your draft and confirm this submission before sending new work."}
+
+
+async def submit_client_compact(manager: SessionManager, session_id: str, client_id: str) -> dict[str, Any]:
+    return await _submit_client_input(
+        manager, session_id, client_id, input_digest({"kind": "compact"}),
+        partial(manager.start_compact, session_id, client_request_id=client_id),
+        closed_message="This conversation is closed to new operations.",
+    )
 
 
 async def submit_client_message(manager: SessionManager, session_id: str, content: str, attachment_ids: list[str],
@@ -293,33 +349,13 @@ async def submit_client_message(manager: SessionManager, session_id: str, conten
     payload: dict[str, Any] = {"content": content, "attachment_ids": attachment_ids, "wiki_mode": wiki_mode}
     if recovery_of_client_id:
         payload["recovery_of_client_id"] = recovery_of_client_id
-    digest = input_digest(payload)
-    base = {"session_id": session_id, "client_request_id": client_id}
-    try:
-        database = manager.input_database()
-        existing = await database.get_client_submission(session_id, client_id)
-        if existing is not None:
-            if existing["payload_sha256"] != digest:
-                return {**base, "accepted": False, "code": "submission_conflict", "message": "This submission identity already belongs to different input."}
-            return status_from_row(session_id, existing)
-        receipt = await manager.start_message(
-            session_id, content, attachment_ids=attachment_ids, steerable=True,
+    return await _submit_client_input(
+        manager, session_id, client_id, input_digest(payload),
+        partial(manager.start_message, session_id, content, attachment_ids=attachment_ids, steerable=True,
             client_request_id=client_id, recovery_of_client_id=recovery_of_client_id,
-            wiki_mode=wiki_mode,
-        )
-        if not receipt.accepted:
-            return {**base, "accepted": False, "disposition": receipt.disposition,
-                    "message": "This conversation is closed to new messages. Your message was not accepted."}
-        result = await submission_status(manager, session_id, client_id)
-        assert result is not None
-        return result
-    except (AttachmentUnavailable, QuotaExceeded, ValueError) as error:
-        return {**base, "accepted": False, "message": str(error),
-                "code": getattr(error, "code", "admission_refused")}
-    except Exception:
-        logger.exception("Client submission admission is unconfirmed session=%s client=%s", session_id, client_id)
-        return {**base, "accepted": False, "state": "unknown", "code": "admission_unknown",
-                "message": "Input saving is unconfirmed. Keep your draft and confirm this submission before sending new work."}
+            wiki_mode=wiki_mode),
+        closed_message="This conversation is closed to new messages. Your message was not accepted.",
+    )
 
 
 async def claim_input(manager: SessionManager, session_id: str, request_id: str, *, owner: str | None = None) -> bool:
@@ -348,7 +384,9 @@ async def require_retired_writers(manager: SessionManager, session_id: str) -> N
         if row["delivery_state"] != "unknown" and row["terminal"] is not None:
             continue
         if not process_group_exited(row["process_group"], row["execution_boot"]):
-            raise ValueError("Previous execution has an unknown result and its process exit is unconfirmed. "
-                             "Hiding its saved input does not retire the writer. Wait for the original execution "
-                             "to stop, or restart through the managed service. Standalone execution requires "
-                             "independent confirmation that the previous writer has exited.")
+            raise PreviousWriterUnconfirmed(
+                "Previous execution has an unknown result and its process exit is unconfirmed. "
+                "Hiding its saved input does not retire the writer. Wait for the original execution "
+                "to stop, or restart through the managed service. Standalone execution requires "
+                "independent confirmation that the previous writer has exited."
+            )

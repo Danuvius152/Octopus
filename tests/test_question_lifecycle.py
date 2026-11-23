@@ -21,7 +21,7 @@ from server.sessions import questions as question_module
 from server.users import UserManager
 from server.workspace import paths_for
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 QUESTIONS = [{"question": "Choose", "options": [{"label": "A"}, {"label": "B"}]}]
 
@@ -285,6 +285,7 @@ class WaitingRun(FakeRunBase):
     """External model run that calls the host question API and waits."""
 
     def __init__(self, manager, session, *, count=1, after_answer_delay=0):
+        super().__init__()
         self.manager = manager
         self.session = session
         self.count = count
@@ -292,15 +293,14 @@ class WaitingRun(FakeRunBase):
         self.question_ids = []
         self.created = asyncio.Event()
         self.stopped = asyncio.Event()
-        self.stderr_text = ""
 
-    async def start(self, *args, **kwargs):
+    async def _start(self, *args, **kwargs):
         pass
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stopped.set()
 
-    async def stream(self):
+    async def _stream(self):
         yield HarnessEvent(type="text", content="I need your decision.")
         for _ in range(self.count):
             self.question_ids.append(await self.manager.create_pending_question(self.session.id, QUESTIONS))
@@ -332,7 +332,7 @@ async def start_waiting_turn(manager, session, run, monkeypatch):
             final.set_result(event)
 
     manager.on_broadcast("final-observer", collect)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: run)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: run))
     await manager.start_message(session.id, "Please ask before choosing")
     await asyncio.wait_for(run.created.wait(), timeout=1)
     return final
@@ -437,17 +437,17 @@ async def test_overall_deadline_still_stops_a_turn_waiting_for_human(question_ho
 
 class SilentRun(FakeRunBase):
     def __init__(self):
+        super().__init__()
         self.created = asyncio.Event()
         self.stopped = asyncio.Event()
-        self.stderr_text = ""
 
-    async def start(self, *args, **kwargs):
+    async def _start(self, *args, **kwargs):
         pass
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stopped.set()
 
-    async def stream(self):
+    async def _stream(self):
         yield HarnessEvent(type="text", content="Working.")
         self.created.set()
         await self.stopped.wait()
@@ -597,7 +597,7 @@ async def test_host_auto_answer_resolves_form_and_poll_once(question_host, monke
 
 
 class EarlyFinishRun(SilentRun):
-    async def stream(self):
+    async def _stream(self):
         yield HarnessEvent(
             type="question_request", tool_use_id="native-question",
             tool_input={"questions": QUESTIONS},

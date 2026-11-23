@@ -14,8 +14,9 @@ from server.session_manager import SessionManager
 from server.users import UserManager
 from server.workspace import paths_for
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.harness_profiles import process_profile
+from tests.schedule_support import dispatch_schedule
 
 
 @pytest.fixture
@@ -106,18 +107,19 @@ class _QueuedRun(FakeRunBase):
     """A real Harness boundary whose stream is held until released/stopped."""
 
     def __init__(self, starts, *, release=None, stopped=None):
+        super().__init__()
         self.starts = starts
         self.release = release or asyncio.Event()
         self.stops = stopped if stopped is not None else []
         self.started = asyncio.Event()
         self.prompt = None
 
-    async def start(self, prompt, working_dir, resume_id=None, credential=None):
+    async def _start(self, prompt, working_dir, resume_id=None, credential=None):
         self.prompt = prompt
         self.starts.append(prompt)
         self.started.set()
 
-    async def stream(self):
+    async def _stream(self):
         from server.harness import HarnessEvent
 
         await self.release.wait()
@@ -126,7 +128,7 @@ class _QueuedRun(FakeRunBase):
     async def interrupt(self):
         self.release.set()
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stops.append(self.prompt)
         self.release.set()
 
@@ -263,7 +265,7 @@ async def test_start_message_queues_when_busy(manager, monkeypatch):
     first = _QueuedRun(consumed, release=blocker)
     second = _QueuedRun(consumed)
     second.release.set()
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
 
     events: list[dict] = []
     queued_published = asyncio.Event()
@@ -308,7 +310,7 @@ async def test_interrupt_cancels_current_and_pauses_queue_until_resume(manager, 
 
     first = _QueuedRun(started, stopped=cancelled)
     second = _QueuedRun(started, stopped=cancelled)
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
 
     original = await manager.start_message(session.id, "first")
     await asyncio.wait_for(first.started.wait(), 2)
@@ -351,7 +353,7 @@ async def test_interrupt_twice_in_a_row_each_works(manager, monkeypatch):
 
     first = _QueuedRun(started, stopped=cancelled)
     second = _QueuedRun(started, stopped=cancelled)
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
 
     original = await manager.start_message(session.id, "first")
     await asyncio.wait_for(first.started.wait(), 2)
@@ -391,23 +393,23 @@ async def test_interrupt_does_not_wedge_on_slow_backend_stop(manager, monkeypatc
     class HangingBackend(FakeRunBase):
         name = "hanging"
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             started.set()
 
-        def stream(self):
+        def _stream(self):
             async def _gen():
                 await asyncio.sleep(60)
                 yield  # never reached
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             await release_stop.wait()  # Caller remains prompt while teardown is held.
 
         async def interrupt(self):
             await release_stop.wait()
 
     started = asyncio.Event()
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: HangingBackend())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: HangingBackend()))
     receipt = await manager.start_message(session.id, "x")
     await asyncio.wait_for(started.wait(), 2)
 
@@ -969,23 +971,23 @@ async def test_run_backend_translates_events_end_to_end(manager):
     class ScriptedBackend(FakeRunBase):
         name = "scripted"
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             pass
 
-        def stream(self):
+        def _stream(self):
             async def _gen():
                 for e in events_to_emit:
                     yield e
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
     # Only the external Harness boundary is scripted.
     def fake_factory(s, agent=None, connectors=None):
         return ScriptedBackend()
 
-    manager._make_run = fake_factory  # type: ignore[method-assign]
+    manager._make_run = model_run_factory(fake_factory)  # type: ignore[method-assign]
 
     ws_msgs = await _request_events(manager, session, "go")
     assert ws_msgs[0]["type"] == "attempt_started"
@@ -1028,10 +1030,11 @@ async def test_run_backend_auto_respawns_on_premature_exit_after_tool(manager):
         name = "flaky"
 
         def __init__(self, events: list[HarnessEvent]) -> None:
+            super().__init__()
             self._events = events
             self.started_with: dict[str, Any] | None = None
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             self.started_with = {
                 "prompt": prompt,
                 "working_dir": working_dir,
@@ -1039,13 +1042,13 @@ async def test_run_backend_auto_respawns_on_premature_exit_after_tool(manager):
             }
             invocations.append(self.started_with)
 
-        def stream(self):
+        def _stream(self):
             async def _gen():
                 for e in self._events:
                     yield e
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
     backends_iter = iter([
@@ -1074,7 +1077,7 @@ async def test_run_backend_auto_respawns_on_premature_exit_after_tool(manager):
         ]),
     ])
 
-    manager._make_run = lambda s, agent=None, connectors=None: next(backends_iter)  # type: ignore[method-assign,assignment]
+    manager._make_run = model_run_factory(lambda s, agent=None, connectors=None: next(backends_iter))  # type: ignore[method-assign,assignment]
 
     ws_msgs: list[dict[str, Any]] = await _request_events(manager, session, "go")
     attempts = [m for m in ws_msgs if m["type"] == "attempt_started"]
@@ -1129,19 +1132,19 @@ async def test_run_backend_bounds_recovery_to_single_retry(manager):
     class AlwaysFlakyBackend(FakeRunBase):
         name = "always-flaky"
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             invocations.append({"prompt": prompt, "resume_id": resume_id})
 
-        def stream(self):
+        def _stream(self):
             async def _gen():
                 for e in make_flaky_events():
                     yield e
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
-    manager._make_run = lambda s, agent=None, connectors=None: AlwaysFlakyBackend()  # type: ignore[method-assign,assignment]
+    manager._make_run = model_run_factory(lambda s, agent=None, connectors=None: AlwaysFlakyBackend())  # type: ignore[method-assign,assignment]
 
     ws_msgs: list[dict[str, Any]] = await _request_events(manager, session, "go")
 
@@ -1173,10 +1176,10 @@ async def test_run_backend_does_not_respawn_on_clean_exit(manager):
     class CleanBackend(FakeRunBase):
         name = "clean"
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             invocations.append(prompt)
 
-        def stream(self):
+        def _stream(self):
             async def _gen():
                 yield HarnessEvent(type="session_started", session_id="sid-clean")
                 yield HarnessEvent(
@@ -1194,10 +1197,10 @@ async def test_run_backend_does_not_respawn_on_clean_exit(manager):
                 )
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
-    manager._make_run = lambda s, agent=None, connectors=None: CleanBackend()  # type: ignore[method-assign,assignment]
+    manager._make_run = model_run_factory(lambda s, agent=None, connectors=None: CleanBackend())  # type: ignore[method-assign,assignment]
 
     _ = await _request_events(manager, session, "go")
     assert invocations == ["go"]  # exactly one — no retry
@@ -1216,19 +1219,19 @@ async def test_run_backend_does_not_respawn_when_no_tool_use(manager):
     class CrashEarlyBackend(FakeRunBase):
         name = "crash-early"
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             invocations.append(prompt)
 
-        def stream(self):
+        def _stream(self):
             async def _gen():
                 yield HarnessEvent(type="session_started", session_id="sid-early")
                 # No tool_use. No result. CLI just died.
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
-    manager._make_run = lambda s, agent=None, connectors=None: CrashEarlyBackend()  # type: ignore[method-assign,assignment]
+    manager._make_run = model_run_factory(lambda s, agent=None, connectors=None: CrashEarlyBackend())  # type: ignore[method-assign,assignment]
 
     _ = await _request_events(manager, session, "go")
     assert invocations == ["go"]  # no retry — not the bug we recover from
@@ -1239,7 +1242,7 @@ async def test_delete_session_clears_queue(manager, monkeypatch):
     session = await _new(manager,"Del")
     starts = []
     backend = _QueuedRun(starts)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
 
     active = await manager.start_message(session.id, "first")
     await asyncio.wait_for(backend.started.wait(), 2)
@@ -1379,20 +1382,20 @@ async def test_archive_repoints_origin_session_schedules(manager, monkeypatch, c
     started_sessions = []
 
     class Run(_QueuedRun):
-        async def start(self, *args, **kwargs):
-            await super().start(*args, **kwargs)
+        async def _start(self, *args, **kwargs):
+            await super()._start(*args, **kwargs)
             started.set()
 
-        async def stop(self):
+        async def _stop_process(self):
             cleaning.set()
             await release.wait()
-            await super().stop()
+            await super()._stop_process()
 
     def make_run(session, *args, **kwargs):
         started_sessions.append(session.id)
         return Run([]) if session.id == old.id else _QueuedRun([], release=release)
 
-    monkeypatch.setattr(manager, "_make_run", make_run)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(make_run))
     original = await manager.start_message(old.id, "held")
     await asyncio.wait_for(started.wait(), 3)
     archiving = asyncio.create_task(manager.archive_session(old.id))
@@ -1413,7 +1416,7 @@ async def test_archive_repoints_origin_session_schedules(manager, monkeypatch, c
             await runner.initialize(paused=True)
         else:
             assert runner.next_run_at("s-origin") == original_next
-        await runner._fire("s-origin")
+        await dispatch_schedule(runner, "s-origin")
         await manager.await_session_execution(new.id)
         assert new.id in started_sessions
         messages = await manager.db.load_messages(new.id)
@@ -1722,22 +1725,23 @@ class _FakeBackend(FakeRunBase):
     without a real CLI subprocess."""
 
     def __init__(self, events, stderr_text="", reusable=False):
+        super().__init__()
         self._events = list(events)
-        self.stderr_text = stderr_text
+        self._stderr_tail = stderr_text
         # Opt-in: whether this stand-in claims its process survives the turn.
         self.reusable = reusable
         self.sent_turns: list[str] = []
 
-    async def start(self, *args, **kwargs):
+    async def _start(self, *args, **kwargs):
         pass
 
-    def stream(self):
+    def _stream(self):
         async def _gen():
             for e in self._events:
                 yield e
         return _gen()
 
-    async def stop(self):
+    async def _stop_process(self):
         pass
 
 
@@ -1780,7 +1784,7 @@ async def test_unattributed_auth_stderr_does_not_invalidate_current_credential(m
         events=[],
         stderr_text="Failed to authenticate. API Error: 401 Invalid authentication credentials",
     )
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: fake))
 
     events = await _request_events(manager, session, "hi")
 
@@ -1809,7 +1813,7 @@ async def test_codex_auth_error_without_material_proof_keeps_current_login(manag
             )
         ]
     )
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: fake))
 
     events = await _request_events(manager, session, "hi")
 
@@ -1833,7 +1837,7 @@ async def test_clean_turn_does_not_flag_credential(manager, monkeypatch):
         events=[HarnessEvent(type="result", is_error=False, session_id="s1")],
         stderr_text="a tool logged: API Error: 401 (from some third-party API)",
     )
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: fake))
 
     events = await _request_events(manager, session, "hi")
 
@@ -1863,7 +1867,7 @@ async def test_failed_codex_turn_with_tool_unauthorized_does_not_flag(manager, m
             )
         ]
     )
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: fake))
 
     events = await _request_events(manager, session, "hi")
 
@@ -1882,26 +1886,30 @@ class _SeqBackend(FakeRunBase):
     fixed event list, exposes stderr_text."""
 
     def __init__(self, events, stderr_text="", *, preparation_error=None):
+        super().__init__()
         self._events = list(events)
-        self.stderr_text = stderr_text
+        self._stderr_tail = stderr_text
         self.started_with = None
         self.started_resume = None
         self.preparation_error = preparation_error
 
-    async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
+    async def _prepare_scripted_input(self, prompt, resume_id):
         self.started_with = prompt
         self.started_resume = resume_id
         if self.preparation_error:
             from server.harness.events import HarnessPreparationError
             raise HarnessPreparationError(self.preparation_error)
 
-    def stream(self):
+    async def _start(self, *args, **kwargs):
+        pass
+
+    def _stream(self):
         async def _gen():
             for e in self._events:
                 yield e
         return _gen()
 
-    async def stop(self):
+    async def _stop_process(self):
         pass
 
 
@@ -1933,7 +1941,7 @@ async def test_transient_error_without_submission_proof_stops(manager, monkeypat
             HarnessEvent(type="result", is_error=False, session_id="s1"),
         ]
     )
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([attempt1, attempt2]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([attempt1, attempt2])))
 
     events = await _request_events(manager, session, "hi")
 
@@ -1954,7 +1962,7 @@ async def test_dangling_resume_id_during_preparation_can_start_fresh(
         agent["id"], "Stale", None, backend="claude-code"
     )
     earlier = _SeqBackend([HarnessEvent(type="result", session_id="7d06c77e-dead-beef")])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: earlier)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: earlier))
     await _request_events(manager, session, "an earlier turn")
     assert session.claude_session_id == "7d06c77e-dead-beef"
 
@@ -1967,7 +1975,7 @@ async def test_dangling_resume_id_during_preparation_can_start_fresh(
             HarnessEvent(type="result", is_error=False, session_id="new-sid"),
         ]
     )
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([attempt1, attempt2]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([attempt1, attempt2])))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2003,7 +2011,7 @@ async def test_stale_resume_recovery_only_fires_once_per_turn(manager, monkeypat
         events=[], preparation_error="No conversation found with session ID: dead-1",
     )
     attempts = [stale(), stale(), stale()]
-    monkeypatch.setattr(manager, "_make_run", _seq_factory(attempts))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory(attempts)))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2029,7 +2037,7 @@ async def test_stale_pattern_does_not_fire_without_a_resume_id(manager, monkeypa
         ),
         _SeqBackend(events=[HarnessEvent(type="result", is_error=False)]),
     ]
-    monkeypatch.setattr(manager, "_make_run", _seq_factory(attempts))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory(attempts)))
 
     events = await _request_events(manager, session, "hi")
     assert not any(e.get("code") == "stale_session" for e in events)
@@ -2058,7 +2066,7 @@ async def test_transient_retry_continues_captured_conversation_without_output(ma
     attempt2 = _SeqBackend(
         events=[HarnessEvent(type="result", is_error=False, session_id="good-id")]
     )
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([attempt1, attempt2]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([attempt1, attempt2])))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2083,7 +2091,7 @@ async def test_transient_error_bounded_then_surfaces(manager, monkeypatch):
                                          content="API Error: 503 Service Unavailable")])
         for _ in range(3)
     ]
-    monkeypatch.setattr(manager, "_make_run", _seq_factory(fails))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory(fails)))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2112,7 +2120,7 @@ async def test_transient_error_after_output_resumes_with_continue(manager, monke
                              "(not your usage limit) · Rate limited"),
     ])
     attempt2 = _SeqBackend(events=[HarnessEvent(type="result", is_error=False, session_id="sid1")])
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([attempt1, attempt2]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([attempt1, attempt2])))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2134,23 +2142,23 @@ class _StallBackend(FakeRunBase):
     Models a wedged turn (no terminal result)."""
 
     def __init__(self, pre=None):
+        super().__init__()
         self.pre = list(pre or [])
         self.stopped = False
-        self.stderr_text = ""
         self._unblock = asyncio.Event()
 
-    async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
+    async def _start(self, prompt, working_dir=None, resume_id=None, **kwargs):
         self.started_with = prompt
         self.started_resume = resume_id
 
-    def stream(self):
+    def _stream(self):
         async def _gen():
             for e in self.pre:
                 yield e
             await self._unblock.wait()  # stall until stop()
         return _gen()
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stopped = True
         self._unblock.set()
 
@@ -2164,7 +2172,7 @@ async def test_turn_idle_timeout_stops_and_surfaces(manager, monkeypatch):
     monkeypatch.setattr(cfg, "turn_idle_max_retries", 0)
     session = await _new(manager, "Stall")
     backend = _StallBackend()
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: backend))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2182,7 +2190,7 @@ async def test_fast_turn_not_killed_by_watchdog(manager, monkeypatch):
     backend = _FakeBackend(
         events=[HarnessEvent(type="result", is_error=False, session_id="s1")]
     )
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: backend))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2202,7 +2210,7 @@ async def test_disabled_overall_cap_does_not_stop_a_long_active_turn(manager, mo
     for module in (turns, owner_runtime, runtime_types):
         monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     backend = _DripBackend(interval=0.02)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
     session = await _new(manager, "Active for an hour")
     activity = asyncio.Queue()
 
@@ -2245,7 +2253,7 @@ async def test_turn_timeout_does_not_trigger_premature_exit_respawn(manager, mon
         calls["n"] += 1
         return backend
 
-    monkeypatch.setattr(manager, "_make_run", factory)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(factory))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2265,13 +2273,13 @@ async def test_idle_recovery_continues_without_duplicate_user_messages(
     monkeypatch.setattr(cfg, "turn_max_seconds", 0)
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "Recover", backend=backend_kind)
-    session.claude_session_id = original_resume
+    await manager.db.update_session_field(session.id, claude_session_id=original_resume)
     first = _StallBackend([HarnessEvent(type="session_started", session_id="failed-thread")])
     second = _SeqBackend([
         HarnessEvent(type="text", content="recovered"),
         HarnessEvent(type="result", session_id="new-thread"),
     ])
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
 
     events = await _request_events(manager, session, "original request")
 
@@ -2303,7 +2311,7 @@ async def test_idle_recovery_resumes_after_output(
         HarnessEvent(type=output_kind, content="partial", tool_name="Bash", tool_use_id="t1"),
     ])
     second = _SeqBackend([HarnessEvent(type="result", session_id="saved-thread")])
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
 
     events = await _request_events(manager, session, "original request")
 
@@ -2324,7 +2332,7 @@ async def test_idle_recovery_has_a_per_turn_budget(manager, monkeypatch):
     session = await _new(manager, "Budget")
     stalls = [_StallBackend([HarnessEvent(type="session_started", session_id="saved-thread")]) for _ in range(3)]
     success = _SeqBackend([HarnessEvent(type="result", session_id="done")])
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([*stalls, success]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([*stalls, success])))
 
     events = await _request_events(manager, session, "first request")
 
@@ -2356,7 +2364,7 @@ async def test_recovery_remembers_output_from_earlier_attempts(manager, monkeypa
         HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")
     ])
     final = _SeqBackend([HarnessEvent(type="result", session_id="saved-thread")])
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second, final]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second, final])))
 
     events = await _request_events(manager, session, "original request")
 
@@ -2373,7 +2381,7 @@ async def test_idle_recovery_does_not_replay_output_without_resume_id(manager, m
     monkeypatch.setattr(cfg, "turn_max_seconds", 0)
     session = await _new(manager, "NoResume")
     first = _StallBackend([HarnessEvent(type="text_delta", content="partial")])
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first])))
 
     events = await _request_events(manager, session, "request")
 
@@ -2389,8 +2397,8 @@ async def test_overall_timeout_bounds_all_recovery_attempts(manager, monkeypatch
     monkeypatch.setattr(cfg, "turn_max_seconds", 0.35)
     monkeypatch.setattr(cfg, "turn_idle_max_retries", 10)
     session = await _new(manager, "TotalBudget")
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _StallBackend([
-        HarnessEvent(type="session_started", session_id="saved-thread")]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: _StallBackend([
+        HarnessEvent(type="session_started", session_id="saved-thread")])))
 
     events = await _request_events(manager, session, "request")
 
@@ -2410,7 +2418,7 @@ async def test_user_interrupt_stops_idle_recovery(manager, monkeypatch):
     started_second = asyncio.Event()
     first = _StallBackend([HarnessEvent(type="session_started", session_id="saved-thread")])
     second = _StallBackend([HarnessEvent(type="text", content="second attempt")])
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
 
     async def watch(event):
         if event.get("content") == "second attempt":
@@ -2432,15 +2440,15 @@ class _DripBackend(FakeRunBase):
     alive turn."""
 
     def __init__(self, interval=0.05):
+        super().__init__()
         self.interval = interval
         self.stopped = False
-        self.stderr_text = ""
         self._unblock = asyncio.Event()
 
-    async def start(self, *args, **kwargs):
+    async def _start(self, *args, **kwargs):
         pass
 
-    def stream(self):
+    def _stream(self):
         from server.harness import HarnessEvent
 
         async def _gen():
@@ -2452,7 +2460,7 @@ class _DripBackend(FakeRunBase):
                     pass
         return _gen()
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stopped = True
         self._unblock.set()
 
@@ -2465,7 +2473,7 @@ async def test_turn_overall_cap_trips_even_with_steady_events(manager, monkeypat
     monkeypatch.setattr(cfg, "turn_max_seconds", 0.3)          # overall does
     session = await _new(manager, "Drip")
     backend = _DripBackend()
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: backend))
 
     events = await _request_events(manager, session, "hi")
 
@@ -2494,7 +2502,7 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
     attempt_count = 0
 
     class Scripted(_FakeBackend):
-        def stream(self):
+        def _stream(self):
             async def events():
                 nonlocal attempt_count
                 attempt_count += 1
@@ -2513,7 +2521,7 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
         settings_seen.append(getattr(configured, field))
         return Scripted([])
 
-    monkeypatch.setattr(manager, "_make_run", factory)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(factory))
     async with await _session_client(manager, session) as client:
         configured = await client.patch(f"/api/sessions/{session.id}", json={field: before})
         assert configured.status_code == 200, configured.text
@@ -2593,7 +2601,7 @@ class _HeldRun(_FakeBackend):
         self.stops = 0
         self.retired = asyncio.Event()
 
-    async def start(self, prompt, *args, **kwargs):
+    async def _start(self, prompt, *args, **kwargs):
         self.starts.append(prompt)
 
     def spawn_signature(self, working_dir, credential):
@@ -2605,7 +2613,7 @@ class _HeldRun(_FakeBackend):
     async def interrupt(self):
         pass
 
-    async def stop(self):
+    async def _stop_process(self):
         self.stops += 1
         self.alive = False
         self.retired.set()
@@ -2614,7 +2622,7 @@ class _HeldRun(_FakeBackend):
 async def test_non_reusable_backend_is_never_reused(manager, monkeypatch):
     session = await _new(manager, "One process per turn")
     first, second = _HeldRun(reusable=False), _HeldRun(reusable=False)
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
     await _request_events(manager, session, "first")
     await _request_events(manager, session, "second")
     assert first.starts == ["first"] and second.starts == ["second"]
@@ -2624,7 +2632,7 @@ async def test_non_reusable_backend_is_never_reused(manager, monkeypatch):
 async def test_dead_process_is_not_reused(manager, monkeypatch):
     session = await _new(manager, "Dead held process")
     first, second = _HeldRun(), _HeldRun()
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
     await _request_events(manager, session, "first")
     first.alive = False
     await _request_events(manager, session, "second")
@@ -2634,7 +2642,7 @@ async def test_dead_process_is_not_reused(manager, monkeypatch):
 async def test_reuse_refused_when_the_spawn_config_changed(manager, monkeypatch):
     session = await _new(manager, "Changed spawn configuration")
     first, second = _HeldRun(signature="old-config"), _HeldRun(signature="new-config")
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second])))
     await _request_events(manager, session, "first")
     await _request_events(manager, session, "second")
     assert first.sent_turns == [] and first.stops == 1
@@ -2644,7 +2652,7 @@ async def test_reuse_refused_when_the_spawn_config_changed(manager, monkeypatch)
 async def test_reuse_accepted_when_the_config_is_unchanged(manager, monkeypatch):
     session = await _new(manager, "Unchanged spawn configuration")
     first, candidate = _HeldRun(), _HeldRun()
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, candidate]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, candidate])))
     await _request_events(manager, session, "first")
     await _request_events(manager, session, "second")
     assert first.starts == ["first"] and first.sent_turns == ["second"]
@@ -2658,7 +2666,7 @@ async def test_reaper_drops_idle_processes_and_keeps_fresh_ones(manager, monkeyp
 
     first, second, replacement = _HeldRun(), _HeldRun(), _HeldRun()
     stale, fresh = await _new(manager, "Stale"), await _new(manager, "Fresh")
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second, replacement]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second, replacement])))
     await _request_events(manager, stale, "first")
     await _request_events(manager, fresh, "second")
     assert stale._run.held_since < fresh._run.held_since
@@ -2678,7 +2686,7 @@ async def test_reaper_caps_total_held_processes(manager, monkeypatch):
     from server.sessions import processes
 
     runs = [_HeldRun() for _ in range(processes._MAX_HELD_PROCESSES)]
-    monkeypatch.setattr(manager, "_make_run", _seq_factory(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory(runs)))
     for index in range(len(runs)):
         session = await _new(manager, f"Held {index}")
         await _request_events(manager, session, f"work {index}")
@@ -2692,7 +2700,7 @@ async def test_reaper_caps_total_held_processes(manager, monkeypatch):
 async def test_reaper_leaves_a_running_turn_alone(manager, monkeypatch):
     session = await _new(manager, "Active process")
     backend = _QueuedRun([])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
     receipt = await manager.start_message(session.id, "working")
     await asyncio.wait_for(backend.started.wait(), 2)
     assert await manager.reap_held_processes() == 0
@@ -2705,7 +2713,7 @@ async def test_held_cap_is_enforced_without_the_reaper(manager, monkeypatch):
     from server.session_manager import _MAX_HELD_PROCESSES
 
     runs = [_HeldRun() for _ in range(_MAX_HELD_PROCESSES + 4)]
-    monkeypatch.setattr(manager, "_make_run", _seq_factory(runs))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory(runs)))
     sessions = []
     for index in range(len(runs)):
         session = await _new(manager, f"Pool {index}")
@@ -2722,12 +2730,112 @@ async def test_held_cap_is_enforced_without_the_reaper(manager, monkeypatch):
     assert runs[0].stops == 1 and sessions[0]._run.backend is None
 
 
+@pytest.mark.parametrize(
+    ("cap", "keep_held", "expected_stops"),
+    [
+        (2, True, [0, 0]),
+        (1, True, [0, 1]),
+        (2, False, [0, 0]),
+        (1, False, [1, 0]),
+    ],
+)
+async def test_held_cap_counts_only_actual_held_processes(manager, monkeypatch, cap, keep_held, expected_stops):
+    from server.sessions import processes
+
+    runs = [_HeldRun(), _HeldRun()]
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory(runs)))
+    oldest, newest = await _new(manager, "Oldest"), await _new(manager, "Newest")
+    await _request_events(manager, oldest, "first turn")
+    await _request_events(manager, newest, "second turn")
+    keep = oldest if keep_held else await _new(manager, "No held process")
+
+    monkeypatch.setattr(processes, "_MAX_HELD_PROCESSES", cap)
+    assert await manager._enforce_held_cap(keep_session_id=keep.id) == sum(expected_stops)
+    assert [run.stops for run in runs] == expected_stops
+
+
+@pytest.mark.parametrize("sweep", ["cap", "reaper"])
+@pytest.mark.parametrize("change", ["running", "reheld", "replaced", "deleted"])
+async def test_held_capacity_skips_changed_candidate(manager, monkeypatch, sweep, change):
+    from server.sessions import processes
+
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    turn_started = asyncio.Event()
+    release_turn = asyncio.Event()
+
+    class BlockingStop(_HeldRun):
+        async def _stop_process(self):
+            stop_started.set()
+            await release_stop.wait()
+            await super()._stop_process()
+
+    class BlockingSecondTurn(_HeldRun):
+        async def _write_turn_input(self, prompt):
+            turn_started.set()
+            await release_turn.wait()
+            await super()._write_turn_input(prompt)
+
+    first = BlockingStop()
+    second = BlockingSecondTurn() if change == "running" else _HeldRun()
+    newest, replacement = _HeldRun(), _HeldRun()
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, second, newest, replacement])))
+    oldest, changing, newest_session = [await _new(manager, name) for name in ("Oldest", "Changing", "Newest")]
+    for session in (oldest, changing, newest_session):
+        await _request_events(manager, session, "initial turn")
+
+    monkeypatch.setattr(processes, "_MAX_HELD_PROCESSES", 1)
+    monkeypatch.setattr(processes, "_HELD_STOP_TIMEOUT", 10)
+    enforce_capacity = manager._enforce_held_cap if sweep == "cap" else manager.reap_held_processes
+    retirement = asyncio.create_task(enforce_capacity())
+    current: _HeldRun | None = second
+    receipt = None
+    try:
+        await asyncio.wait_for(stop_started.wait(), 2)
+        # The original sweep has two candidates. A fresh sweep after the
+        # new turn completes should leave the replacement or reused run alone.
+        monkeypatch.setattr(processes, "_MAX_HELD_PROCESSES", 3)
+        if change == "running":
+            receipt = await manager.start_message(changing.id, "next turn")
+            await asyncio.wait_for(turn_started.wait(), 2)
+            assert manager.dispatch_snapshot(changing.id)["active_request_id"] == receipt.request_id
+        elif change == "deleted":
+            owner = manager._session_owners[id(changing)]
+            assert await manager.delete_session(changing.id)
+            await asyncio.wait_for(asyncio.shield(owner.task), 2)
+            assert changing.id not in manager.sessions
+            current = None
+        else:
+            if change == "replaced":
+                second.alive = False
+                current = replacement
+            await _request_events(manager, changing, "next turn")
+        assert changing._run.backend is current
+    finally:
+        release_stop.set()
+        try:
+            stopped = await asyncio.wait_for(retirement, 2)
+        finally:
+            release_turn.set()
+
+    if receipt is not None:
+        assert (await asyncio.wait_for(receipt.wait(), 2)).outcome.status == "success"
+    assert stopped == first.stops == 1
+    assert newest.stops == 0
+    assert oldest._run.backend is None
+    assert changing._run.backend is current and newest_session._run.backend is newest
+    if current is None:
+        assert id(changing) not in manager._session_owners
+    else:
+        assert current.stops == 0
+
+
 async def test_held_cap_never_touches_a_running_turn(manager, monkeypatch):
     from server.session_manager import _MAX_HELD_PROCESSES
 
     busy = _QueuedRun([])
     idle = [_HeldRun() for _ in range(_MAX_HELD_PROCESSES + 2)]
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([busy, *idle]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([busy, *idle])))
     session = await _new(manager, "Busy")
     receipt = await manager.start_message(session.id, "working")
     await asyncio.wait_for(busy.started.wait(), 2)
@@ -2748,13 +2856,13 @@ async def test_shutdown_sweep_is_bounded_by_a_hung_process(manager, monkeypatch)
     release = asyncio.Event()
 
     class _HangingStop(_HeldRun):
-        async def stop(self):
+        async def _stop_process(self):
             await release.wait()
-            await super().stop()
+            await super()._stop_process()
 
     backend = _HangingStop()
     session = await _new(manager, "Held shutdown")
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
     await _request_events(manager, session, "completed request")
 
     try:
@@ -2783,11 +2891,11 @@ async def test_interrupt_releases_the_session_handle_immediately(manager, monkey
         reusable = True
         stopped = False
 
-        async def stop(self):
+        async def _stop_process(self):
             retiring.set()
             await release_stop.wait()
             _SlowStop.stopped = True
-            await super().stop()
+            await super()._stop_process()
 
         async def interrupt(self):
             retiring.set()
@@ -2795,7 +2903,7 @@ async def test_interrupt_releases_the_session_handle_immediately(manager, monkey
 
     backend = _SlowStop([])
     successor = _HeldRun()
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([backend, successor]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([backend, successor])))
     receipt = await manager.start_message(session.id, "interrupt this")
     await asyncio.wait_for(backend.started.wait(), 2)
     try:
@@ -2821,23 +2929,15 @@ class _SteerRun(_QueuedRun):
     reusable = True
     can_steer = True
 
-    def __init__(self, session):
+    def __init__(self):
         super().__init__([])
-        self.session_id, self.user_id = session.id, session.user_id
-        self.run_lease_id, self.work_id = uuid.uuid4().hex, None
         self.frames = []
         self.frame_entered, self.frame_delivered = asyncio.Event(), asyncio.Event()
         self.release_frame = asyncio.Event()
         self.release_frame.set()
         self.sent_turns = []
 
-    async def start(self, *args, **kwargs):
-        from server.mcp_identity import register_run
-
-        register_run(self.run_lease_id, self.session_id, self.user_id, self.work_id)
-        await super().start(*args, **kwargs)
-
-    async def stream(self):
+    async def _stream(self):
         from server.harness import HarnessEvent
 
         await self.started.wait()
@@ -2852,15 +2952,9 @@ class _SteerRun(_QueuedRun):
         self.frame_delivered.set()
         return "frame-uuid"
 
-    async def stop(self):
-        from server.mcp_identity import revoke_run
-
-        revoke_run(self.run_lease_id)
-        await super().stop()
-
 
 async def _start_steerable(manager, monkeypatch, session, backend=None):
-    backend = backend or _SteerRun(session)
+    backend = backend or _SteerRun()
     ready = asyncio.Event()
     key = uuid.uuid4().hex
 
@@ -2868,7 +2962,7 @@ async def _start_steerable(manager, monkeypatch, session, backend=None):
         if event.get("session_id") == session.id and event.get("content") == "Ready for a correction":
             ready.set()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
     manager.on_broadcast(key, observe)
     try:
         receipt = await manager.start_message(session.id, "original request")
@@ -2896,7 +2990,7 @@ async def test_steer_accepted_while_the_window_is_open(manager, monkeypatch):
 async def test_steer_refused_once_the_window_shuts(manager, monkeypatch):
     session = await _new(manager, "Steer after terminal")
     first, next_run = _HeldRun(), _HeldRun()
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, next_run]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, next_run])))
     await _request_events(manager, session, "original request")
     late = await manager.start_message(session.id, "too late", steerable=True)
     assert late.disposition == "accepted"
@@ -2983,7 +3077,7 @@ async def test_writer_confirms_steers_before_handing_them_to_the_backend(manager
             steered.set()
 
     manager.on_broadcast("confirmed-steer", observe)
-    backend, original = await _start_steerable(manager, monkeypatch, session, ConfirmedRun(session))
+    backend, original = await _start_steerable(manager, monkeypatch, session, ConfirmedRun())
     correction = await manager.start_message(session.id, "stop that", steerable=True)
     assert correction.disposition == "steered"
     await asyncio.wait_for(steered.wait(), 2)
@@ -3012,7 +3106,7 @@ async def test_a_process_mid_turn_is_never_reused(manager, monkeypatch):
     session = await _new(manager, "One stdin writer")
     backend, original = await _start_steerable(manager, monkeypatch, session)
     candidate = _HeldRun(signature="fake-signature")
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: candidate)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: candidate))
     next_receipt = await manager.start_message(session.id, "next request")
     assert next_receipt.disposition == "accepted"
     assert backend.sent_turns == [] and candidate.starts == []
@@ -3033,25 +3127,25 @@ async def test_declining_reuse_stops_the_old_process(manager, monkeypatch):
     stopped: list[str] = []
 
     class _Old(_HeldRun):
-        async def stop(self):
+        async def _stop_process(self):
             stopped.append("old")
-            await super().stop()
+            await super()._stop_process()
 
     class _New(FakeRunBase):
-        async def start(self, *a, **k):
+        async def _start(self, *a, **k):
             pass
 
-        def stream(self):
+        def _stream(self):
             async def _gen():
                 from server.harness import HarnessEvent
                 yield HarnessEvent(type="result", session_id="sid")
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             stopped.append("new")
 
     first = _Old(signature="old-config")
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, _New()]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, _New()])))
     await _request_events(manager, session, "before config change")
     await _request_events(manager, session, "hello")
 
@@ -3092,18 +3186,18 @@ async def test_a_spawn_that_raises_surfaces_its_own_error(manager):
         name = "exploding"
         stopped = False
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             raise RuntimeError("no such binary")
 
-        def stream(self):  # pragma: no cover - never reached
+        def _stream(self):  # pragma: no cover - never reached
             async def _gen():
                 yield None
             return _gen()
 
-        async def stop(self):
+        async def _stop_process(self):
             ExplodingBackend.stopped = True
 
-    manager._make_run = lambda s, agent=None, connectors=None: ExplodingBackend()  # type: ignore[method-assign]
+    manager._make_run = model_run_factory(lambda s, agent=None, connectors=None: ExplodingBackend())  # type: ignore[method-assign]
 
     events = await _request_events(manager, session, "go")
     result = next(event for event in events if event["type"] == "result")
@@ -3169,7 +3263,7 @@ async def test_a_persisted_message_records_when_it_was_written(manager, monkeypa
 
     session = await _new(manager, "Timed")
     backend = _FakeBackend([HarnessEvent(type="result")])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
     messages = []
 
     async def observe(event):
@@ -3204,7 +3298,7 @@ async def test_the_ws_event_carries_the_row_it_was_persisted_as(manager, monkeyp
         HarnessEvent(type="text_delta", content="h"),
         HarnessEvent(type="text", content="hi"), HarnessEvent(type="result"),
     ])
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
     events = await _request_events(manager, session, "greet me")
     event = next(item for item in events if item["type"] == "assistant_text")
     stored = next(row for row in await manager.db.load_messages(session.id)
@@ -3238,10 +3332,8 @@ async def test_hidden_activity_and_true_silence_keep_cumulative_recovery_budget(
             self.prompt = prompt
             self.started.set()
 
-        async def stop(self):
-            self.invalidate_activity()
+        async def _stop_process(self):
             self.timeout_stops += 1
-            self._close_stream()
 
     clock = SimpleNamespace(now=time.monotonic())
     loop = asyncio.get_running_loop()
@@ -3347,7 +3439,7 @@ async def test_hidden_activity_and_true_silence_keep_cumulative_recovery_budget(
         messages = await manager.db.load_messages(session.id)
         assert [m["content"] for m in messages if m["role"] == "user"] == ["original request"]
         assert not any(m["type"] == "thinking" for m in messages)
-        assert all(run.timeout_stops >= 1 for run in runs)
+        assert all(run.timeout_stops == 1 and run.retirement_state == "proven" for run in runs)
     except asyncio.CancelledError:
         if expired.is_set():
             pytest.fail("controlled clock scenario did not complete within the real wall-clock budget")
@@ -3433,20 +3525,20 @@ async def _failed_retirement_child(tmp_path, tmp_path_factory, monkeypatch):
                                          error_code="server_overloaded", content="server overloaded")])
             self.starts = 0
 
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             self.starts += 1
             (artifacts / "first-started").write_text("recoverable request")
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await release.wait()
-            async for event in super().stream():
+            async for event in super()._stream():
                 yield event
 
         async def interrupt(self):
             pass
 
-        async def stop(self):
+        async def _stop_process(self):
             (artifacts / "retirement-failed").write_text(str(retirement_error))
             raise retirement_error
 
@@ -3455,7 +3547,7 @@ async def _failed_retirement_child(tmp_path, tmp_path_factory, monkeypatch):
             super().__init__([HarnessEvent(type="result")])
             self.starts = 0
 
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             self.starts += 1
             (artifacts / "successor-started").write_text("must not be spawned")
 
@@ -3466,7 +3558,7 @@ async def _failed_retirement_child(tmp_path, tmp_path_factory, monkeypatch):
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "Failed retirement", backend="codex")
     first, successor = FailingRetirement(), Successor()
-    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, successor]))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(_seq_factory([first, successor])))
     receipt = await manager.start_message(session.id, "recoverable request")
     await asyncio.wait_for(started.wait(), 2)
     assert first.starts == 1 and successor.starts == 0
@@ -3496,10 +3588,10 @@ async def test_manual_stop_and_attempt_finally_share_captured_retirement(manager
             self.interrupts = 0
             self.stops = 0
 
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await asyncio.Event().wait()
             yield None
 
@@ -3508,12 +3600,12 @@ async def test_manual_stop_and_attempt_finally_share_captured_retirement(manager
             retiring.set()
             await release.wait()
 
-        async def stop(self):
+        async def _stop_process(self):
             self.stops += 1
 
     backend = HeldRetirement()
     session = await _new(manager, "Shared retirement")
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: backend))
     receipt = await manager.start_message(session.id, "held request")
     await started.wait()
     try:

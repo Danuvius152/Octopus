@@ -16,6 +16,7 @@ from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.session_api import session_client, session_socket
 
 
 @pytest.fixture(autouse=True)
@@ -257,22 +258,37 @@ async def test_manual_resubmission_has_new_identity_and_one_recovery_owner(tmp_p
 
     manager.on_broadcast("pause-recovery", stop_recovery)
     try:
-        replies = await asyncio.gather(*(
-            submit_client_message(manager, session.id, "Edited by user", [], client, wiki_mode=None, recovery_of_client_id="original")
-            for client in ("recovered-a", "recovered-b")
-        ))
-        accepted = [row for row in replies if row["accepted"]]
-        assert len(accepted) == 1
-        await asyncio.wait_for(stopped.wait(), 5)
-        await manager.await_session_execution(session.id, timeout=5)
-        assert accepted[0]["request_id"] != original["request_id"]
-        assert accepted[0]["recovery_of_client_id"] == "original"
-        assert len(manager.dispatch_snapshot(session.id)["items"]) == 1
-        repeated = await submit_client_message(manager, session.id, "Edited by user", [], accepted[0]["client_request_id"], wiki_mode=None, recovery_of_client_id="original")
-        assert repeated["request_id"] == accepted[0]["request_id"]
-        assert len(manager.dispatch_snapshot(session.id)["items"]) == 1
-        conflict = await submit_client_message(manager, session.id, "Changed again", [], accepted[0]["client_request_id"], wiki_mode=None, recovery_of_client_id="original")
-        assert conflict["code"] == "submission_conflict"
+        endpoint = f"/api/sessions/{session.id}/submissions"
+        recovery = {"recovery_of_client_id": "original"}
+        content = "Edited by user"
+        async with session_client(manager, session) as http, session_socket(manager, session) as send:
+            http_reply, typed_reply = await asyncio.gather(
+                http.post(endpoint, json={"client_request_id": "recovered-a", "content": content, **recovery}),
+                send({"session_id": session.id, "client_request_id": "recovered-b", **recovery,
+                      "operation": {"kind": "message", "content": content, "attachment_ids": []}}),
+            )
+            assert http_reply.status_code == 200
+            admitted, = [row for row in (http_reply.json(), typed_reply) if row["accepted"]]
+            denied, = [row for row in (http_reply.json(), typed_reply) if not row["accepted"]]
+            assert denied["code"] == "recovery_unavailable"
+            assert await db.get_client_submission(session.id, denied["client_request_id"]) is None
+            await asyncio.wait_for(stopped.wait(), 5)
+            await manager.await_session_execution(session.id, timeout=5)
+            assert admitted["request_id"] != original["request_id"]
+            assert admitted["recovery_of_client_id"] == "original"
+            retained = await db.get_client_submission(session.id, admitted["client_request_id"])
+            assert retained["request_id"] == admitted["request_id"] and retained["recovery_of"] == "original"
+            old = (await http.get(f"{endpoint}/original")).json()
+            assert old["recovered_by_client_id"] == admitted["client_request_id"]
+            assert len(manager.dispatch_snapshot(session.id)["items"]) == 1
+            flat = {"session_id": session.id, "client_request_id": admitted["client_request_id"], "content": content}
+            repeated = await send({**flat, **recovery})
+            assert repeated["request_id"] == admitted["request_id"]
+            assert len(manager.dispatch_snapshot(session.id)["items"]) == 1
+            different_body = await send({**flat, **recovery, "content": "Changed again"})
+            assert different_body["accepted"] is False and different_body["code"] == "submission_conflict"
+            different_recovery = await send(flat)  # Recovery identity participates in the digest.
+            assert different_recovery["accepted"] is False and different_recovery["code"] == "submission_conflict"
     finally:
         manager.remove_broadcast("pause-recovery")
         await db.close()

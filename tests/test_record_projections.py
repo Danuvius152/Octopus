@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from server.agent_configuration import AgentConfigurationError
 from server.database import Database
 from server.db.projection import RecordProjection
 
@@ -16,7 +17,7 @@ async def db():
     await db.save_credential("credential", "codex", "Login", "oauth", "encrypted-only", "credential-time", user_id="owner")
     await db.save_agent(agent_id="agent", name="Reader", created_at="agent-time", updated_at="updated",
                         user_id="owner", backend="codex", model="chosen-model", credential_id="credential",
-                        reasoning_effort="high", service_tier="fast", mcp_servers=[{"name": "local"}], subagents=[{"name": "leaf"}])
+                        reasoning_effort="high", service_tier="fast", mcp_servers=["local"], subagents=[{"name": "leaf"}])
     await db.save_session("session", "Chat", "/work", "session-time", agent_id="agent", user_id="owner")
     await db.save_application(app_id="application", name="Report", app_dir="/apps/report", created_at="app-time",
                               updated_at="app-updated", user_id="owner", agent_id="agent", session_id="session", icon="📄")
@@ -41,7 +42,7 @@ async def db():
 
 @pytest.mark.parametrize(("projection", "reader", "identity", "expected"), [
     ("_AGENT_COLS", "get_agent", "agent", {"name": "Reader", "model": "chosen-model", "backend": "codex", "credential_id": "credential",
-      "reasoning_effort": "high", "service_tier": "fast", "active_session_count": 1, "user_id": "owner", "mcp_servers": [{"name": "local"}], "subagents": [{"name": "leaf"}]}),
+      "reasoning_effort": "high", "service_tier": "fast", "active_session_count": 1, "user_id": "owner", "mcp_servers": ["local"], "subagents": [{"name": "leaf"}]}),
     ("_APPLICATION_COLS", "get_application", "application", {"name": "Report", "icon": "📄", "archived": False, "pinned": True,
       "session_id": "session", "agent_id": "agent", "user_id": "owner", "updated_at": "app-updated"}),
     ("_BG_TASK_COLS", "get_bg_task", "bg", {"stdout": "output", "stderr": "error", "exit_code": 7, "truncated": True,
@@ -67,13 +68,12 @@ async def test_public_records_follow_their_declared_projection(db, monkeypatch, 
 @pytest.mark.parametrize("raw", ["", "null", "broken json", '{"not":"a list"}', '["entry"]'])
 async def test_domain_json_policies_are_preserved(db, raw):
     async with db.transaction() as tx:
-        await tx.execute("UPDATE agents SET mcp_servers=?, subagents=? WHERE id='agent'", (raw, raw))
+        await tx.execute("UPDATE agents SET subagents=? WHERE id='agent'", (raw,))
         await tx.execute("UPDATE connector_installations SET scopes=?", (raw,))
         await tx.execute("UPDATE custom_connectors SET scopes=?", (raw,))
     decoded = json.loads(raw) if raw and raw != "broken json" else []
-    agent = await db.get_agent("agent")
-    assert agent["mcp_servers"] == decoded
-    assert agent["subagents"] == (decoded if isinstance(decoded, list) else [])
+    with pytest.raises(AgentConfigurationError, match="Agent agent: invalid configuration field subagents"):
+        await db.get_agent("agent")
     assert (await db.get_connector_installation("connector"))["scopes"] == decoded
     assert (await db.get_custom_connector("custom"))["scopes"] == decoded
 

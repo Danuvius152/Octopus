@@ -19,15 +19,17 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .. import fork_helpers
 from ..attachments import AttachmentUnavailable, validate_message_attachments
 from ..config import settings
 from ..context_models import ContextBinding, context_binding, context_target
 from ..credential_bindings import CredentialBindingError
+from ..db.base import DatabaseBusy
+from ..db.schedules import OneShotFire
 from ..diagnostics import diagnostic_text, exception_diagnostic, safe_diagnostic
-from ..harness import HarnessCredential, HarnessEvent, HarnessRun, get_harness
+from ..harness import Harness, HarnessCredential, HarnessEvent, HarnessRun, get_harness
 from ..harness.driver import ActiveTurnRef, SteerNotAccepted
 from ..harness.events import HarnessDeadlineExceeded, HarnessPreparationError
 from ..harness.model_settings import (
@@ -85,7 +87,7 @@ from .runtime_types import (
     _Settlement,
     _Turn,
 )
-from .submission import RequestCompletion, SubmissionReceipt
+from .submission import RequestCompletion, SubmissionReceipt, TemporaryScheduleReceipt
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -104,7 +106,7 @@ class Submit:
     client_id: str | None = None
     attachments: tuple[dict[str, Any], ...] = ()
     recovery_of: str | None = None
-    schedule: dict[str, Any] | None = None
+    schedule: OneShotFire | None = None
     handoff: tuple[McpScope, HandoffPointers] | None = None
     return_parent: AdmittedRequest | None = None
 
@@ -124,6 +126,7 @@ class ApplyTicketBatchInstruction:
     scope: McpScope
     message: str
     limit: bool
+    progress_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -480,7 +483,7 @@ class OwnerRuntime:
         execution = self.current
         if execution is None or execution.attempt is None:
             return False
-        return bool(getattr(execution.attempt.backend, "captures_retirement_output", False) and (
+        return bool(execution.attempt.backend.captures_retirement_output and (
             isinstance(command, Interrupt)
             or isinstance(command, CancelRequest) and not command.pending_only
             and command.request_id == execution.request.request_id
@@ -539,7 +542,13 @@ class OwnerRuntime:
             async with manager._configuration_boundary(session):
                 return await manager._save_session_configuration(session.id, command.fields, command.user_id)
         if isinstance(command, Submit):
-            return await self._submit(command)
+            try:
+                return await self._submit(command)
+            except DatabaseBusy as error:
+                if command.schedule is None:
+                    raise
+                manager.input_database().health.require_healthy()
+                raise SessionAdmissionBusy("Schedule admission is waiting for storage") from error
         if isinstance(command, ApplyTicketBatchInstruction):
             return await self._apply_ticket_batch_instruction(command)
         if isinstance(command, CommitBatchReturn):
@@ -697,14 +706,12 @@ class OwnerRuntime:
         if isinstance(command, RetireProcess):
             return self.retire(command.backend, command.reason)
         if isinstance(command, RetireHeldProcess):
-            if (self.current is not None or session._run.backend is not command.backend
+            if (self.busy or session._run.backend is not command.backend
                     or session._run.held_since != command.held_since):
                 return None
             return self.retire(command.backend, "held_process_reaped")
         if isinstance(command, ReleaseApplication):
-            if (manager.sessions.get(session.id) is session and session._archive_reservation is None
-                    and not manager.session_deleting(session.id)):
-                session._admission_closed = False
+            manager._release_application_admission(session)
             return True
         if isinstance(command, OwnForkProcess):
             if (not (session._forking or session.fork_status == "initializing") or self.current is not None
@@ -881,10 +888,16 @@ class OwnerRuntime:
         if command.limit:
             input_id = next((edit.reference.request_id for _, edit in reversed(human.steers)
                              if command.message == edit.context.trusted_request), input_id)
+            if input_id == request.request_id and human.progress_only:
+                raise ValueError("A progress question cannot limit the ticket batch")
         elif not candidate:
             raise ValueError("Adoption requires the queued human supplement")
         if input_id is None:
             raise ValueError("The scope instruction must match the current human input verbatim")
+        if command.progress_only and (request.attachment_ids or command.message.lstrip().startswith("/")):
+            raise ValueError("A progress-only question cannot contain a command or attachments")
+        if not command.limit and human.adopted_for is not None and human.progress_only != command.progress_only:
+            raise ValueError("The ticket batch input already has a different classification")
         state = await database.ticket_batch_state(session.id, original_id)
         if state not in TICKET_BATCH_RETURN_STATES:
             raise ValueError("The original ticket batch is no longer current")
@@ -905,13 +918,17 @@ class OwnerRuntime:
             # Verify the amended scope before claiming the input for this batch.
             if updated is None:
                 raise ValueError("The original ticket batch has unconfirmed human input")
-            state = await database.adopt_ticket_batch_update(session.id, original_id, request.request_id)
+            state = await database.adopt_ticket_batch_update(session.id, original_id, request.request_id,
+                                                            progress_only=command.progress_only)
         session._ticket_batch_request_id = original_id
         execution.human_message_claimed = False
         await self._withdraw_batch_work(withdraw_returns=False)
-        if candidate:
+        # A classified progress carrier keeps its own execution, even when a
+        # confirmed steer in that execution limits the batch.
+        binds_batch = candidate and not (human.progress_only or command.progress_only)
+        if binds_batch:
             session._steer_open = False
-        if updated is not None:
+        if binds_batch and updated is not None:
             # Keep the recorded human turn intact and bind its subsequent work
             # to the amended batch.
             limits = updated.maintenance.restrict(caller.context.maintenance)
@@ -959,7 +976,10 @@ class OwnerRuntime:
         new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
         if not new_session and manager.sessions.get(session.id) is not session:
             raise SessionAdmissionClosed(f"Session {session.id} not found")
-        agent = await manager.require_active_agent(session.agent_id)
+        await manager.require_active_agent(session.agent_id)
+        agent = await database.get_live_agent_configuration(session.agent_id, session.user_id) if session.agent_id else None
+        if agent is None or session.agent_id in manager._closed_agents:
+            raise SessionAdmissionClosed("Agent admission is closed")
         if session._transcript_integrity != "ok":
             raise AdmissionIntegrityError("Transcript has duplicate sequences; export and review it before continuing")
         closed = (manager._admission_closed or session._admission_closed or manager.session_deleting(session.id)
@@ -1096,7 +1116,7 @@ class OwnerRuntime:
                 and self.current.request.operation == "message"
                 and session._steer_open and not request.attachment_ids
                 and self.current.attempt is not None
-                and getattr(self.current.attempt.backend, "steering_open", True)
+                and self.current.attempt.backend.steering_open
                 and await self._steer_configuration_matches(session, agent)
                 and request.wiki_mode in {None, "auto"} and session._run.wiki_mode in {None, "auto"}
                 and (not session._dispatch_paused or self.current.request.priority)
@@ -1175,19 +1195,45 @@ class OwnerRuntime:
             session._pending_queue.append(self._pending_input(request))
         receipt = manager._new_receipt(session, request, disposition)
         if human_message:
-            candidate = request.ticket_batch_candidate_for is not None
-            replaces_batch = not steering and not candidate
-            if replaces_batch:
-                session._ticket_batch_request_id = None
-            await self._withdraw_batch_work(withdraw_returns=replaces_batch)
-            if candidate and self.current is not None and self.current.request.batch_return:
-                if self.current.has_unwritten_batch_return():
-                    await self._interrupt("user", retain_unstarted=True)
-            elif supersedes_handoff or (replaces_batch and self.current is not None and self.current.request.batch_return):
-                await self._interrupt("user", restored_handoff_history=restored_handoff_history)
+            try:
+                candidate = request.ticket_batch_candidate_for is not None
+                replaces_batch = not steering and not candidate
+                if replaces_batch:
+                    session._ticket_batch_request_id = None
+                await self._withdraw_batch_work(withdraw_returns=replaces_batch)
+                if candidate and self.current is not None and self.current.request.batch_return:
+                    if self.current.has_unwritten_batch_return():
+                        await self._interrupt("user", retain_unstarted=True)
+                elif supersedes_handoff or (replaces_batch and self.current is not None and self.current.request.batch_return):
+                    await self._interrupt("user", restored_handoff_history=restored_handoff_history)
+            except (ValueError, QuotaExceeded) as error:
+                # Admission committed before the prior-work settlement. End
+                # this Owner instead of reporting a refusal for the new input.
+                raise RuntimeError("Could not settle prior work after accepting input") from error
         if request.delivery_id:
             session._delivery_receipts[request.delivery_id] = receipt
         self.changed()
+        if new_session:
+            async def retire_target() -> None:
+                try:
+                    completion = await receipt.wait()
+                    assert receipt.execution is not None
+                    await receipt.execution.wait_driver()
+                    if completion.state != "completed" or completion.recording_state != "committed":
+                        logger.error("Schedule completion is %s, recording is %s (session=%s request=%s)",
+                                     completion.state, completion.recording_state, session.id, completion.request_id)
+                finally:
+                    try:
+                        await manager.auto_archive_scheduled_session(session.id, expected_session=session)
+                    finally:
+                        session._one_shot_owns_retirement = False
+
+            retirement = asyncio.create_task(retire_target(), name=f"one-shot-retirement-{session.id}")
+            session._one_shot_owns_retirement = True
+            manager._own_task(retirement)
+            return TemporaryScheduleReceipt(disposition=receipt.disposition, request_id=receipt.request_id,
+                                            _completion=receipt._completion, execution=receipt.execution,
+                                            operation=receipt.operation, retirement=retirement)
         return receipt
 
     async def _withdraw_batch_work(self, *, withdraw_returns: bool) -> None:
@@ -1299,7 +1345,7 @@ class OwnerRuntime:
             attempt = execution.attempt
             if attempt is not None:
                 self._capture_recording(execution)
-                root = getattr(attempt.backend, "observed_root", None)
+                root = attempt.backend.observed_root
                 if execution.request.operation == "message" and attempt.final_answer is None and root is not None:
                     attempt.final_answer = FinalAnswerRef(thread_id=root.thread_id, turn_id=root.turn_id)
                 assert settlement.outcome is not None
@@ -1309,9 +1355,9 @@ class OwnerRuntime:
                     settlement.outcome.compact = attempt.backend.compact_result
                     if settlement.outcome.compact.effect == "unknown":
                         await self.owner.manager._unconfirmed_context_owned(session)
-                native_status = getattr(attempt.backend, "native_terminal_status", None)
+                native_status = attempt.backend.native_terminal_status
                 if native_status in {"completed", "failed", "interrupted"}:
-                    settlement.outcome.native_status = native_status
+                    settlement.outcome.native_status = cast(Literal["completed", "failed", "interrupted"], native_status)
                 settlement.outcome.recording_integrity = "incomplete" if settlement.protocol_issues else "complete"
                 settlement.outcome.recording_issues = dict(settlement.protocol_issues)
                 settlement.outcome.recording_locations = list(settlement.protocol_locations)
@@ -1383,7 +1429,7 @@ class OwnerRuntime:
                 # Seal the captured writer before the Owner waits for storage.
                 backend = execution.attempt.backend
                 backend.close_admission()
-                if getattr(backend, "captures_retirement_output", False):
+                if backend.captures_retirement_output:
                     if backend.native_end_reason == "process_ended":
                         backend.native_end_reason = "service_shutdown" if cause == "shutdown" else "user_stop"
                     backend.retire()
@@ -1421,14 +1467,14 @@ class OwnerRuntime:
                 execution, status="interrupted",
                 message=message or original_message, code=code or original_code,
                 defer_recording=bool(execution.attempt is not None
-                                     and getattr(execution.attempt.backend, "captures_retirement_output", False)),
+                                     and execution.attempt.backend.captures_retirement_output),
             )
         else:
             await self.complete(execution.request, reason="shutdown" if cause == "shutdown" else "withdrawn", execution=execution)
         if (execution.phase in {"start", "stream", "retry"}
                 and execution.operation is not None and not execution.operation.done()):
             execution.operation.cancel()
-        if (not (execution.attempt is not None and getattr(execution.attempt.backend, "captures_retirement_output", False))
+        if (not (execution.attempt is not None and execution.attempt.backend.captures_retirement_output)
                 and execution.reader is not None and execution.reader.task is not None and not execution.reader.task.done()):
             execution.reader.task.cancel()
         if execution.attempt is not None:
@@ -1452,11 +1498,9 @@ class OwnerRuntime:
         existing = session._run.retirements.get(id(backend))
         if existing is not None and existing.backend is backend:
             return existing.task
-        if getattr(backend, "captures_retirement_output", False):
+        if backend.captures_retirement_output:
             backend.retire(reason=reason)
-        invalidate = getattr(backend, "invalidate_activity", None)
-        if invalidate is not None:
-            invalidate()
+        backend.invalidate_activity()
         frames = manager._forget_backend(session, backend, reason=reason)
         if self.current is not None:
             self.current.frames.extend(frames)
@@ -1776,7 +1820,7 @@ class OwnerRuntime:
             return
         await self._deadline(execution)
         if execution.interrupted or (execution.settlement.outcome is not None and execution.phase != "terminal"):
-            if (execution.attempt is not None and getattr(execution.attempt.backend, "captures_retirement_output", False)
+            if (execution.attempt is not None and execution.attempt.backend.captures_retirement_output
                     and not execution.stream_ended):
                 await self._consume_runtime(execution)
             if self.steer is not None:
@@ -2096,8 +2140,7 @@ class OwnerRuntime:
 
     async def _prepare_retry(self, captured: Session, prepared: _PreparedRun, prompt: str) -> _PreparedRun:
         backend = self.owner.manager._make_run(captured, prepared.agent, prepared.connectors)
-        if isinstance(backend, HarnessRun) and isinstance(prepared.backend, HarnessRun):
-            backend.continue_configuration(prepared.backend)
+        backend.continue_configuration(prepared.backend)
         prompt = await self._prepare_backend_input(captured, backend, prompt)
         return replace(prepared, configured=captured, backend=backend, prompt=prompt)
 
@@ -2106,7 +2149,7 @@ class OwnerRuntime:
     ) -> str:
         if configured.user_id is None:
             raise ValueError("The session has no file owner")
-        if not compact and (not isinstance(backend, HarnessRun) or not backend.profile.inline_large_inputs):
+        if not compact and not backend.profile.inline_large_inputs:
             prompt = await asyncio.to_thread(spill_if_large, configured.id, prompt, user_id=configured.user_id)
         if configured.agent_id:
             from ..agent_memory import ensure_agent_dirs
@@ -2131,7 +2174,7 @@ class OwnerRuntime:
                 return
         if session._run.retirements:
             return
-        if not reused and isinstance(backend, HarnessRun):
+        if not reused:
             # A preceding writer can commit a newer history before it exits.
             # Keep the candidate owned while waiting for the post-exit read.
             database = self.owner.manager.input_database()
@@ -2145,34 +2188,29 @@ class OwnerRuntime:
     ) -> None:
         if await self._overall_expired(execution):
             return
-        if execution.deferred_return_input is not None and not isinstance(backend, HarnessRun):
-            await self._commit_batch_return(execution)
         session = self.owner.session
+        harness = Harness(backend.profile)
         if execution.turn is None:
             execution.turn = _Turn(
-                prepared.prompt, get_harness(prepared.configured.backend),
+                prepared.prompt, harness,
                 prepared.configured.credential_id or (prepared.agent or {}).get("credential_id"),
                 execution.settlement,
                 operation=execution.request.operation,
             )
+        else:
+            execution.turn.harness = harness
         # Native preparation already owns its first attempt identity. A retry
         # after an actual attempt still gets a fresh identity.
         attempt_id = execution.settlement.attempt_id if execution.attempt is None else None
         attempt = _Attempt(backend, prepared.prompt, reused, attempt_id=attempt_id or uuid.uuid4().hex)
-        attempt.credential = getattr(backend, "credential", None) if reused else prepared.credential
+        attempt.credential = backend.credential if reused else prepared.credential
         attempt.context_binding = prepared.context_binding
-        if isinstance(backend, HarnessRun):
-            from ..harness import Harness
-            assert execution.turn is not None
-            execution.turn.harness = Harness(backend.profile)
-            database = self.owner.manager.db
-            assert database is not None
-            if not reused:
-                session.claude_session_id = resume_id
-            if execution.request.operation == "compact" and session.claude_session_id != execution.request.native_session_id:
-                execution.attempt = attempt
-                await self._failed(execution, ValueError("The original native history changed before compaction"), "native_history_changed")
-                return
+        if not reused:
+            session.claude_session_id = resume_id
+        if execution.request.operation == "compact" and session.claude_session_id != execution.request.native_session_id:
+            execution.attempt = attempt
+            await self._failed(execution, ValueError("The original native history changed before compaction"), "native_history_changed")
+            return
 
         await self.owner.questions.handle(BeginQuestionAttempt(attempt.attempt_id, attempt.watchdog))
         if await self._overall_expired(execution):
@@ -2182,80 +2220,75 @@ class OwnerRuntime:
             session.fork_needs_replay = prepared.configured.fork_needs_replay
             session.fork_metadata = prepared.configured.fork_metadata
         execution.attempt = attempt
-        if isinstance(backend, HarnessRun):
-            backend.bind_turn_deadline(execution.settlement.overall_deadline)
-            input_changed, wake = execution.input_changed, self.owner.wake
-            request_id, history_attempt_id = execution.request.request_id, attempt.attempt_id
-            backend_name = backend.profile.backend
-            return_input = CommitBatchReturn(request_id, history_attempt_id) if execution.deferred_return_input is not None else None
+        backend.bind_turn_deadline(execution.settlement.overall_deadline)
+        database = self.owner.manager.input_database()
+        input_changed, wake = execution.input_changed, self.owner.wake
+        request_id, history_attempt_id = execution.request.request_id, attempt.attempt_id
+        backend_name = backend.profile.backend
+        return_input = CommitBatchReturn(request_id, history_attempt_id) if execution.deferred_return_input is not None else None
 
-            async def record_input(evidence):
-                if return_input is not None and evidence.kind == "start" and evidence.state == "unknown":
-                    await self.owner.call_runtime(return_input)
-                await database.record_native_input(session.id, evidence.input_id, evidence,
-                                                   process_group=backend.process_group_id)
-                # Report a committed read-model change to the original Owner.
-                # Coalescing notifications does not replace the saved evidence.
-                input_changed.set()
-                wake()
+        async def record_input(evidence: NativeInputEvidence) -> None:
+            if return_input is not None and evidence.kind == "start" and evidence.state == "unknown":
+                await self.owner.call_runtime(return_input)
+            await database.record_native_input(session.id, evidence.input_id, evidence,
+                                               process_group=backend.process_group_id)
+            # Report a committed read-model change to the original Owner.
+            # Coalescing notifications does not replace the saved evidence.
+            input_changed.set()
+            wake()
 
-            backend.bind_input_recorder(record_input)
-            generation = self.owner.manager._dispatch_generation
-            record_history_effect = session.fork_needs_replay or (
-                execution.request.source == "handoff" and backend_name == "claude-code")
+        backend.bind_input_recorder(record_input)
+        generation = self.owner.manager._dispatch_generation
+        record_history_effect = session.fork_needs_replay or (
+            execution.request.source == "handoff" and backend_name == "claude-code")
 
-            async def record_history(native_id: str | None, may_have_run: bool) -> None:
-                if return_input is not None and native_id is None and may_have_run:
-                    await self.owner.call_runtime(return_input)
-                if not record_history_effect:
-                    return
-                await database.record_input_history(session.id, request_id, history_attempt_id,
-                    generation, backend_name, native_id, may_have_run)
-                input_changed.set()
-                wake()
+        async def record_history(native_id: str | None, may_have_run: bool) -> None:
+            if return_input is not None and native_id is None and may_have_run:
+                await self.owner.call_runtime(return_input)
+            if not record_history_effect:
+                return
+            await database.record_input_history(session.id, request_id, history_attempt_id,
+                generation, backend_name, native_id, may_have_run)
+            input_changed.set()
+            wake()
 
-            backend.bind_input_history_recorder(
-                record_history if record_history_effect or (return_input is not None and not backend.profile.native_input_evidence)
-                else None)
-            backend.bind_questions(self.owner.wake)
+        backend.bind_input_history_recorder(
+            record_history if record_history_effect or (return_input is not None and not backend.profile.native_input_evidence)
+            else None)
+        backend.bind_questions(self.owner.wake)
         observation = session._request_observations.get(execution.request.request_id)
         if observation is not None:
             observation._attempts.append(AttemptResource(execution.request.request_id, attempt.attempt_id,
-                execution.request.work_id, getattr(backend, "run_lease_id", None),
-                backend.retirement_observation if isinstance(backend, HarnessRun) else None))
+                execution.request.work_id, backend.run_lease_id, backend.retirement_observation))
         execution.settlement.attempt_id = attempt.attempt_id
         session._run.backend, session._run.held_since = backend, None
-        if hasattr(backend, "bind_tool_context"):
-            backend.bind_tool_context(execution.request.request_id, attempt.attempt_id)
-        if hasattr(backend, "set_idle_handler"):
-            backend.set_idle_handler(partial(
-                self.owner.manager._handle_idle_event, session.id, backend=backend,
-                request_id=execution.request.request_id, attempt_id=attempt.attempt_id,
-                run_lease_id=getattr(backend, "run_lease_id", None), work_id=execution.request.work_id,
-            ))
+        backend.bind_tool_context(execution.request.request_id, attempt.attempt_id)
+        backend.set_idle_handler(partial(
+            self.owner.manager._handle_idle_event, session.id, backend=backend,
+            request_id=execution.request.request_id, attempt_id=attempt.attempt_id,
+            run_lease_id=backend.run_lease_id, work_id=execution.request.work_id,
+        ))
         activity = execution.activity = _Activity()
-        if hasattr(backend, "bind_activity"):
-            execution.activity_token = backend.bind_activity(activity.observe)
-        if hasattr(backend, "bind_observation_clock"):
-            started_at, watchdog = execution.settlement.started_at, attempt.watchdog
-            assert started_at is not None
-            overall_limit = execution.settlement.overall_limit
-            backend.bind_observation_clock(lambda at: {
-                "overall_elapsed_ms": max(0, at - started_at) * 1000,
-                "idle_elapsed_ms": max(0, at - watchdog["last"]) * 1000,
-                "overall_limit_ms": overall_limit * 1000 if overall_limit > 0 else None,
-                "idle_limit_ms": settings.turn_idle_timeout_seconds * 1000 if settings.turn_idle_timeout_seconds > 0 else None,
-                "idle_suspended": bool(watchdog.get("waiting_questions")),
-            })
+        execution.activity_token = backend.bind_activity(activity.observe)
+        started_at, watchdog = execution.settlement.started_at, attempt.watchdog
+        assert started_at is not None
+        overall_limit = execution.settlement.overall_limit
+        backend.bind_observation_clock(lambda at: {
+            "overall_elapsed_ms": max(0, at - started_at) * 1000,
+            "idle_elapsed_ms": max(0, at - watchdog["last"]) * 1000,
+            "overall_limit_ms": overall_limit * 1000 if overall_limit > 0 else None,
+            "idle_limit_ms": settings.turn_idle_timeout_seconds * 1000 if settings.turn_idle_timeout_seconds > 0 else None,
+            "idle_suspended": bool(watchdog.get("waiting_questions")),
+        })
         execution.frames.append({"type": "attempt_started", "session_id": session.id,
                                  "request_id": execution.request.request_id, "attempt_id": attempt.attempt_id})
         execution.start_ended, execution.stream_ended = False, False
-        if reused and hasattr(backend, "prepare_turn_stream"):
+        if reused:
             backend.prepare_turn_stream()
         # A new Harness stream is readable before spawn/stdin finishes. A
         # reused stream was synchronously reset above before this read begins.
         reader = execution.reader = RuntimeReader(backend, execution.request.request_id, attempt.attempt_id,
-            getattr(backend, "run_lease_id", None), execution.request.work_id)
+            backend.run_lease_id, execution.request.work_id)
         reader.task = self.task(reader.read(backend.stream(), self.owner.wake), f"runtime-read-{attempt.attempt_id}")
         execution.operation = self.task(self._start_original(
             backend, prepared.prompt, reused, prepared.configured.working_dir,
@@ -2272,15 +2305,11 @@ class OwnerRuntime:
     ) -> None:
         if overall_deadline is not None and time.monotonic() >= overall_deadline:
             return  # The task completion wakes the Owner to apply the original deadline.
-        if hasattr(backend, "bind_wiki_task"):
-            backend.bind_wiki_task(wiki_task_id)
+        backend.bind_wiki_task(wiki_task_id)
         if compact:
             await backend.start_compact(working_dir, resume_id, credential=credential)
         elif reused:
-            if hasattr(backend, "write_turn_input"):
-                await backend.write_turn_input(prompt)
-            else:
-                await backend.send_turn(prompt)
+            await backend.write_turn_input(prompt)
         else:
             await backend.start(prompt, working_dir, resume_id, credential=credential)
 
@@ -2288,7 +2317,7 @@ class OwnerRuntime:
         if execution.interrupted or execution.settlement.outcome is not None:
             return
         attempt = execution.attempt if execution.phase in {"start", "stream"} else None
-        if attempt is not None and getattr(attempt.backend, "captures_retirement_output", False) and not attempt.backend.question_admission_open:
+        if attempt is not None and attempt.backend.captures_retirement_output and not attempt.backend.question_admission_open:
             # The original run has frozen execution and started its bounded
             # retirement. Late records cannot restart the active root's clock.
             if execution.deadline is not None:
@@ -2322,7 +2351,7 @@ class OwnerRuntime:
             activity.consumed = activity.latest
             attempt.touch(activity.latest)
             self._arm_deadline(execution)
-        if getattr(attempt.backend, "captures_retirement_output", False) and not attempt.backend.question_admission_open:
+        if attempt.backend.captures_retirement_output and not attempt.backend.question_admission_open:
             self._arm_deadline(execution)
             return
         deadline = execution.deadline
@@ -2350,7 +2379,7 @@ class OwnerRuntime:
         if execution.operation is not None and not execution.operation.done():
             execution.operation.cancel()
         execution.start_ended = True
-        if getattr(attempt.backend, "captures_retirement_output", False):
+        if attempt.backend.captures_retirement_output:
             # Budget cancellation freezes execution, but the original reader
             # still records its finite shutdown prefix under the old identity.
             execution.phase = "stream"
@@ -2364,7 +2393,7 @@ class OwnerRuntime:
     async def _consume_runtime(self, execution: Execution, *, consume_events: bool = True) -> None:
         session, manager, attempt = self.owner.session, self.owner.manager, execution.attempt
         assert attempt is not None
-        if getattr(attempt.backend, "captures_retirement_output", False) and attempt.backend.retirement_state == "failed":
+        if attempt.backend.captures_retirement_output and attempt.backend.retirement_state == "failed":
             # The original failed resource must reach Manager takeover even
             # when its product reader is held by a slow notification prefix.
             await attempt.backend.wait_retirement()
@@ -2407,8 +2436,8 @@ class OwnerRuntime:
             else:
                 session._steer_open = bool(execution.request.operation == "message" and attempt.backend.can_steer and attempt.result is None)
                 execution.phase = "stream"
-                group = getattr(attempt.backend, "process_group_id", None)
-                if isinstance(group, int) and manager.db is not None:
+                group = attempt.backend.process_group_id
+                if group is not None and manager.db is not None:
                     await manager.db.note_submission_process(session.id, execution.request.request_id, group)
         reader = execution.reader
         if (consume_events and not execution.stream_ended and reader is not None
@@ -2428,8 +2457,6 @@ class OwnerRuntime:
                 session._steer_open = False
                 await self._end_questions(execution)
             else:
-                if execution.activity_token is None:
-                    attempt.touch()
                 frames = await manager._handle_stream_event(session, attempt, event)
                 for frame in frames:
                     frame.setdefault("request_id", execution.request.request_id)
@@ -2465,7 +2492,7 @@ class OwnerRuntime:
         settlement = execution.settlement
         timeout = attempt.timeout
         overall_timeout = (timeout is not None and timeout[0] == "overall") or attempt.overall_expired_at_end(settlement)
-        overall_timeout_before_input = overall_timeout and getattr(attempt.backend, "input_may_have_run", None) is False
+        overall_timeout_before_input = overall_timeout and not attempt.backend.input_may_have_run
         # The retired writer's unsent-input proof is enough to settle its hard
         # cap. A pending history projection still belongs to this execution.
         if execution.input_history is not None and not overall_timeout_before_input:
@@ -2482,7 +2509,7 @@ class OwnerRuntime:
             session.claude_session_id, session.fork_needs_replay, session.fork_metadata = await manager.db.session_input_history(
                 session.id, execution.request.request_id)
         handoff_unconfirmed = False
-        if execution.request.source == "handoff" and getattr(attempt.backend, "input_may_have_run", True):
+        if execution.request.source == "handoff" and attempt.backend.input_may_have_run:
             original = await manager.input_database().get_submission_for_request(session.id, execution.request.request_id)
             handoff_unconfirmed = not (original and original["payload"].get("fresh_native_id"))
         if handoff_unconfirmed:
@@ -2506,11 +2533,11 @@ class OwnerRuntime:
             self.owner.wake()
             return
         detail = decision.events[-1] if decision.events else {}
-        issues = {**settlement.protocol_issues, **getattr(attempt.backend, "protocol_issues", {})}
+        issues = {**settlement.protocol_issues, **attempt.backend.protocol_issues}
         from .mcp_questions import resolved_input_gap
         input_only = not settlement.protocol_issues and resolved_input_gap(attempt)
         recording_failed = (bool(issues) and not input_only
-                            if getattr(getattr(attempt.backend, "profile", None), "native_input_evidence", False)
+                            if attempt.backend.profile.native_input_evidence
                             else bool(issues.get("fatal_protocol_error")))
         effect_unknown = execution.request.operation == "compact" and attempt.backend.compact_result.effect == "unknown"
         failed = attempt.failed or attempt.timeout is not None or recording_failed or effect_unknown or handoff_unconfirmed
@@ -2535,7 +2562,7 @@ class OwnerRuntime:
                 reason = "The backend reported a failed terminal result."
         status: Literal["success", "failed", "interrupted"] = "failed" if failed else "success"
         if (attempt.result is not None and attempt.result.error_code == "native_turn_interrupted"
-                and attempt.timeout is None and not getattr(attempt.backend, "collection_preceded_terminal", False)):
+                and attempt.timeout is None and not attempt.backend.collection_preceded_terminal):
             status = "interrupted"
         await self.settle(execution, status=status,
                                    message=reason, code=detail.get("code"), result=attempt.result,
@@ -2547,12 +2574,12 @@ class OwnerRuntime:
     def _capture_recording(execution: Execution) -> None:
         attempt, settlement = execution.attempt, execution.settlement
         assert attempt is not None
-        for kind, count in getattr(attempt.backend, "protocol_issues", {}).items():
+        for kind, count in attempt.backend.protocol_issues.items():
             settlement.protocol_issues[kind] = settlement.protocol_issues.get(kind, 0) + count
         from .mcp_questions import input_gap_receipts
         settlement.protocol_locations.extend({**location, "attempt_id": attempt.attempt_id,
             **({"local_input_cleanup": proofs} if (proofs := input_gap_receipts(attempt, location)) else {})}
-            for location in getattr(attempt.backend, "protocol_locations", [])[:max(0, 8 - len(settlement.protocol_locations))])
+            for location in attempt.backend.protocol_locations[:max(0, 8 - len(settlement.protocol_locations))])
 
     async def _overall_expired(self, execution: Execution) -> bool:
         if not execution.settlement.overall_expired_at(time.monotonic()):
@@ -2584,7 +2611,7 @@ class OwnerRuntime:
         session = self.owner.session
         session._steer_open = False
         backend = execution.attempt.backend if execution.attempt is not None else None
-        native = backend is not None and getattr(backend, "captures_retirement_output", False)
+        native = backend is not None and backend.captures_retirement_output
         if not native and execution.reader is not None and execution.reader.task is not None:
             execution.reader.task.cancel()
         if execution.deadline is not None:
@@ -2673,7 +2700,7 @@ class OwnerRuntime:
         # make a still-owned runner disappear from execution retirement.
         if self.owner.questions.mcp_calls:
             return False
-        if execution.attempt is not None and getattr(execution.attempt.backend, "has_question_events", False):
+        if execution.attempt is not None and execution.attempt.backend.has_question_events:
             self.owner.wake()
             return False
         if self.steer is not None and self.steer.execution is execution:
@@ -2741,9 +2768,9 @@ class OwnerRuntime:
         steer = self.steer
         if steer is None:
             if (not session._steer_open or not session._steer_queue or not execution.start_ended
-                    or not getattr(attempt.backend, "steering_open", True)):
+                    or not attempt.backend.steering_open):
                 return
-            target = getattr(attempt.backend, "active_turn", None)
+            target = attempt.backend.active_turn
             request = await load_pending_input(manager, session.id, session._steer_queue[0])
             assert request.operation == "message"
             prepared = self.task(self._prepare_steer(
@@ -2907,8 +2934,8 @@ class OwnerRuntime:
         from ..mcp_identity import McpScope, scope_is_live
         database = self.owner.manager.db
         assert database is not None
-        group = getattr(backend, "process_group_id", None)
-        if isinstance(group, int):
+        group = backend.process_group_id
+        if group is not None:
             try:
                 await database.note_submission_process(session_id, owner_request_id, group)
             except asyncio.CancelledError as error:

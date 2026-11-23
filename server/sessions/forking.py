@@ -13,7 +13,7 @@ import json
 import os
 import shutil
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -78,6 +78,7 @@ class ForkingMixin(SessionManagerBase):
 
     async def _recover_incomplete_forks(self) -> None:
         """Sweep forks left mid-saga by a crash (session-rewind.md §5.6.7).
+        Startup requires the complete scan before recovering individual rows.
         Dispatch on `fork_status`:
           - 'initializing': PURGE in order — (1) call the harness cleanup hook
             so backend-specific artifacts go via the harness (no reach into
@@ -89,11 +90,7 @@ class ForkingMixin(SessionManagerBase):
         Idempotent — safe on every boot."""
         if self.db is None:
             return
-        try:
-            rows = await self.db.load_incomplete_forks()
-        except Exception:
-            logger.exception("fork recovery: could not query incomplete forks")
-            return
+        rows = await self.db.load_incomplete_forks()
         for row in rows:
             fork_id = row["id"]
             status = row["fork_status"]
@@ -123,9 +120,8 @@ class ForkingMixin(SessionManagerBase):
                             eff_cred_id = None
                     if not eff_cred_id:
                         eff_cred_id = row.get("credential_id")
-                    if not eff_cred_id and row.get("agent_id") and self.db:
-                        ag = await self.db.get_agent(row["agent_id"])
-                        eff_cred_id = ag.get("credential_id") if ag else None
+                    if not eff_cred_id and row.get("agent_id"):
+                        eff_cred_id = await self.db.get_agent_credential_id(row["agent_id"], row.get("user_id"))
                     cred = await self.resolve_credential_by_id(
                         eff_cred_id,
                         backend=harness.profile.backend,
@@ -209,13 +205,16 @@ class ForkingMixin(SessionManagerBase):
         if parent is None:
             raise ForkError(f"Session {parent_id} not found", reason="parent_not_found", status_code=404)
         await self._require_unambiguous_transcript(parent)
+
+        async def rewind() -> Session:
+            with self._session_relationship(parent_id).changing() as settle:
+                return await self._fork_session(
+                    parent_id, rewind_to_msg_seq, revert_files=revert_files, label=label,
+                    user_id=user_id, settle_relationship=settle,
+                )
+
         try:
-            return await self._run_agent_operation(
-                parent.agent_id, lambda: self._fork_session(
-                    parent_id, rewind_to_msg_seq, revert_files=revert_files,
-                    label=label, user_id=user_id,
-                ),
-            )
+            return await self._run_agent_operation(parent.agent_id, rewind)
         except ValueError as exc:
             raise ForkError(str(exc), reason="agent_admission_closed", status_code=409) from exc
 
@@ -224,6 +223,7 @@ class ForkingMixin(SessionManagerBase):
         parent_id: str,
         rewind_to_msg_seq: int,
         *,
+        settle_relationship: Callable[[], None],
         revert_files: bool = False,
         label: str | None = None,
         user_id: str | None = None,
@@ -423,7 +423,7 @@ class ForkingMixin(SessionManagerBase):
             # recoverable by a manual archive), so only announce the swap when
             # the parent actually went away.
             try:
-                await self._archive_original(parent, successor=fork)
+                await self._archive_original(parent, successor=fork, settle_relationship=settle_relationship)
             except Exception:
                 logger.exception(
                     "fork %s is ready; parent %s archive did not complete",
@@ -564,10 +564,9 @@ class ForkingMixin(SessionManagerBase):
             # require_auth=False: the rollout must be locatable even if the login
             # later lapses. Fork preparation makes no model inference call;
             # a native backend may use management RPCs to copy its history.
-            agent = await self._load_agent(parent)
-            eff_cred_id = source.credential_id or (
-                agent.get("credential_id") if agent else None
-            )
+            eff_cred_id = source.credential_id
+            if not eff_cred_id and self.db is not None and source.agent_id:
+                eff_cred_id = await self.db.get_agent_credential_id(source.agent_id, source.user_id)
             parent_cred = await self.resolve_credential_by_id(
                 eff_cred_id, backend=harness.profile.backend,
                 context=f"fork {parent.id}", require_auth=False,

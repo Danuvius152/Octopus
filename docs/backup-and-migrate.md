@@ -37,6 +37,9 @@ state. Account transfer success cannot stand in for chat or full-backup evidence
 Each export collects resources actually owned by the selected account at that
 point in time, including subsequently added agents, files, registered Wiki
 content and applications. It does not use a fixed instance-specific file list.
+The source still has to pass the existing full-database structure and
+relationship checks. Agent configuration fields are checked for the selected
+account's exported rows. A configuration error identifies the Agent and field.
 
 | Content | Account archive behavior |
 | --- | --- |
@@ -118,7 +121,7 @@ leases, waiters, threads, writers or permission to replay an operation.
 | Native child messages and result references | Exclude with chats. | Retain original request/attempt/thread/turn/item/question and seq associations, `native_subagent`, `native_status` and `final_answer` references. Invalid references cannot borrow another session's text. Restore does not revive reply eligibility or the card cache. |
 | Native tool/image metadata | Exclude message metadata with chats; ordinary files follow included-root rules. | Retain `tool_input.native_item` status/failure/hook/image metadata and actual referenced image files. Inline image bytes are not stored; ID/hash/size cannot reconstruct an image. `savedPath` has no historical snapshot guarantee. See [native images](implemented/codex-backend.md#native-generated-images). |
 | App Server input evidence | Exclude `client_submissions` with chats. | Preserve original input/attempt/RPC/thread/turn associations and matching provider history. Unknown acceptance and preparation changes stay unknown; saved terminals do not establish consumption. Missing native history remains a resume failure. |
-| Ticket handoff | Exclude with chats and task history. | Preserve the batch registration and marked returns with the human input, and the original receipt, replay boundary, human scope, source task position and native history with the handoff. Preserve the answered progress input IDs with their original steer records. Later tickets inherit the selection once the handoff has a confirmed native first input. Check pending or uncertain work under the [original ID](implemented/input-reliability.md#ticket-handoffs). |
+| Ticket handoff | Exclude with chats and task history. | Preserve the batch registration and marked returns with the human input, and the original receipt, replay boundary, human scope, source task position and native history with the handoff. Preserve `ticket_batch_progress_only` with its adoption binding and confirmed input records in `client_submissions`. An adopted update without the flag remains a supplement. Preserve legacy answered progress input IDs with their original steer records. Later tickets inherit the selection once the handoff has a confirmed native first input. Check pending or uncertain work under the [original ID](implemented/input-reliability.md#ticket-handoffs). |
 | Fork creation and copied history | Exclude fork message/session records and work trees collected solely for excluded conversations. | Preserve `copied_input`, copied terminal keys, native creation checkpoints, selected native home and copied cwd while recovery depends on them. Unknown creation stays unknown. Cleanup requires saved actual artifact identity and confirmed non-executing retirement; an ACK, preallocated hint or current transport cannot substitute. |
 | Fork-owned copy directory | Same session-JSON exclusion. | Keep the initializing row, `fork_metadata.owned_copy_dir` receipt and referenced independent directory while recovery depends on them. Missing/mismatched proof preserves the directory; relocation does not grant cleanup rights. Restore does not recreate the copy thread. See [fork recovery](implemented/session-fork.md#crash-safety--limits). |
 
@@ -214,9 +217,14 @@ octopus import-account /private/account.zip --home /home/target
 
 Import validates the inventory, hashes, build, key and empty target paths before
 writing. It restores privately, rebinds defined account paths and current Wiki
-registration/file identities, then publishes under the installation lock. It
-changes known system fields, not arbitrary path strings in prompts, knowledge
-or application code, and does not automatically expand authorization roots.
+registration/file identities, and verifies the entire staged primary database
+before publishing under the installation lock. The database must contain only
+the declared account, allowed account relationships and permitted archive rows.
+All retained Agent configurations must pass verification. Account archives
+carry a standalone primary SQLite file. Import rejects recovery sidecars in the
+archive or at the target database path. Path rebinding updates known system
+fields within the existing authorization roots. Path strings in prompts,
+knowledge and application code retain their original values.
 
 Application addresses keep their original traversal order under the new home
 prefix. Before publication, import validates each link, directory and `..` step
@@ -313,18 +321,25 @@ root. Do not bypass checks by deleting markers or rebuilding the Wiki database.
 1. Select compatible code and an empty target. Verify the inventory, required
    roots and master key before creating state. Prepare configuration and explicit
    machine bindings without admitting sessions, observers or schedulers.
-2. Preserve unresolved input/effect evidence and let its current owners handle
+2. After binding, run the [read-only publication verifier](implemented/current-storage-format.md#publication-boundary)
+   with the candidate code and the target's effective settings while writers
+   are still retired. Verify the actual restored database and registered Wiki
+   ledgers before enabling the installation. If it reports a damaged Agent,
+   preserve a consistent backup, correct the field in place under offline
+   ownership, preserve the Agent ID and references, and rerun the verifier on
+   the repaired target.
+3. Preserve unresolved input/effect evidence and let its current owners handle
    recovery. A stopped process does not establish business success. Do not replay
    completed inputs, delegation returns or one-shot schedules.
-3. Establish an explicit activation rule for restored automatic producers. Source
+4. Establish an explicit activation rule for restored automatic producers. Source
    and target schedulers must not run the same restored work concurrently. An
    incomplete restore stays identifiable and closed to business. Preserve this
    installation's manual tunnel policy: no startup enablement or automatic
    restart; only an explicit user request authorizes opening its public entry.
-4. Check accounts, permissions, memory, attachments, fork/external files,
+5. Check accounts, permissions, memory, attachments, fork/external files,
    application state and Wiki identities/history. HTTP health or a loaded page
    is only readiness evidence.
-5. Where native continuity is required, use an isolated validation installation
+6. Where native continuity is required, use an isolated validation installation
    to continue a known session with its expected credential, native identity and
    scoped data access. Reauthentication does not restore missing transcripts;
    expired credentials can independently need reauthorization. This local

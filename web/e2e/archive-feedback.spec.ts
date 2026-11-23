@@ -6,6 +6,45 @@ const API = "http://localhost:8765/api";
 
 test.use({ launchOptions: { ignoreDefaultArgs: ["--hide-scrollbars"] } });
 
+test("both tabs observe archive while only the initiating tab follows the successor", async ({ page, context, request }) => {
+  const headers = { Authorization: `Bearer ${accountToken()}` };
+  const imported = await request.post(`${API}/sessions/import`, { headers, data: {
+    name: "Archive across tabs",
+    messages: [{ role: "user", type: "text", content: "Keep reading this source" }],
+  } });
+  expect(imported.ok(), await imported.text()).toBeTruthy();
+  const source: { id: string; name: string } = await imported.json();
+  await page.goto("/");
+  await enterAccountCredentials(page);
+  await expect(page.locator(".conn-status.on")).toBeVisible();
+  const observer = await context.newPage();
+  try {
+    await observer.goto("/");
+    for (const tab of [page, observer]) {
+      await expect(tab.locator(".conn-status.on")).toBeVisible();
+      const agent = tab.locator(".agent-item", { hasText: "Octo" });
+      if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
+      await tab.locator(`[data-session-id="${source.id}"]`).click();
+      await expect(tab.locator(`[data-chat-session="${source.id}"]`).getByText("Keep reading this source")).toBeVisible();
+    }
+
+    const receipt = page.waitForResponse((response) => response.request().method() === "POST" &&
+      new URL(response.url()).pathname === `/api/sessions/${source.id}/archive`);
+    const composer = page.locator(".chat-input-bar textarea");
+    await composer.fill("/archive ");
+    await composer.press("Enter");
+    const response = await receipt;
+    expect(response.status()).toBe(201);
+    const successor: { id: string } = await response.json();
+    await expect(page.locator(`[data-chat-session="${successor.id}"]`)).toBeVisible();
+
+    await expect(observer.locator(`[data-session-id="${source.id}"]`)).toHaveCount(0);
+    await expect(observer.locator(`[data-session-id="${successor.id}"]`)).toBeVisible();
+    await expect(observer.locator(".chat-archived-banner")).toBeVisible();
+    await expect(observer.locator(`[data-chat-session="${source.id}"]`).getByText("Keep reading this source")).toBeVisible();
+  } finally { await observer.close(); }
+});
+
 test("only a visible chat confirms rendered Research, including cards outside the viewport", async ({ page, request }) => {
   const headers = { Authorization: `Bearer ${accountToken()}` };
   const imported = await request.post(`${API}/sessions/import`, { headers, data: {
@@ -92,7 +131,7 @@ test(title, async ({ page, request }, info) => {
   }
   const original = page.locator(".chat-messages").getByText("Keep reading the source", { exact: true });
   const tail = "Successor final paragraph";
-  let writes = 0, successorId = "", detailReads = 0, navigations = 0;
+  let writes = 0, successorId = "", successorName = "", detailReads = 0, navigations = 0;
   const sends: string[] = [];
   page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
     const frame = JSON.parse(String(payload));
@@ -113,7 +152,9 @@ test(title, async ({ page, request }, info) => {
     await writeGate;
     const response = await route.fetch();
     expect(response.status()).toBe(201);
-    successorId = (await response.json()).id;
+    const successor: { id: string; name: string } = await response.json();
+    successorId = successor.id;
+    successorName = successor.name;
     await route.fulfill({ response });
   });
   await page.route((url) => Boolean(successorId) && url.pathname === `/api/sessions/${successorId}`, async (route) => {
@@ -122,7 +163,7 @@ test(title, async ({ page, request }, info) => {
     if (scenario === "short") return route.abort();
     const response = await route.fetch();
     const detail = await response.json();
-    await route.fulfill({ response, json: { ...detail, name: "Prepared successor", message_count: 3,
+    await route.fulfill({ response, json: { ...detail, message_count: 3,
       messages: [{ role: "user", type: "text", seq: 1, content: "Successor first message" }, {
         role: "assistant", type: "text", seq: 2,
         content: "A long paragraph in the successor.\n\n".repeat(80) + (scenario === "handoff" ? "wide".repeat(300) : ""),
@@ -267,7 +308,7 @@ test(title, async ({ page, request }, info) => {
       [data-chat-session="${successorId}"] .chat-messages { zoom: 1.1; }
       [data-chat-session="${successorId}"] .msg-content { font-size: 14.5px; line-height: 1.47; overflow-wrap: normal; }
     ` });
-    const tracker = await page.evaluateHandle(({ marker, successorId }) => {
+    const tracker = await page.evaluateHandle(({ marker, successorId, successorName }) => {
       let measured: Element | undefined;
       let preparedHeight: number | undefined;
       let preparedTailHeight: number | undefined;
@@ -304,7 +345,7 @@ test(title, async ({ page, request }, info) => {
         const glyphs = document.createRange();
         if (title) glyphs.selectNodeContents(title);
         const textRect = glyphs.getBoundingClientRect(), titleRect = title?.getBoundingClientRect();
-        const titleInView = !!titleRect && title?.textContent === "Prepared successor" &&
+        const titleInView = !!titleRect && title?.textContent === successorName &&
           textRect.width > 0 && textRect.left >= titleRect.left && textRect.right <= titleRect.right + 1 &&
           title.contains(document.elementFromPoint(textRect.x + textRect.width / 2, textRect.y + textRect.height / 2));
         first = { sameNode: measured === rendered && !!measured,
@@ -322,7 +363,7 @@ test(title, async ({ page, request }, info) => {
         return tailGeometry(rendered, findTail(rendered));
       },
         transitions: () => transitions, stop: () => observer.disconnect() };
-    }, { marker: tail, successorId });
+    }, { marker: tail, successorId, successorName });
     try {
       await capturePaint(page, info, async (frames) => {
         release();

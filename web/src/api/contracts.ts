@@ -3101,10 +3101,7 @@ export interface paths {
         };
         /**
          * List Backends
-         * @description Which AI backends are usable on this host (codex-backend.md §6.1).
-         *     A harness kind appears only when its CLI resolves on PATH. `claude-code`
-         *     is always listed (the default) even if not yet installed, matching the
-         *     historical contract.
+         * @description List registered engines, local CLI discovery and the deployment preference.
          */
         get: operations["list_backends_api_backends_get"];
         put?: never;
@@ -3702,15 +3699,26 @@ export interface components {
          * @enum {string}
          */
         AuthType: "api_key" | "oauth";
-        /** BackendAvailability */
-        BackendAvailability: {
-            /** Available */
+        /** BackendCatalog */
+        BackendCatalog: {
+            /**
+             * Supported
+             * @description Registered runtime profiles, including uninstalled engines.
+             */
+            supported: string[];
+            /**
+             * Available
+             * @description Registered engines whose conversation CLI resolves on this host.
+             */
             available: string[];
             /** Models */
             models: {
                 [key: string]: string[];
             };
-            /** Default */
+            /**
+             * Default
+             * @description Deployment preference for new agents.
+             */
             default: string;
             /** Tool Policy */
             tool_policy: {
@@ -13568,7 +13576,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BackendAvailability"];
+                    "application/json": components["schemas"]["BackendCatalog"];
                 };
             };
         };

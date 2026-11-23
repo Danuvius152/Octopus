@@ -679,7 +679,7 @@ async def test_recording_failure_retry_verifies_original_without_new_model(jobs)
 async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_once(jobs, monkeypatch):
     from server.harness import HarnessEvent
     from server.wiki.tasks import tasks as grants
-    from tests.fake_run import FakeRunBase
+    from tests.fake_run import FakeRunBase, model_run_factory
 
     manager = wiki_api.session_manager
     started, finish_run = asyncio.Event(), asyncio.Event()
@@ -693,10 +693,10 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
     jobs.update(job["id"], status="running")
 
     class OwnedRun(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             pass
 
-        async def stream(self):
+        async def _stream(self):
             started.set()
             await finish_run.wait()
             session_id = jobs.get(job["id"])["session_id"]
@@ -706,7 +706,7 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
         async def interrupt(self):
             pass
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
     async def owned_retirement(affected):
@@ -728,7 +728,7 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
         if event.get("type") == "session_archived":
             archived.append((event["old_session_id"], event["old_session_id"] in grants.assignments))
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: OwnedRun())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: OwnedRun()))
     monkeypatch.setattr(manager, "start_message", observed_admission)
     monkeypatch.setattr(manager, "finish_work_cancellation", owned_retirement)
     monkeypatch.setattr(manager, "auto_archive_scheduled_session", observed_auto_archive)
@@ -770,15 +770,15 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
 async def test_worker_cancel_waits_for_owned_execution_before_removing_grant(jobs, monkeypatch):
     from server.harness import HarnessEvent
     from server.wiki.tasks import tasks as grants
-    from tests.fake_run import FakeRunBase
+    from tests.fake_run import FakeRunBase, model_run_factory
 
     started, stopping, reaped = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class HeldRun(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             pass
 
-        async def stream(self):
+        async def _stream(self):
             started.set()
             await asyncio.Event().wait()
             if False:
@@ -787,12 +787,12 @@ async def test_worker_cancel_waits_for_owned_execution_before_removing_grant(job
         async def interrupt(self):
             await self.stop()
 
-        async def stop(self):
+        async def _stop_process(self):
             stopping.set()
             await reaped.wait()
 
     manager = wiki_api.session_manager
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: HeldRun())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: HeldRun()))
     job = jobs.maintain("cancel-grants", "Original source", "organize", [], "Library/cancel.md", [], "human")
     jobs.update(job["id"], status="running")
     worker = WikiWorker()
@@ -822,16 +822,16 @@ async def test_worker_cancel_waits_for_owned_execution_before_removing_grant(job
 
 async def test_job_cancel_targets_captured_wiki_request_and_preserves_human_correction(jobs, monkeypatch):
     from server.harness import HarnessEvent
-    from tests.fake_run import FakeRunBase
+    from tests.fake_run import FakeRunBase, model_run_factory
 
     manager = wiki_api.session_manager
     entered, finish = asyncio.Event(), asyncio.Event()
 
     class HumanRun(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             pass
 
-        async def stream(self):
+        async def _stream(self):
             entered.set()
             await finish.wait()
             yield HarnessEvent(type="result", is_error=False)
@@ -839,10 +839,10 @@ async def test_job_cancel_targets_captured_wiki_request_and_preserves_human_corr
         async def interrupt(self):
             pass
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: HumanRun())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: HumanRun()))
     job = jobs.maintain("cancel-captured-request", "Original source", "organize", [], "Library/precise.md", [], "human")
     session = await manager.create_session((await manager.db.get_system_agent())["id"], "Wiki cancellation scope")
     await manager.interrupt(session.id)

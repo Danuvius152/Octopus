@@ -51,6 +51,21 @@ async def test_readiness_exposes_recovery_and_shutdown_without_claiming_a_dead_p
     assert (await client.get("/health")).status_code == 200
 
 
+async def test_incomplete_fork_scan_failure_prevents_service_startup(service, monkeypatch):
+    async def fail_scan(database):
+        assert database.health.state == "starting"
+        raise sqlite3.OperationalError("incomplete fork scan failed")
+
+    monkeypatch.setattr(Database, "load_incomplete_forks", fail_scan)
+    main.app.add_api_route("/ready", main.readiness)
+    with pytest.raises(sqlite3.OperationalError, match="incomplete fork scan failed"):
+        async with main.app.router.lifespan_context(main.app):
+            pytest.fail("service started without recovering incomplete forks")
+
+    async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test") as client:
+        assert (await client.get("/ready")).status_code == 503
+
+
 async def test_due_schedules_wait_for_the_service_recovery_gate(service, tmp_path, monkeypatch):
     starts = []
     synthetic_cli(monkeypatch, starts)

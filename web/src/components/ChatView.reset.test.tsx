@@ -14,7 +14,7 @@ function seedInteractions() {
     activeSessionId: session.id, mainView: "chat",
     sessions: [session], archivedSessions: [], agents: [], messages: {}, streamingText: {},
     lastAppliedSeq: {}, oldestSeq: {}, hasMoreMessages: {},
-    pendingQuestions: {}, closedQuestionIds: {}, pendingForks: {}, credentials: [], backendModels: {},
+    pendingQuestions: {}, closedQuestionIds: {}, pendingForks: {}, credentials: [],
     dispatchStates: {}, dispatchUnavailable: {}, dispatchGeneration: "service-a", retiredDispatchGenerations: [],
   });
   handleWsMessage({ type: "question_request", session_id: session.id, seq: 0, ...question("original") });

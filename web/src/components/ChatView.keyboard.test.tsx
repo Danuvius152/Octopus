@@ -13,7 +13,7 @@ beforeEach(() => {
   useSessionStore.getState().setToken("");
   useSessionStore.getState().setToken("key-test");
   useSessionStore.setState({ mainView: "chat", activeSessionId: a.id, sessions: [a, b], archivedSessions: [], agents: [], messages: {},
-    pendingQuestions: {}, streamingText: {}, dispatchStates: {}, dispatchUnavailable: {}, pendingForks: {}, credentials: [], backendModels: {} });
+    pendingQuestions: {}, streamingText: {}, dispatchStates: {}, dispatchUnavailable: {}, pendingForks: {}, credentials: [] });
   vi.stubGlobal("fetch", vi.fn(async (url: unknown) => Response.json(String(url).endsWith("/submissions") ? { items: [], next_cursor: null } : [])));
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });

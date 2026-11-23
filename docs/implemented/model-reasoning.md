@@ -92,6 +92,28 @@ secret freshness and current authority.
 
 ## Runtime metadata and validation
 
+`GET /api/backends` reports registered engines in `supported`, engines with a
+resolvable conversation CLI in `available`, and the deployment preference for
+new agents in `default`. Model shortlists and tool policies come from each
+registered profile. The browser reuses one successful snapshot across views
+in the current account. A failed read offers retry. An account change resets
+the catalog and discards pending results from the previous account.
+
+The Agent form offers registered engines and marks missing CLIs. Creating an
+Agent requires a successful catalog read and uses the deployment preference
+until the user chooses an engine. An existing Agent's saved engine remains
+visible during a failed read, and the form can still save other changes.
+
+The new session form shows the owning Agent's engine as the inherited choice and
+offers detected engines as explicit overrides. Inheritance stays available while
+discovery is pending or has failed. Switching between inheritance and an override
+for the same engine keeps the selected credential. If an Agent update changes
+the inherited engine, an incompatible selection stays visible and blocks
+submission. The user can choose a compatible credential or switch to the engine
+that matches the existing selection and keep that credential. An override to a
+different engine requires a compatible credential when the Agent has a credential
+of its own.
+
 `GET /api/backends/{backend}/models` requires authentication and account scope.
 An optional `credential_id` must belong to the caller and match the backend.
 The harness reads only model metadata from the effective credential's runtime

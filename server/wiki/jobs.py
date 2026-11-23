@@ -21,7 +21,6 @@ from . import (
     job_events,
     job_execution,
     job_items,
-    maintenance_inputs,
     materials,
 )
 from .curation import WikiCuration
@@ -54,9 +53,8 @@ class WikiJobs:
             with registry.registered(user_id, self.store, caller=caller) as current:
                 registration = dict(current)
         self.registration = registration
-        with self.store.connect() as db:
-            maintenance_inputs.require(db)
-            job_events.require(db)
+        with self.store.connect():
+            pass  # Check the captured Store's connection guard even with a supplied registration.
 
     @staticmethod
     def initialize_ledger(db):

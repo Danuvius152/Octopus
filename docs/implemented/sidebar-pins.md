@@ -84,17 +84,26 @@ delegation targets) wants the stable one.
 <a id="5-something-unpinned-that-needs-you"></a>
 ## Something unpinned that needs you
 
-Unpinned must not mean unreachable at the moment it matters. An unpinned row
-appears in the sidebar — after the pinned ones, dimmed, not draggable, with a
-pin button — while:
+An unpinned row appears after the pinned rows, with a dimmed name and no drag
+handle, while:
 
-* **agent:** it owns the active session; or a non-application session has
+* **agent:** it owns the active session; or a session with `origin !== "app"` has
   `status === "running"` or a nonempty `pendingQuestions` entry. Waiting on
   approval is not a separate selector condition: it keeps the agent visible
-  only while one of those actual states applies. Application-origin sessions
-  do not contribute to the running/question check;
+  only while one of those actual states applies;
 * **application:** it's the one you have open; it's building; or a build of
   it failed while you weren't looking at it, until you open it.
+
+Every running agent row shows the same violet count. The count includes
+builder sessions (`origin === "application"`) and delegation sessions even
+when those delegation rows are hidden. App conversations (`origin === "app"`)
+are excluded. The collapsed rail shows the running dot.
+
+In the expanded sidebar, hover over an agent row on desktop or unfold it on
+touch to reveal its new-session button. When the count reaches zero, these
+gestures also reveal Pin or Unpin for ordinary agents still in the sidebar.
+The Agents → All pin control is available independently of the sidebar
+running count.
 
 It leaves again when the condition clears. "Failed while you weren't looking"
 is the one that needs state: `unseenFailedApplications` in the store is added

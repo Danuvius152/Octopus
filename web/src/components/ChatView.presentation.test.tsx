@@ -17,7 +17,7 @@ beforeEach(() => {
   useSessionStore.setState({ activeSessionId: "cold", mainView: "chat", sessions: [{
     id: "cold", name: "Cold session", status: "running", backend: "codex",
     created_at: "2026-11-16", working_dir: "/tmp", archived: false,
-  } as SessionInfo], archivedSessions: [], agents: [], credentials: [], backendModels: {},
+  } as SessionInfo], archivedSessions: [], agents: [], credentials: [],
     messages: { cold: [{ role: "assistant", type: "text", seq: 50, content: "Live tail without installed history" }] },
     messageWindows: { cold: Symbol("not a baseline") }, oldestSeq: {}, hasMoreMessages: {}, lastAppliedSeq: {},
     streamingText: {}, streamingItems: {}, activeAttempts: {}, subagents: {}, pendingQuestions: {}, dispatchStates: {}, dispatchUnavailable: {},

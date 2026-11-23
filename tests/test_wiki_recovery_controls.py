@@ -10,13 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from server.wiki import origins, recovery_state, registry
-from server.wiki.store import WikiStore
+from server.wiki import job_events, job_notifications, origins, recovery_state, registry
+from server.wiki.events import FileChanges
+from server.wiki.jobs import WikiJobs
+from server.wiki.store import WikiError, WikiStore
 from tests import wiki_api as wiki_api
 from tests.test_wiki_owner_recovery import apply, approve, finish, plan, sql
 from tests.test_wiki_owner_recovery import client as client
 from tests.test_wiki_owner_recovery import uncertain as uncertain
 from tests.test_wiki_source_bindings import source
+from tests.wiki_current_storage import remove_job_id_uniqueness
 
 
 def handle():
@@ -396,6 +399,245 @@ async def test_completion_commit_before_publish_is_retried_by_its_exact_receipt(
     assert repeated.status_code == 200 and repeated.json()["completion_receipt"] == receipt
     assert len(sql(store, "SELECT * FROM filesystem_recovery_audit WHERE kind='complete'")) == 1
     assert len(sql(store, "SELECT * FROM filesystem_recovery_audit WHERE kind='mapping'")) == 1
+
+
+@pytest.mark.parametrize("replace_root", [False, True], ids=["same-root", "replacement-root"])
+async def test_job_ledger_damage_blocks_ordinary_admission_after_filesystem_recovery(uncertain, replace_root):
+    client, root, store, original, _ = uncertain
+    manager = wiki_api.session_manager
+    owner = (await manager.db.get_system_agent())["user_id"]
+    result = await plan(client)
+    if replace_root:
+        old_observer = handle().observer
+        root.rename(root.with_name("retained-original-root"))
+        (root / "Library").mkdir(parents=True)
+        (root / original["path"]).write_bytes(b"# Replacement root\n")
+        result = await plan(client)
+        assert handle().observer is not old_observer and old_observer._closed
+    await approve(client, result)
+    await stage(client, result, "handoff")
+    original_handle = handle()
+    observer, recovery_store = original_handle.observer, original_handle.store
+    trigger = sql(store, "SELECT sql FROM sqlite_schema WHERE name='wiki_job_insert_state'")[0]["sql"]
+    sql(store, "DROP TRIGGER wiki_job_insert_state")
+
+    failed = await apply(client, result)
+    assert failed.status_code == 503 and "job notification ledger" in failed.text
+    status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}")
+    assert status.status_code == 200, status.text
+    completed = status.json()
+    assert completed["phase"] == "complete" and completed["completion_receipt"] and completed["mapping_receipt"]
+    refused = await client.get("/api/wiki/read", params={"doc": original["path"]})
+    assert refused.status_code == 503, refused.text
+    assert owner not in {user_id for user_id, _ in registry.states()}
+    with pytest.raises(WikiError, match="account transition") as poll:
+        await registry.run_sync(WikiJobs, owner)
+    assert poll.value.status == 503
+
+    # Intake still belongs to recovery while ordinary publishing is blocked.
+    assert handle() is original_handle and handle().observer is observer and handle().store is recovery_store
+    assert observer.journal.recovery is original_handle.handoff_permit and original_handle.handoff_permit.active
+    assert recovery_store._recovery is original_handle.permit and original_handle.permit.active
+    receiver = observer.journal
+    (root / "Library/after-handoff.md").write_text("# Received while recovery owns intake\n")
+    await asyncio.to_thread(registry.recoveries().flush, owner)
+    pending = sql(store, "SELECT payload FROM filesystem_inbox WHERE status='pending'")
+    assert any(record.get("path") == "Library/after-handoff.md"
+               for row in pending for record in json.loads(row["payload"])["records"])
+
+    sql(store, trigger)
+    repeated = await apply(client, result)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["completion_receipt"] == completed["completion_receipt"]
+    assert observer.journal is receiver and receiver.recovery is None
+    read = await client.get("/api/wiki/read", params={"doc": original["path"]})
+    assert read.status_code == 200 and read.json()["id"] == result["files"][0]["document_id"]
+    assert (await client.get("/api/wiki/read", params={"doc": "Library/after-handoff.md"})).status_code == 200
+    jobs = await registry.run_sync(WikiJobs, owner)
+    assert await job_notifications.dispatch(jobs, manager) == 0
+
+
+async def test_completed_recovery_retry_cannot_publish_a_later_recovery(uncertain, monkeypatch):
+    client, _, store, original, _ = uncertain
+    first = await plan(client)
+    await approve(client, first)
+    receipt = (await finish(client, first))["completion_receipt"]
+    sql(store, "UPDATE filesystem_state SET uncertain='Second filesystem loss' WHERE singleton=1")
+    second = await plan(client)
+    assert second["recovery_id"] != first["recovery_id"]
+    await approve(client, second)
+    await stage(client, second, "handoff")
+
+    def refuse_publish(*args):
+        raise WikiError("Injected publication refusal", 503)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "publish_recovery", refuse_publish)
+        assert (await apply(client, second)).status_code == 503
+    second_handle = handle()
+
+    repeated = await apply(client, first)
+    assert repeated.status_code == 200 and repeated.json()["completion_receipt"] == receipt
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 503
+    assert handle() is second_handle
+    assert (await apply(client, second)).status_code == 200
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 200
+
+
+async def test_publication_job_constraints_do_not_disqualify_the_recovery_store(uncertain):
+    client, _, store, original, _ = uncertain
+    manager = wiki_api.session_manager
+    owner = (await manager.db.get_system_agent())["user_id"]
+    result = await plan(client)
+    await approve(client, result)
+    assert handle().store is None
+    remove_job_id_uniqueness(store.db_path)
+
+    await stage(client, result, "handoff")
+    refused = await apply(client, result)
+    assert refused.status_code == 503 and "job ledger constraints" in refused.text
+    status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}")
+    assert status.status_code == 200 and status.json()["phase"] == "complete"
+    receipt = status.json()["completion_receipt"]
+    assert receipt
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 503
+    with pytest.raises(WikiError, match="account transition"):
+        await registry.run_sync(WikiJobs, owner)
+
+    sql(store, "CREATE UNIQUE INDEX jobs_repaired_id ON jobs(id)")
+    repeated = await apply(client, result)
+    assert repeated.status_code == 200 and repeated.json()["completion_receipt"] == receipt
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 200
+    jobs = await registry.run_sync(WikiJobs, owner)
+    assert await job_notifications.dispatch(jobs, manager) == 0
+
+
+@pytest.mark.parametrize("recorded", [True, False], ids=["persisted", "still-queued"])
+async def test_recovery_publication_observes_uncertainty_after_completion(uncertain, monkeypatch, recorded):
+    client, _, store, original, _ = uncertain
+    result = await plan(client)
+    await approve(client, result)
+    await stage(client, result, "handoff")
+    h = handle()
+    h.stop_pump()
+    publish = registry.publish_recovery
+
+    def overflow_before_publish(*args):
+        with h.observer._lock:
+            h.observer.process_record({"type": "overflow"})
+            if recorded:
+                with pytest.raises(WikiError, match="history is uncertain"):
+                    h.drain()
+        return publish(*args)
+
+    monkeypatch.setattr(registry, "publish_recovery", overflow_before_publish)
+    refused = await apply(client, result)
+    assert refused.status_code == 503, refused.text
+    status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}")
+    assert status.status_code == 200 and status.json()["completion_receipt"]
+    assert sql(store, "SELECT uncertain FROM filesystem_state")[0]["uncertain"]
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 503
+
+
+@pytest.mark.parametrize("root_loss", ["replacement", "absent-on-drain", "absent-on-stat", "absent-before-registry", "absent-before-registry-with-pump"])
+async def test_root_replaced_during_publication_requires_a_new_recovery_plan(uncertain, monkeypatch, root_loss):
+    client, root, store, original, _ = uncertain
+    result = await plan(client)
+    await approve(client, result)
+    await stage(client, result, "handoff")
+    h = handle()
+    old_observer = h.observer
+    old_path = root.with_name("old-root-after-completion")
+    validate = job_events.require
+
+    def create_replacement():
+        (root / "Library").mkdir(parents=True)
+        (root / original["path"]).write_bytes(b"# Replacement during publication\n")
+
+    def replace_after_validation(db):
+        validate(db)
+        root.rename(old_path)
+        if root_loss == "replacement":
+            create_replacement()
+
+    def remove_before_publication(*args):
+        root.rename(old_path)
+        if root_loss == "absent-before-registry-with-pump":
+            with pytest.raises(WikiError):
+                h.drain()
+        return publish(*args)
+
+    publish = registry.publish_recovery
+    with monkeypatch.context() as patch:
+        if root_loss.startswith("absent-before-registry"):
+            h.stop_pump()
+            patch.setattr(registry, "publish_recovery", remove_before_publication)
+        else:
+            patch.setattr(job_events, "require", replace_after_validation)
+        if root_loss == "absent-on-stat":
+            # Let the root stat detect the loss while the observer has no receipt ready to deliver.
+            drain = old_observer.drain
+            patch.setattr(old_observer, "drain", lambda: drain() if root.is_dir() else FileChanges())
+        refused = await apply(client, result)
+    assert refused.status_code in {409, 503}, refused.text
+    status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}")
+    assert status.status_code == 200 and status.json()["completion_receipt"]
+    assert sql(store, "SELECT uncertain FROM filesystem_state")[0]["uncertain"]
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 503
+
+    if root_loss != "replacement":
+        create_replacement()
+    revised = await plan(client)
+    assert revised["recovery_id"] != result["recovery_id"]
+    assert handle().observer is not old_observer and old_observer._closed
+    await approve(client, revised)
+    await finish(client, revised)
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 200
+
+
+@pytest.mark.parametrize("check", ["registry", "receiver"])
+async def test_root_probe_oserror_preserves_recovery_and_allows_replan(uncertain, monkeypatch, check):
+    client, root, store, original, _ = uncertain
+    result = await plan(client)
+    await approve(client, result)
+    await stage(client, result, "handoff")
+    h = handle()
+    h.stop_pump()
+    is_dir = Path.is_dir
+    publish = registry.publish_recovery
+
+    def inaccessible(path):
+        if path == root:
+            raise PermissionError("Isolated root probe denial")
+        return is_dir(path)
+
+    def lose_root_access(*args):
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "is_dir", inaccessible)
+            if check == "receiver":
+                (root / "Library/queued.md").write_bytes(b"# Queued before access recovered\n")
+                with pytest.raises(WikiError, match="root is unavailable"):
+                    h.drain()
+                assert sql(store, "SELECT uncertain,armed_epoch FROM filesystem_state") == [
+                    {"uncertain": "Filesystem recovery root is unavailable; evidence retained", "armed_epoch": None}
+                ]
+                assert isinstance(h.error.__cause__, PermissionError)
+            return publish(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "publish_recovery", lose_root_access)
+        refused = await apply(client, result)
+    assert refused.status_code == 503, refused.text
+    status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}")
+    assert status.status_code == 200 and status.json()["completion_receipt"]
+    assert sql(store, "SELECT uncertain FROM filesystem_state")[0]["uncertain"]
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 503
+
+    revised = await plan(client)
+    assert revised["recovery_id"] != result["recovery_id"]
+    await approve(client, revised)
+    await finish(client, revised)
+    assert (await client.get("/api/wiki/read", params={"doc": original["path"]})).status_code == 200
 
 
 @pytest.mark.parametrize("loss", ["filesystem_recoveries", "filesystem_recovery_audit", "guard", "protocol"])

@@ -16,6 +16,7 @@ import type {
   AgentRead as ApiAgentRead,
   ApplicationRead as ApiApplicationRead,
   AttachmentMetadata as ApiAttachmentMetadata,
+  BackendCatalog,
   BackendKind as ApiBackendKind,
   BgTaskSummaryResponse as ApiBgTaskSummaryResponse,
   DelegationResponse as ApiDelegationResponse,
@@ -28,9 +29,12 @@ import type {
   SubagentRun as ApiSubagentRun,
   SessionStatus as ApiSessionStatus,
   RuntimeMetadata,
-  ToolPolicySupport,
   WikiJobCard,
 } from "../api";
+
+export type BackendCatalogRead =
+  | { status: "idle" | "loading" | "failed" }
+  | { status: "ready"; catalog: BackendCatalog };
 
 interface AcceptedTextConsumer { sessionId: string; account: number; notify: () => void }
 // Only openings waiting for their one timeout recovery subscribe. The original
@@ -329,20 +333,7 @@ interface SessionStore {
   ) => void;
   showChat: () => void;
 
-  // Which AI backends this host can run (GET /api/backends). 'claude-code'
-  // is always present; 'codex' only when the binary resolves. Drives the
-  // backend selector in the session-create form (codex-backend.md §6).
-  availableBackends: string[];
-  defaultBackend: BackendKind;
-  setDefaultBackend: (backend: BackendKind) => void;
-  setAvailableBackends: (b: string[]) => void;
-  // Model shortlist per backend, from the same `GET /api/backends`. Feeds
-  // `/model`'s picker; empty for a backend whose accepted names this build
-  // does not claim to know (see RuntimeProfile.models).
-  backendModels: Record<string, string[]>;
-  setBackendModels: (m: Record<string, string[]>) => void;
-  backendToolPolicies: Record<string, ToolPolicySupport>;
-  setBackendToolPolicies: (policies: Record<string, ToolPolicySupport>) => void;
+  backendCatalog: BackendCatalogRead;
 
   sessions: SessionInfo[];
   sessionRead: ListReadState;
@@ -991,14 +982,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   showChat: () =>
     set({ mainView: "chat", activeApplicationId: null, sidebarOpen: false }),
 
-  availableBackends: ["claude-code"],
-  defaultBackend: "claude-code",
-  setDefaultBackend: (defaultBackend) => set({ defaultBackend }),
-  setAvailableBackends: (availableBackends) => set({ availableBackends }),
-  backendModels: {},
-  setBackendModels: (backendModels) => set({ backendModels }),
-  backendToolPolicies: {},
-  setBackendToolPolicies: (backendToolPolicies) => set({ backendToolPolicies }),
+  backendCatalog: { status: "idle" },
 
   sessions: [],
   sessionRead: unreadList(),

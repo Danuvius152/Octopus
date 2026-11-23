@@ -33,6 +33,7 @@ export type AgentCreate = components["schemas"]["AgentCreate"];
 export type AgentUpdate = components["schemas"]["AgentUpdate"];
 export type AttachmentMetadata = components["schemas"]["AttachmentMetadata"];
 export type AuthType = components["schemas"]["AuthType"];
+export type BackendCatalog = components["schemas"]["BackendCatalog"];
 export type BackendKind = components["schemas"]["BackendKind"];
 export type CredentialInfo = components["schemas"]["CredentialInfo"];
 export type ConnectorCatalogEntry = components["schemas"]["ConnectorCatalogEntry"];

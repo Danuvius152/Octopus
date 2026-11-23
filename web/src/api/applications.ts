@@ -18,12 +18,24 @@ function authHeaders(token: string): HeadersInit {
   return { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
 }
 
+export class ApplicationHttpError extends ListWriteError {
+  readonly status: number;
+  readonly detail: unknown;
+
+  constructor(status: number, detail: unknown) {
+    const message = typeof detail === "string" ? detail
+      : detail && typeof detail === "object" && "message" in detail && typeof detail.message === "string"
+        ? detail.message : `HTTP ${status}`;
+    super(message, status < 500 && status !== 408 ? "refused" : "unknown");
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => null);
-    const detail =
-      body && typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`;
-    throw new ListWriteError(detail, res.status < 500 && res.status !== 408 ? "refused" : "unknown");
+    throw new ApplicationHttpError(res.status, body?.detail);
   }
   return res.json() as Promise<T>;
 }
@@ -115,15 +127,22 @@ export type NewApplication = Omit<
 
 export async function createApplication(
   token: string,
-  body: NewApplication
+  body: NewApplication,
+  signal: AbortSignal,
 ): Promise<ApplicationRead> {
   return json(
     await fetch(`${API}/api/applications`, {
       method: "POST",
       headers: authHeaders(token),
       body: JSON.stringify(body),
+      signal,
     })
   );
+}
+
+export async function fetchApplication(token: string, id: string, signal: AbortSignal): Promise<ApplicationRead | "missing"> {
+  const response = await fetch(`${API}/api/applications/${encodeURIComponent(id)}`, { headers: authHeaders(token), signal });
+  return response.status === 404 ? "missing" : json(response);
 }
 
 export async function updateApplication(

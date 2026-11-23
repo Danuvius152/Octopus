@@ -219,10 +219,10 @@ async def test_parent_delete_sets_null_on_child(mgr, db):
 
 @pytest.mark.asyncio
 async def test_resolve_target_agent_case_insensitive(dm, db):
-    await _make_agent(db, "Vera")
-    assert (await dm._resolve_target_agent("vera"))["name"] == "Vera"
-    assert (await dm._resolve_target_agent("VERA"))["name"] == "Vera"
-    assert (await dm._resolve_target_agent("  Vera  "))["name"] == "Vera"
+    owner = (await _make_agent(db, "Vera"))["user_id"]
+    assert (await dm._resolve_target_agent("vera", owner))["name"] == "Vera"
+    assert (await dm._resolve_target_agent("VERA", owner))["name"] == "Vera"
+    assert (await dm._resolve_target_agent("  Vera  ", owner))["name"] == "Vera"
 
 
 @pytest.mark.asyncio
@@ -1213,7 +1213,7 @@ async def test_delegation_waits_for_real_turn_recovery(models, dm, mgr, db, monk
 
     from server.config import settings as cfg
     from server.harness import HarnessEvent
-    from tests.fake_run import FakeRunBase
+    from tests.fake_run import FakeRunBase, model_run_factory
 
     injected = []
     submit = mgr.start_message
@@ -1239,18 +1239,19 @@ async def test_delegation_waits_for_real_turn_recovery(models, dm, mgr, db, monk
 
     class RecoveryRun(FakeRunBase):
         def __init__(self, recovering=False):
+            super().__init__()
             self.recovering = recovering
             self.unblocked = asyncio.Event()
 
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             await admitted.wait()
             assert rec.state == "running"
             assert child.id in mgr.sessions
 
-        async def stop(self):
+        async def _stop_process(self):
             self.unblocked.set()
 
-        async def stream(self):
+        async def _stream(self):
             await admitted.wait()
             yield HarnessEvent(type="session_started", session_id="saved-thread")
             if self.recovering:
@@ -1266,7 +1267,7 @@ async def test_delegation_waits_for_real_turn_recovery(models, dm, mgr, db, monk
                 yield HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")
 
     runs = iter([RecoveryRun(), RecoveryRun(recovering=True)])
-    monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: next(runs))
+    monkeypatch.setattr(mgr, "_make_run", model_run_factory(lambda *args, **kwargs: next(runs)))
     events = []
 
     async def observe(event):

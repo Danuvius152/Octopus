@@ -1,7 +1,7 @@
-"""Account-scoped discovery of models, reasoning and speed controls."""
+"""Backend catalog and account-scoped discovery of model controls."""
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..auth import verify_token
 from ..credential_bindings import CredentialBindingError
@@ -13,10 +13,11 @@ from ..models import BackendKind
 router = APIRouter(prefix="/api/backends", tags=["backends"])
 
 
-class BackendAvailability(BaseModel):
-    available: list[str]
+class BackendCatalog(BaseModel):
+    supported: list[str] = Field(description="Registered runtime profiles, including uninstalled engines.")
+    available: list[str] = Field(description="Registered engines whose conversation CLI resolves on this host.")
     models: dict[str, list[str]]
-    default: str
+    default: str = Field(description="Deployment preference for new agents.")
     tool_policy: dict[str, ToolPolicySupport]
 
 

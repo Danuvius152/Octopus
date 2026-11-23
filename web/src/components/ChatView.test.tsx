@@ -25,7 +25,7 @@ beforeEach(() => {
     activeSessionId: session.id, sessions: [session], agents: [],
     messages: {}, streamingText: {}, dispatchUnavailable: {}, pendingQuestions: {},
     dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [],
-    pendingForks: {}, credentials: [], backendModels: {},
+    pendingForks: {}, credentials: [],
   });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });

@@ -639,9 +639,9 @@ export function ChatTranscript({ sessionId: activeSessionId, session: activeSess
       if (row) {
         pending.saved.delete(seq);
         if (savedOutputOutside(row, change, port)) { offerReturn(); return; }
-      } else if (outsideMountedRange(index)) {
+      } else if (first && outsideMountedRange(index)) {
         pending.saved.delete(seq);
-        if (savedOutputHasBody(change, viewport)) { offerReturn(); return; }
+        if (savedOutputHasBody(change, viewport, first)) { offerReturn(); return; }
       }
     }
     for (const [work, change] of pending.helpers) {

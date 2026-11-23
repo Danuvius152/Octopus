@@ -20,7 +20,7 @@ beforeEach(() => {
   mockChatViewport(); mockChatItemLayout();
   useSessionStore.getState().setToken("");
   useSessionStore.setState({ activeSessionId: session.id, mainView: "chat", sessions: [session],
-    archivedSessions: [], agents: [], credentials: [], backendModels: {}, messages: {},
+    archivedSessions: [], agents: [], credentials: [], messages: {},
     messageWindows: {}, oldestSeq: {}, hasMoreMessages: {}, lastAppliedSeq: {},
     streamingText: {}, streamingItems: {}, pendingQuestions: {}, subagents: {}, dispatchStates: {}, dispatchUnavailable: {} });
   install();

@@ -20,7 +20,7 @@ from ..config import settings
 from ..service_health import ServiceHealth
 from ..service_installation import InstallationError, guard_vault
 from ..workspace import user_root
-from . import protocols, storage
+from . import job_events, protocols, storage
 from .store import WikiError, WikiStore
 
 logger = logging.getLogger(__name__)
@@ -400,24 +400,32 @@ class WikiRegistry:
                 self._recoveries = RecoveryManager(self)
             return self._recoveries
 
-    def publish_recovery(self, user_id, store, permit):
+    def publish_recovery(self, user_id, store, permit, completion):
         """Publish the verified same-observer receiver after its durable receipt."""
-        with self._account_lock(user_id), self.registration_lock(user_id), self._lock:
-            config = self.config(user_id)
+        from .recovery import RecoveryRootUnavailable
+
+        with store.events._lock, self._account_lock(user_id), self.registration_lock(user_id), self._lock:
+            config = self.config(user_id, require_root=False)
             if (config != permit.config or permit.manager.registry is not self or store.events is not permit.observer
-                    or self._closing or self._stopped or user_id not in self._blocked
+                    or store._recovery is not permit or self._closing or self._stopped or self._admission_closed
+                    or user_id not in self._blocked
                     or self._drained.get(user_id) != (self._owner_epochs.get(user_id, 0), self._incarnation)):
                 raise WikiError("Filesystem recovery publication binding or drain changed", 503)
-            with store.connect() as db:
-                permit.check(db)
-                receipt = db.execute("SELECT phase,completion_receipt FROM filesystem_recoveries WHERE id=?", (permit.recovery_id,)).fetchone()
-                if receipt is None or receipt["phase"] != "complete" or not receipt["completion_receipt"]:
-                    raise WikiError("Filesystem recovery handoff is not durably complete", 503)
+            try:
+                with store.connect() as db:
+                    db.execute("BEGIN")
+                    receiver = permit.check_handoff(db, completion)
+                    job_events.require(db)
+            except RecoveryRootUnavailable as error:
+                permit.handle.retain_handoff_loss(error)
+                raise
+            permit.handle.drain()
             key = self._key(user_id, self.state(user_id).resolve(), config)
             self._recovery_results[(str(store.state.resolve()), store.vault_id)] = None
             store._on_retired = self._collect_retired
-            self._stores[key] = store
+            receiver.recovery = None
             store._recovery = None
+            self._stores[key] = store
             self._advance(user_id)
             self._blocked.discard(user_id)
 
@@ -540,6 +548,10 @@ class WikiRegistry:
         user_id, config = permit.owner, permit.config
         with self._account_lock(user_id), self.registration_lock(user_id), self._lock:
             self._require_construction(permit)
+        # Recovery results can be reused across candidates. Ledger admission belongs to each Store.
+        with candidate.connect() as db:
+            db.execute("BEGIN")
+            job_events.require(db)
         key = (str(candidate.state.resolve()), config["vault_id"])
         if key in self._recovery_results:
             if error := self._recovery_results[key]:

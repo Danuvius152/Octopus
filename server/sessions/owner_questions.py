@@ -332,7 +332,7 @@ class OwnerQuestions:
             attempt_id=native_ref.attempt_id if native_ref else session._run.question_attempt_id,
             work_id=session._run.settlement.work_id if session._run.settlement else None,
             backend=command.backend if isinstance(command, RegisterNativeQuestion) and command.backend is not None else
-                session._run.backend if isinstance(session._run.backend, HarnessRun) else None,
+                session._run.backend,
             native_ref=command.event.native_question if isinstance(command, RegisterNativeQuestion) and command.event else None,
             interaction_policy=interaction_policy, wait_mode=wait_mode,
             snoozed=False if interaction_policy == "human" and wait_mode == "optional" else None,
@@ -550,7 +550,7 @@ class OwnerQuestions:
         execution = self.owner.runtime.current
         if backend is None and execution is not None and execution.attempt is not None:
             backend = execution.attempt.backend
-        if isinstance(backend, HarnessRun):
+        if backend is not None:
             event = backend.take_question()
             if event is not None:
                 assert event.native_question is not None

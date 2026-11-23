@@ -58,6 +58,13 @@ class SubmissionReceipt:
         return await asyncio.shield(self._completion)
 
 
+@dataclass(frozen=True, kw_only=True)
+class TemporaryScheduleReceipt(SubmissionReceipt):
+    """Only the command that created the target can join its retirement."""
+
+    retirement: asyncio.Task[None] = field(repr=False, compare=False)
+
+
 @dataclass(frozen=True)
 class ReturnTarget:
     """An independent source's captured identity, never a new caller binding."""

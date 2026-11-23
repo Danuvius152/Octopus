@@ -21,7 +21,7 @@ async def test_explicit_wiki_source_contract_reaches_the_actual_backend_input(cl
 
     def create(config):
         class Run(FakeRunBase):
-            async def start(self, prompt, *args, **kwargs):
+            async def _start(self, prompt, *args, **kwargs):
                 task = tasks.active[config.wiki_task_id]
                 observed.append((view(task).card, compose_system_prompt(
                     config.system_prompt, "", [], wiki_mode=config.wiki_mode,
@@ -31,16 +31,16 @@ async def test_explicit_wiki_source_contract_reaches_the_actual_backend_input(cl
             def set_idle_handler(self, handler):
                 pass
 
-            async def stream(self):
+            async def _stream(self):
                 yield HarnessEvent(type="result", is_error=False)
 
-            async def stop(self):
+            async def _stop_process(self):
                 pass
 
             async def interrupt(self):
                 pass
 
-        return Run()
+        return Run(backend="codex", config=config)
 
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     receipt = await manager.start_message(session.id, "/wiki Compare X and Y using relevant evidence.")

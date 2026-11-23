@@ -15,7 +15,7 @@ from server.database import Database
 from server.deps import get_session_manager
 from server.sessions import SessionManager
 from tests.accounts import create_account
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.harness_profiles import process_profile
 from tests.websocket_client import connection, frame, receipt_frame
 
@@ -28,26 +28,27 @@ def hold_model_runs(manager, monkeypatch):
 
     class Run(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.stopped = asyncio.Event()
 
         def is_alive(self):
             return not self.stopped.is_set()
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             self.prompt = prompt
             starts.put_nowait(self)
 
-        async def stream(self):
+        async def _stream(self):
             yield HarnessEvent(type="text", content="Holding the original request.")
             await self.stopped.wait()
 
-        async def stop(self):
+        async def _stop_process(self):
             self.stopped.set()
 
         async def interrupt(self):
             await self.stop()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     return starts
 
 
@@ -105,10 +106,10 @@ async def test_large_committed_answer_has_browser_preview_and_full_http_detail(r
     body_field = "input" if kind == "tool_use" else "output" if kind == "tool_result" else "content"
 
     class Run(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             pass
 
-        async def stream(self):
+        async def _stream(self):
             if kind == "delta":
                 yield HarnessEvent(type="text_delta", content=answer)
             yield HarnessEvent(type="text" if kind == "delta" else kind, content=answer if kind != "tool_use" else None,
@@ -116,13 +117,13 @@ async def test_large_committed_answer_has_browser_preview_and_full_http_detail(r
                 tool_input={"payload": answer} if kind == "tool_use" else None)
             yield HarnessEvent(type="result", session_id="large-answer-native")
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
             await self.stop()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
 
     async def observe(event):
         if event.get("type") == wire_kind:

@@ -214,6 +214,12 @@ as database state; a correct row alone does not prove notification ordering.
 | `DELETE /api/applications/{id}` | close admission, retire original work, process files, then remove the row; `keep_files=true` skips only file removal |
 | `GET /apps/{id}/{path}` | the app itself (cookie/bearer/query auth) |
 
+Creation returns the stored row at its final read, including any deletion
+marker. If the created row has already been removed, the POST returns
+`409` with `detail.code = "application_deleted_during_creation"` and
+`detail.application_id`. A live `201` can still arrive after a later removal.
+The browser settles this race through the [ApplicationList contract](frontend-list-reconciliation.md#当前接口及调用责任).
+
 ## Deletion and retry
 
 `DELETE` is a server-owned operation. Concurrent requests share cleanup; a
@@ -336,9 +342,11 @@ application conversations and an Iterate popover with the development-session
 link. The iframe does not replace ordinary chat state; chat remains mounted
 while another main view is selected. Application and session list updates use
 the [shared business reconciliation contract](frontend-list-reconciliation.md).
-Application creation freezes the complete editing form through creation and
-authoritative-list confirmation; failed confirmation offers a list refresh,
-never another creation. Cancel and navigation remain available. Iterate Enter
+Application creation freezes the complete editing form through the POST and
+its confirmation. If the status of a known ID remains unconfirmed, the form
+offers a read of that ID. When the POST outcome is unknown and no ID is
+available, the form asks the user to check the Applications list before
+trying again. Cancel and navigation remain available. Iterate Enter
 respects native IME composition before submission, draft clearing or closing.
 The shared [keyboard and view ownership](frontend-interaction-state.md#前台键盘归属)
 contract also keeps its Escape from interrupting a hidden chat.

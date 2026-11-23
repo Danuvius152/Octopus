@@ -6,6 +6,7 @@ import type { SessionInfo } from "../stores/sessionStore";
 import { applications } from "../lib/applicationList";
 import { refreshAgents } from "../lib/refreshAgents";
 import { deferred } from "../test-support/deferred";
+import producers from "../lib/wsProducerFixtures.json";
 import type { Agent } from "../stores/sessionStore";
 import { useWebSocket } from "./useWebSocket";
 
@@ -13,6 +14,62 @@ import { useWebSocket } from "./useWebSocket";
 afterEach(() => {
   useSessionStore.getState().setToken("");
   vi.useRealTimers(); vi.unstubAllGlobals();
+});
+
+it.each(["initial socket", "replacement socket", "known socket"] as const)("confirms an unseen App failure against the generation of the %s", async (connection) => {
+  vi.useFakeTimers();
+  Socket.reset(0);
+  vi.stubGlobal("WebSocket", Socket);
+  useSessionStore.setState({ ...useSessionStore.getInitialState(), token: "app-failure-bearer",
+    accountGeneration: useSessionStore.getState().accountGeneration + 1 });
+  const reads: ReturnType<typeof deferred<Response>>[] = [];
+  vi.stubGlobal("fetch", vi.fn((url: string) => {
+    if (!url.endsWith("/api/applications")) return Promise.resolve(Response.json([]));
+    const read = deferred<Response>();
+    reads.push(read);
+    return read.promise;
+  }));
+  const push = (socket: Socket, data: object) => socket.onmessage?.({ data: JSON.stringify(data) });
+  const dispatch = (socket: Socket, generation: string) => push(socket, { type: "dispatch_state", session_id: "session", dispatch_state: {
+    generation, revision: 1, paused: false, active_request_id: null, active_operation: null, items: [],
+  } });
+  const hook = renderHook(() => useWebSocket());
+  try {
+    const first = Socket.instances[0];
+    const open = async (socket: Socket) => act(async () => { socket.readyState = 1; socket.onopen?.(); });
+    await open(first);
+    let socket = first;
+    const failed = { ...producers.application_updated.application, status: "failed", pinned: false };
+    const oldFrame = { ...failed, id: "from-previous-socket" };
+    if (connection !== "initial socket") {
+      await act(async () => { dispatch(first, "previous-service"); });
+      expect(useSessionStore.getState().dispatchGeneration).toBe("previous-service");
+    }
+    if (connection === "replacement socket") {
+      await act(async () => { push(first, { type: "application_updated", application: oldFrame }); });
+      act(() => { first.readyState = 3; first.onclose?.({ code: 1013 }); vi.advanceTimersByTime(3000); });
+      socket = Socket.instances[1];
+      await open(socket);
+      expect(useSessionStore.getState().dispatchGeneration).toBe("previous-service");
+      // A callback still queued for the old socket is delivered after the replacement opened.
+      await act(async () => { push(first, { type: "application_updated", application: oldFrame }); });
+    }
+    const otherRows = connection === "replacement socket" ? [oldFrame] : [];
+    const priorRead = reads.at(-1)!;
+    const priorReadCount = reads.length;
+    await act(async () => {
+      push(socket, { ...producers.application_updated, application: failed });
+      dispatch(socket, "current-service");
+    });
+    expect(useSessionStore.getState().dispatchGeneration).toBe("current-service");
+    expect(reads).toHaveLength(priorReadCount + 1);
+    await act(async () => { priorRead.resolve(Response.json([])); });
+    expect(useSessionStore.getState().unseenFailedApplications).toEqual([]);
+    const currentRows = [failed, ...otherRows];
+    await act(async () => { reads.at(-1)!.resolve(Response.json(currentRows)); });
+    expect(useSessionStore.getState().applications).toEqual(currentRows);
+    expect(useSessionStore.getState().unseenFailedApplications).toEqual(connection === "known socket" ? [] : [failed.id]);
+  } finally { hook.unmount(); }
 });
 
 it.each([false, true])("reconnects Agent coverage lazily and retires overlapping old snapshots (All loaded=%s)", async (loaded) => {

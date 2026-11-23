@@ -7,7 +7,7 @@ import pytest
 from server.agent_manager import AgentManager
 from server.delegations import DelegationManager
 from server.harness import HarnessEvent
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.test_research_session_return import returning_research as returning_research
 
 
@@ -21,13 +21,14 @@ async def test_delegation_reply_restores_parent_and_keeps_child_for_followup(ret
     def make_run(configured, *args, **kwargs):
         class Run(FakeRunBase):
             def __init__(self):
+                super().__init__()
                 self.ready = asyncio.Event()
 
-            async def start(self, prompt, *args, **kwargs):
+            async def _start(self, prompt, *args, **kwargs):
                 self.prompt = prompt
                 self.ready.set()
 
-            async def stream(self):
+            async def _stream(self):
                 await self.ready.wait()
                 if configured.parent_session_id:
                     entered.set()
@@ -37,7 +38,7 @@ async def test_delegation_reply_restores_parent_and_keeps_child_for_followup(ret
                     processed.put_nowait(self.prompt)
                 yield HarnessEvent(type="result", is_error=False)
 
-            async def stop(self):
+            async def _stop_process(self):
                 pass
 
             async def interrupt(self):
@@ -45,7 +46,7 @@ async def test_delegation_reply_restores_parent_and_keeps_child_for_followup(ret
 
         return Run()
 
-    monkeypatch.setattr(manager, "_make_run", make_run)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(make_run))
     agent = await db.get_system_agent()
     await AgentManager(db).create_agent(name="Reviewer", user_id=agent["user_id"])
     parent = await manager.create_session(agent["id"], "Original parent")

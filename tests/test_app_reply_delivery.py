@@ -17,7 +17,7 @@ from server.harness import HarnessEvent
 from server.main import _HTTPCompression
 from server.routers import applications as routes
 from tests.app_sse import app_sse_event
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.test_session_owner_publication import notices as notices
 
 
@@ -51,13 +51,14 @@ async def reply_app(notices, tmp_path, monkeypatch):
 
     class NormalRun(FakeRunBase):
         def __init__(self, session_id):
+            super().__init__()
             self.session_id = session_id
 
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             state["starts"] += 1
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await publish.wait()
             for text in state["texts"]:
                 yield HarnessEvent(type="text", content=text)
@@ -68,11 +69,11 @@ async def reply_app(notices, tmp_path, monkeypatch):
         async def interrupt(self):
             pass
 
-        async def stop(self):
+        async def _stop_process(self):
             retiring.set()
             await release.wait()
 
-    monkeypatch.setattr(manager, "_make_run", lambda session, *args, **kwargs: NormalRun(session.id))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda session, *args, **kwargs: NormalRun(session.id)))
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
                                headers={"X-Octopus-App-Token": app_scope_token("reply-app")}) as client:

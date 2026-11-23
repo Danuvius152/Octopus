@@ -18,6 +18,7 @@ from functools import wraps
 from typing import Any
 
 from . import agent_memory
+from .agent_configuration import AgentConfigurationError
 from .aio import complete_cleanup
 from .config import settings
 from .credential_bindings import (
@@ -27,6 +28,7 @@ from .credential_bindings import (
 )
 from .database import Database
 from .harness import RunConfig, get_harness, model_settings
+from .session_operations import is_utf8_text
 
 
 def _validate_runtime_configuration(backend: str, fields: dict[str, Any]) -> None:
@@ -86,7 +88,7 @@ class AgentManager:
     async def list_agents(
         self, *, include_archived: bool = False, user_id: str | None = None
     ) -> list[dict[str, Any]]:
-        return await self.db.load_agents(
+        return await self.db.load_agents_for_display(
             include_archived=include_archived, user_id=user_id
         )
 
@@ -126,9 +128,11 @@ class AgentManager:
         name = (name or "").strip()
         if not name:
             raise AgentError("Agent name is required")
-        if await self.db.get_agent_by_name(name, user_id=user_id) is not None:
+        if not is_utf8_text(name):
+            raise AgentError("Agent name must be valid Unicode text")
+        if await self.db.find_live_agent_id(name, user_id) is not None:
             raise AgentError(f"An agent named {name!r} already exists")
-        backend = backend or settings.default_backend
+        backend = settings.default_backend if backend is None else backend
         credential_id = credential_id or None
         try:
             _validate_runtime_configuration(backend, {
@@ -165,6 +169,8 @@ class AgentManager:
                 is_system=False,
                 user_id=user_id,
             )
+        except AgentConfigurationError as exc:
+            raise AgentError(str(exc)) from exc
         except sqlite3.IntegrityError as exc:
             try:
                 await validate_failed_credential_write(
@@ -217,14 +223,16 @@ class AgentManager:
             new_name = fields["name"].strip()
             if not new_name:
                 raise AgentError("Agent name cannot be empty")
-            clash = await self.db.get_agent_by_name(
-                new_name, user_id=agent.get("user_id")
-            )
-            if clash is not None and clash["id"] != agent_id:
+            if not is_utf8_text(new_name):
+                raise AgentError("Agent name must be valid Unicode text")
+            clash = await self.db.find_live_agent_id(new_name, agent.get("user_id"))
+            if clash is not None and clash != agent_id:
                 raise AgentError(f"An agent named {new_name!r} already exists")
             fields["name"] = new_name
         try:
             await self.db.update_agent(agent_id, **fields)
+        except AgentConfigurationError as exc:
+            raise AgentError(str(exc)) from exc
         except sqlite3.IntegrityError as exc:
             try:
                 await validate_failed_credential_write(
@@ -238,7 +246,7 @@ class AgentManager:
         return updated
 
     async def archive_agent(self, agent_id: str) -> None:
-        agent = await self.db.get_agent(agent_id)
+        agent = await self.db.get_agent_identity(agent_id)
         if agent is None:
             raise AgentError("Agent not found")
         if agent["is_system"]:
@@ -257,10 +265,8 @@ class AgentManager:
             raise AgentError("Agent not found")
         if not agent["archived"]:
             return agent
-        clash = await self.db.get_agent_by_name(
-            agent["name"], user_id=agent.get("user_id")
-        )
-        if clash is not None and clash["id"] != agent_id:
+        clash = await self.db.find_live_agent_id(agent["name"], agent.get("user_id"))
+        if clash is not None and clash != agent_id:
             raise AgentError(
                 f"An agent named {agent['name']!r} already exists — rename it "
                 f"before restoring this one"
@@ -298,23 +304,17 @@ class AgentManager:
 
     async def reorder_pins(
         self, ordered_ids: list[str], user_id: str | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Set the sidebar order of the pinned agents; returns every live
         agent. Every id must name a pinned, live agent of this account's,
         once — an id from another account is "not a pinned agent" rather than
         a row this reorders."""
         if len(set(ordered_ids)) != len(ordered_ids):
             raise AgentError("An agent appears twice in the order")
-        pinned = {
-            a["id"]
-            for a in await self.db.load_agents(user_id=user_id)
-            if a["pinned"]
-        }
-        stray = [i for i in ordered_ids if i not in pinned]
-        if stray:
-            raise AgentError(f"Not a pinned agent: {', '.join(stray)}")
-        await self.db.reorder_agent_pins(ordered_ids)
-        return await self.db.load_agents(user_id=user_id)
+        try:
+            return await self.db.reorder_agent_pins(ordered_ids, user_id=user_id)
+        except ValueError as exc:
+            raise AgentError(str(exc)) from exc
 
     @_memory_mutation
     async def delete_agent(

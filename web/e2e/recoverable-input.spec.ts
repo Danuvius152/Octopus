@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test } from "./test";
 import { enterAccountCredentials } from "./current-account";
 
@@ -17,7 +18,7 @@ test("saved input survives a page reload and only executes after an explicit new
     else if (path === "/api/auth/login") data = { token: "browser-token" };
     else if (path === "/api/auth/identity") data = { user_id: "browser-user", label: "Operator", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}`) data = { ...session, messages: [], pending_questions: [], subagents: [],
       next_message_seq: 0, has_more_messages: false, dispatch_state: { generation: "restarted-service", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] } };

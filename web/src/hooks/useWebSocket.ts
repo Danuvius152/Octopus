@@ -13,8 +13,9 @@ import { modelCredentials } from "../lib/modelCredentials";
 import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
-import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
+import { useSessionStore } from "../stores/sessionStore";
 import { readAttemptIdentity, sameAttempt } from "../lib/toolIdentity";
+import type { DispatchState } from "../lib/sessionDispatch";
 
 const WS_PROTOCOL = window.location.protocol === "https:" ? "wss:" : "ws:";
 const WS_URL = `${WS_PROTOCOL}//${window.location.host}/ws`;
@@ -71,11 +72,15 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
   } = getState();
   const sessionId = data.session_id ?? "";
   const type = data.type;
+  const applySocketDispatchState = (id: string, snapshot: DispatchState | undefined) => {
+    applyDispatchState(id, snapshot);
+    if (source && snapshot) applications.observeSocketGeneration(source, snapshot.generation);
+  };
   if (type === "session_archived" || type === "session_unarchived") {
     const id = data.type === "session_archived" ? data.old_session_id : sessionId;
     const snapshot = data.dispatch_state;
     if (snapshot) {
-      getState().applyDispatchState(id, snapshot);
+      applySocketDispatchState(id, snapshot);
       const state = getState();
       if (state.dispatchGeneration !== snapshot.generation) return;
       const previous = state.sessionMembership[id];
@@ -126,18 +131,18 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
       break;
 
     case "dispatch_state":
-      applyDispatchState(sessionId, data.dispatch_state);
+      applySocketDispatchState(sessionId, data.dispatch_state);
       break;
 
     case "recording_failed":
       clearStreamingText(sessionId, readAttemptIdentity(data));
-      applyDispatchState(sessionId, data.dispatch_state);
+      applySocketDispatchState(sessionId, data.dispatch_state);
       addMessage(sessionId, { role: "system", type: "notice", content: data.message ?? "Result recording could not be confirmed. Inspect the recorded messages in this conversation." });
       break;
 
     case "queued":
     case "dequeued":
-      applyDispatchState(sessionId, data.dispatch_state);
+      applySocketDispatchState(sessionId, data.dispatch_state);
       break;
 
     case "delivery_notice":
@@ -425,47 +430,8 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
     }
 
     case "session_archived": {
-      // Publish archive facts only. The initiating HTTP interaction owns
-      // navigation; another tab retains its current foreground and history.
-      const oldId = data.old_session_id;
-      // null = the session was hidden with no replacement (a scheduler-origin
-      // session auto-archiving on idle, or an agent being archived).
-      const newId = data.new_session_id;
-      const name = data.name ?? "";
-      const settings = {
-        model: data.model ?? null,
-        reasoning_effort: data.reasoning_effort ?? null,
-        service_tier: data.service_tier ?? null,
-      };
-      const store = getState();
-      const rows = [...store.sessions, ...store.archivedSessions];
-      const prev = rows.find((s) => s.id === oldId);
-      const known = rows.find((s) => s.id === newId);
-      const replacement: SessionInfo | undefined = !newId ? undefined : known ? { ...known, ...settings } : {
-          id: newId,
-          name,
-          working_dir: prev?.working_dir ?? "",
-          status: "idle",
-          created_at: new Date().toISOString(),
-          message_count: 0,
-          transcript_integrity: "ok",
-          claude_session_id: null,
-          credential_id: prev?.credential_id ?? null,
-          agent_id: prev?.agent_id ?? null,
-          origin: prev?.origin ?? "user",
-          backend: prev?.backend ?? "claude-code",
-          ...settings,
-          can_fork: prev?.can_fork ?? true,
-          // Carried from the session it replaces: same agent, same backend,
-          // so the same harness capability.
-          can_steer: prev?.can_steer ?? false,
-          can_observe_context: prev?.can_observe_context ?? false,
-          can_compact: false,
-          compact_unavailable_reason: "No resumable native history is available to compact.",
-          fork_is_full_copy: false,
-          archived: false,
-        };
-      sessionList.archive(oldId, undefined, replacement, newId, data.archive_result);
+      const successorId = data.new_session_id === undefined ? data.archive_result?.new_session_id : data.new_session_id;
+      sessionList.archive(data.old_session_id, undefined, successorId, data.archive_result, data);
       break;
     }
     case "session_forked": {

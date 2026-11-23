@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { enterAccountCredentials } from "./current-account";
 import { expect, test } from "./test";
 
@@ -19,7 +20,7 @@ test("returning to a session shares its pending detail, BG, Research and delegat
     else if (path === "/api/auth/login") data = { token: "navigation-token" };
     else if (path === "/api/auth/identity") data = { user_id: "navigation-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [agent];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = sessions;
     else {
       const session = sessions.find(({ id }) => suffixes.some((suffix) => path === `/api/sessions/${id}${suffix}`));

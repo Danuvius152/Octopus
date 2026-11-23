@@ -37,7 +37,6 @@ async def _io(function, *args):
 
 def _pending(jobs, cursor):
     with jobs.store.connect() as db:
-        job_events.require(db)
         after, through = cursor if cursor else (None, db.execute("SELECT coalesce(max(rowid),0) FROM wiki_job_outbox").fetchone()[0])
         deliveries = job_events.pending(db, after=after, through=through)
         if not deliveries and after is not None:

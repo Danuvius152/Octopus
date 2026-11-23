@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test } from "./test";
 import { enterAccountCredentials } from "./current-account";
 
@@ -13,7 +14,7 @@ test("hidden reasoning leaves no virtual-list spacing after history reload", asy
     else if (path === "/api/auth/login") data = { token: "spacing-token" };
     else if (path === "/api/auth/identity") data = { user_id: "spacing-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}`) data = { ...session,
       messages: [

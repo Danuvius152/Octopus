@@ -12,6 +12,7 @@ from server.harness import HarnessEvent, get_harness
 from server.harness.claude_code import ClaudeDriver
 from server.sessions.owner import SessionMailboxFull
 from tests import test_question_lifecycle as question_tests
+from tests.fake_run import model_run_factory
 from tests.harness_profiles import process_profile
 
 QUESTIONS = question_tests.QUESTIONS
@@ -107,7 +108,7 @@ async def test_native_question_prefix_precedes_the_original_success_receipt(ques
             await release.wait()
 
     manager.on_broadcast("hold-native-prefix", hold_native_prefix)
-    monkeypatch.setattr(manager, "_make_run", lambda *_args, **_kwargs: run)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *_args, **_kwargs: run))
     receipt = await manager.start_message(session.id, "Keep the native question in its original prefix")
     waiting = asyncio.create_task(receipt.wait())
     try:
@@ -138,7 +139,7 @@ async def test_question_control_has_entry_when_ordinary_command_capacity_is_full
     receipt = None
 
     class HeldNativeRun(question_tests.EarlyFinishRun):
-        async def stream(self):
+        async def _stream(self):
             yield HarnessEvent(type="text", content="The original reader is ready.")
             native_ready.set()
             await allow_native.wait()
@@ -154,7 +155,7 @@ async def test_question_control_has_entry_when_ordinary_command_capacity_is_full
     else:
         run = HeldNativeRun()
         manager.on_broadcast("native-capacity-observer", observe_native)
-        monkeypatch.setattr(manager, "_make_run", lambda *_args, **_kwargs: run)
+        monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *_args, **_kwargs: run))
         receipt = await manager.start_message(session.id, "Retain the original native observation")
         await asyncio.wait_for(native_ready.wait(), 1)
     entered, release, queued_entered, queued_release = (asyncio.Event() for _ in range(4))

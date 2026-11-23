@@ -246,8 +246,8 @@ class UserManager:
         from .workspace import paths_for
 
         paths_for(user_id).ensure()
-        for agent in await self.db.load_agents(include_archived=True, user_id=user_id):
-            ensure_agent_dirs(agent["id"], user_id)
+        for agent_id in await self.db.list_account_agent_ids(user_id):
+            ensure_agent_dirs(agent_id, user_id)
 
     async def setup(self, *, username: str, password: str) -> dict[str, Any]:
         """One first account; the write transaction arbitrates across connections."""

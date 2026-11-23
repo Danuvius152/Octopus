@@ -10,6 +10,7 @@ from .session_operations import (
     MessageOperation,
     OperationKind,
     SessionOperation,
+    Utf8Text,
 )
 
 
@@ -43,22 +44,26 @@ class CompactInProgress(ValueError):
 class ClientSubmissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    client_request_id: str = Field(min_length=1, max_length=128)
-    content: str = ""
-    attachment_ids: list[str] = Field(default_factory=list)
+    client_request_id: Utf8Text = Field(min_length=1, max_length=128)
+    content: Utf8Text = ""
+    attachment_ids: list[Utf8Text] = Field(default_factory=list)
     wiki_mode: Literal["auto", "read", "maintain"] | None = None
-    recovery_of_client_id: str | None = Field(default=None, min_length=1, max_length=128)
+    recovery_of_client_id: Utf8Text | None = Field(default=None, min_length=1, max_length=128)
     operation: SessionOperation | None = None
 
     @model_validator(mode="after")
     def validate_operation(self) -> "ClientSubmissionRequest":
-        if self.operation is not None:
+        operation = self.operation
+        if operation is not None:
             if self.model_fields_set & {"content", "attachment_ids", "wiki_mode"}:
                 raise ValueError("Supply either an operation or message fields")
-            if self.operation.kind == "compact" and self.recovery_of_client_id is not None:
-                raise ValueError("Compaction cannot replay a recovered input")
-        elif "content" not in self.model_fields_set:
-            raise ValueError("Supply an operation or message content")
+            if operation.kind == "compact":
+                if self.recovery_of_client_id is not None:
+                    raise ValueError("Compaction cannot replay a recovered input")
+                return self
+        message = operation if operation is not None else self
+        if not message.content.strip() and not message.attachment_ids:
+            raise ValueError("Supply message content or attachments")
         return self
 
     def session_operation(self) -> MessageOperation | CompactOperation:

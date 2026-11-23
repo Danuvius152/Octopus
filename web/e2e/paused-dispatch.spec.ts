@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { accountToken, enterAccountCredentials } from "./current-account";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { systemAgentId } from "./system-agent";
@@ -48,7 +49,7 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
     else if (path === "/api/auth/login") data = { token: "browser-token" };
     else if (path === "/api/auth/identity") data = { user_id: "browser-user", label: "Operator", is_admin: true };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", is_system: true, pinned: true, archived: false }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [{ ...session, status: phase === "initial" || phase === "correcting" || phase === "resumed" ? "running" : "idle" }];
     else if (path === `/api/sessions/${session.id}`) data = {
       ...session, status: phase === "initial" || phase === "correcting" || phase === "resumed" ? "running" : "idle",

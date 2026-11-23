@@ -31,7 +31,7 @@ from server.routers import connectors as connectors_router
 from server.session_manager import session_manager
 from server.users import UserManager
 from server.workspace import WorkspaceError, paths_for
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 
 def held_model_runs(monkeypatch):
@@ -40,28 +40,29 @@ def held_model_runs(monkeypatch):
 
     class Run(FakeRunBase):
         def __init__(self, session_id):
+            super().__init__()
             self.session_id = session_id
             self.stopped = asyncio.Event()
 
         def is_alive(self):
             return not self.stopped.is_set()
 
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             self.prompt = prompt
             starts.put_nowait(self)
 
-        async def stream(self):
+        async def _stream(self):
             await self.stopped.wait()
             if False:
                 yield
 
-        async def stop(self):
+        async def _stop_process(self):
             self.stopped.set()
 
         async def interrupt(self):
             await self.stop()
 
-    monkeypatch.setattr(session_manager, "_make_run", lambda session, *args, **kwargs: Run(session.id))
+    monkeypatch.setattr(session_manager, "_make_run", model_run_factory(lambda session, *args, **kwargs: Run(session.id)))
     return starts
 
 
@@ -818,7 +819,7 @@ async def test_nobody_can_rename_pin_or_restore_someone_elses_agent(two_accounts
 @pytest.mark.asyncio
 async def test_two_accounts_can_both_create_the_same_custom_agent_name(two_accounts):
     """Agent names are unique per account, like application names — the index
-    says so, and `get_agent_by_name` has to agree or the second person to want
+    says so, and the name check has to agree or the second person to want
     a custom agent is told somebody else already has one. Both accounts
     already have their own protected default agent."""
     ctx = two_accounts

@@ -337,8 +337,17 @@ pending。冷恢复在同 vault/服务代串行进行，注册变更等待旧构
 Registry 统一 Store 创建、注册、冷恢复与准入。新注册只在完整账本和 filesystem
 binding 持久化后发布配置；已有配置丢失账本时保留配置与正文并关闭写入，不自动
 建库、重造身份。原注册命令重入先验证已有 binding。一次 Construction 使用尚未
-公开的候选 Store 完成 observer → history → 索引 → job 恢复，再公开对象；普通
-请求不反向触发恢复，不增加独立 recovered 标记或常驻恢复循环。
+公开的候选 Store。Registry 在 history、索引与 job 恢复前核验作业账本的结构、协议、
+触发器和每个 job 的状态行。复用同 vault 恢复结果的候选也须通过本次核验才可发布。
+已发布 Store 的普通请求沿当前代次接纳。
+
+文件恢复用专用 Store 提交完成回执。Registry 在原 observer 的接收锁内核对本次回执、
+接收状态和同一作业账本。读事务结束后，原 receiver 接完待处理事件，Registry 确认根代次，
+再把 receiver 和 Store 转入普通准入。交接期间换根或根暂时离线会保留失信证据，
+供账户所有者重新规划。
+核验失败时，恢复状态入口继续提供原回执，原 receiver 和专用 Store 继续由恢复持有，
+普通查阅、作业接纳及轮询保持关闭。修复后可用原请求重试其回执交接。较早完成回执的
+重试只读原回执，不能发布另一轮恢复。
 
 health 只在冷生命周期绑定；换代前关闭准入并确认 constructor、receiver、Store
 退出。旧 observer/journal 不静默接到新 health。存储层隐藏实际连接的持久性设置

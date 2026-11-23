@@ -15,7 +15,7 @@ from server.harness.claude_code import ClaudeDriver
 from server.sessions import SessionManager
 from tests.accounts import create_account
 from tests.app_sse import app_sse_event
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.harness_profiles import process_profile
 
 
@@ -45,25 +45,26 @@ async def test_app_waits_for_its_request_after_prioritized_human_correction(runt
 
     class Run(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.started = asyncio.Event()
 
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             self.prompt = prompt
             self.started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await self.started.wait()
             seen.append(self.prompt)
             yield HarnessEvent(type="text", content=self.prompt)
             yield HarnessEvent(type="result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
             pass
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     apps = AppAgentManager()
     apps.bind(manager, db, None)
     try:
@@ -99,17 +100,18 @@ async def test_app_wrappers_preserve_only_the_original_first_line_selection(runt
 
     class Run(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.started = asyncio.Event()
             self.wiki_task_id = None
 
         def bind_wiki_task(self, task_id):
             self.wiki_task_id = task_id
 
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             self.prompt = prompt
             self.started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await self.started.wait()
             task = tasks.active[self.wiki_task_id]
             assert task.request == request
@@ -121,13 +123,13 @@ async def test_app_wrappers_preserve_only_the_original_first_line_selection(runt
             yield HarnessEvent(type="text", content="Own reply")
             yield HarnessEvent(type="result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
             pass
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     row = {"id": "reader", "name": "Reader", "agent_id": agent["id"], "user_id": agent["user_id"], "app_dir": str(root / "reader")}
     await db.save_application(app_id=row["id"], name=row["name"], app_dir=row["app_dir"],
                               agent_id=agent["id"], user_id=agent["user_id"],
@@ -160,25 +162,26 @@ async def test_capacity_release_after_retirement_wakes_other_account_queue(runti
 
     class Run(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.ready = asyncio.Event()
             self.retired = asyncio.Event()
             self.prompt = None
             self.alive = False
             self.stops = 0
 
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             self.prompt = prompt
             self.alive = True
             self.ready.set()
 
-        async def stream(self):
+        async def _stream(self):
             await self.ready.wait()
             started.put_nowait(self.prompt)
             if self.prompt == "A":
                 await run_hold.wait()
             yield HarnessEvent(type="result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             self.stops += 1
             if self.prompt == "A":
                 stop_entered.set()
@@ -197,7 +200,7 @@ async def test_capacity_release_after_retirement_wakes_other_account_queue(runti
         runs.append(run)
         return run
 
-    monkeypatch.setattr(manager, "_make_run", make_run)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(make_run))
     retirement = None
     try:
         original = await manager.start_message(a.id, "A")

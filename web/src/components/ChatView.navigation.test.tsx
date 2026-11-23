@@ -26,7 +26,7 @@ beforeEach(() => {
   useSessionStore.getState().setToken("navigation-test");
   useSessionStore.getState().setIdentity({ user_id: "navigation-owner", label: "Navigation owner", is_admin: false });
   useSessionStore.setState({ activeSessionId: a.id, activeAgentId: "agent", mainView: "chat",
-    sessions: [a, b], archivedSessions: [], agents: [], credentials: [], backendModels: {},
+    sessions: [a, b], archivedSessions: [], agents: [], credentials: [],
     messages: {}, streamingText: {}, lastAppliedSeq: {}, oldestSeq: {}, hasMoreMessages: {},
     pendingQuestions: {}, closedQuestionIds: {}, subagents: {}, wikiJobs: {}, pendingForks: {},
     dispatchUnavailable: {}, dispatchStates: { a: dispatch, b: dispatch },
@@ -36,7 +36,8 @@ beforeEach(() => {
 afterEach(() => { cleanup(); useSessionStore.getState().setToken(""); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it.each(["application", "schedules"] as const)("archive broadcasts preserve %s foreground and existing successor content", async (mainView) => {
-  server();
+  const api = server();
+  api.setRows([b, child, { ...a, archived: true }]);
   mount();
   const message = { role: "assistant" as const, type: "text" as const, seq: 10, content: "Successor already has a reply" };
   const activeApplicationId = mainView === "application" ? "selected-app" : null;
@@ -44,7 +45,7 @@ it.each(["application", "schedules"] as const)("archive broadcasts preserve %s f
     messages: { child: [message] }, pendingQuestions: { child: [{ question_id: "question", questions: [{ question: "Choose" }] }] },
   }));
   const questions = useSessionStore.getState().pendingQuestions.child;
-  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  await act(async () => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
   const state = useSessionStore.getState();
   expect(state.sessions.map((row) => row.id)).toEqual([b.id, child.id]);
   expect(state.archivedSessions.map((row) => row.id)).toEqual([a.id]);
@@ -54,15 +55,36 @@ it.each(["application", "schedules"] as const)("archive broadcasts preserve %s f
 });
 
 it("keeps archived history in a receiving tab and offers its explicit successor", async () => {
-  server();
+  const api = server();
+  api.setRows([b, child, { ...a, archived: true }]);
   useSessionStore.setState({ messages: { a: [{ role: "assistant", type: "text", seq: 1, content: "Original history" }] } });
   mount();
   fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
-  act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  await act(async () => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   await waitFor(() => expect(screen.getByText("Original history")).toBeVisible());
   expect(screen.queryByRole("textbox")).toBeNull();
   expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+});
+
+it("keeps an already deleted successor unavailable when its delayed archive broadcast cannot be confirmed", async () => {
+  const api = server();
+  useSessionStore.setState({ sessions: [a, b, child] });
+  mount();
+  act(() => handleWsMessage({ type: "session_deleted", session_id: child.id }));
+  api.failList(true);
+  await act(async () => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
+  expect(screen.queryByRole("button", { name: "Open successor" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Check successor" })).toBeVisible();
+  expect(useSessionStore.getState().sessionRead.error).toContain("HTTP 503");
+  expect(useSessionStore.getState().activeSessionId).toBe(a.id);
+
+  api.failList(false);
+  api.setRows([b, { ...a, archived: true }]);
+  await act(async () => { await sessions.refresh(true); });
+  expect(useSessionStore.getState().sessionSuccessors[a.id]).toBeUndefined();
+  expect(screen.queryByRole("button", { name: "Open successor" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Check successor" })).toBeNull();
 });
 
 it("keeps existing list order when an archive broadcast is duplicated", () => {
@@ -132,6 +154,7 @@ function server() {
   return {
     fetcher,
     setRows: (next: SessionInfo[]) => { rows = next; },
+    commit: () => { saved = true; },
     failList: (fail: boolean) => { listFailure = fail; },
     complete: async (response?: Response) => { saved = true; await act(async () => finish(response ?? Response.json(result))); },
     loseResponse: async () => { saved = true; await act(async () => fail(new TypeError("Network connection lost"))); },
@@ -226,6 +249,7 @@ it.each([["lost", 200], ["lost", 503], ["201", 200], ["201", 503]] as const)(
     mount();
     api.holdDetail(child.id);
     command("/archive");
+    api.commit();
     act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }, source));
     if (receipt === "lost") await api.loseResponse();
     else await api.complete(Response.json({ ...child, forked_from_session_id: null, fork_prefilled_prompt: null }, { status: 201 }));
@@ -715,7 +739,7 @@ it("shows shared archive activity while the local HTTP headers are pending", asy
     name: child.name, archive_result }));
   expect(screen.getByRole("alert")).toHaveTextContent("Session archived");
   expect(screen.getByRole("alert")).toHaveTextContent("Inherited model could not be saved");
-  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Check successor" })).toBeVisible();
   await api.loseResponse();
   expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
   expect(screen.getByRole("alert")).toHaveTextContent("Inherited model could not be saved");
@@ -827,7 +851,7 @@ it("shows partial archive activity after a lost POST's GET has confirmed only th
       failure_stage: "schedule_rebinding", message: "Late schedule failure" } }));
   expect(screen.getByRole("alert")).toHaveTextContent("Late schedule failure");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
-  expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
+  expect(await screen.findByRole("button", { name: "Open successor" })).toBeVisible();
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
 
@@ -1033,7 +1057,10 @@ it.each((["archive", "rewind"] as const).flatMap((mode) =>
   mount();
   await launch(mode);
   const event = { type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name };
-  if (order === "ws-first") act(() => handleWsMessage(event));
+  if (order === "ws-first") {
+    api.commit();
+    act(() => handleWsMessage(event));
+  }
   await api.complete();
   act(() => { handleWsMessage(event); handleWsMessage(event); });
   await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
@@ -1105,7 +1132,7 @@ it("confirms and opens a known successor through normal selection", async () => 
   api.setRows([b, child, { ...a, archived: true }]);
   mount();
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
-  fireEvent.click(screen.getByRole("button", { name: "Open successor" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open successor" }));
   await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
   await waitFor(() => expect(useSessionStore.getState().messages.child?.[0].content).toBe("Result original message"));
   expect(api.fetcher.mock.calls.some(([url]) => new URL(url).searchParams.get("include_archived") === "true")).toBe(true);
@@ -1208,11 +1235,11 @@ it("keeps a failed confirmation readable and retries only the read", async () =>
   api.failList(true);
   mount();
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name }));
-  fireEvent.click(screen.getByRole("button", { name: "Open successor" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check successor" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Could not load sessions (HTTP 503)");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   api.failList(false);
-  fireEvent.click(screen.getByRole("button", { name: "Open successor" }));
+  fireEvent.click(screen.getByRole("button", { name: "Check successor" }));
   await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(child.id));
   expect(api.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 });
@@ -1223,7 +1250,7 @@ it.each(["restore", "restore-and-archive", "delete-target", "leave-return", "con
     api.setRows([b, child, { ...a, archived: true }]);
     mount();
     const event = { type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name };
-    act(() => handleWsMessage(event));
+    await act(async () => handleWsMessage(event));
     api.holdList();
     fireEvent.click(screen.getByRole("button", { name: "Open successor" }));
     await waitFor(() => expect(api.listPending()).toBe(true));
@@ -1257,7 +1284,7 @@ it("opens the direct successor's archived history without following its own succ
   api.setRows([b, grandchild, { ...a, archived: true }, { ...child, archived: true }]);
   mount();
   const event = { type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name };
-  act(() => {
+  await act(async () => {
     handleWsMessage(event);
     handleWsMessage({ type: "session_archived", old_session_id: child.id, new_session_id: grandchild.id, name: grandchild.name });
     handleWsMessage(event);

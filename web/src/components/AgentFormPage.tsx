@@ -8,6 +8,7 @@ import { openAgentChat } from "../lib/openAgentChat";
 import { pinnedInOrder } from "../lib/sidebarPins";
 import { knownAgentScope, refreshAgents, withAgentRequest } from "../lib/refreshAgents";
 import { agentRequestIsCurrent } from "../lib/agentUpdates";
+import { backendLabel, useBackendCatalog } from "../hooks/useBackendCatalog";
 import { useModelSettings } from "../hooks/useModelSettings";
 import {
   useSessionStore,
@@ -15,6 +16,7 @@ import {
   type PageTab,
   type SubagentDefinition,
 } from "../stores/sessionStore";
+import { BackendCatalogStatus } from "./BackendCatalogStatus";
 import { EmojiPicker } from "./EmojiPicker";
 import { ItemLibrary, type LibraryItem } from "./ItemLibrary";
 import { PageHeader } from "./PageHeader";
@@ -124,9 +126,8 @@ function AgentFormInstance({
   const editingAgentId = useSessionStore((s) => s.editingAgentId);
   const credentials = useSessionStore((s) => s.credentials);
   const installations = useSessionStore((s) => s.connectorInstallations);
-  const availableBackends = useSessionStore((s) => s.availableBackends);
-  const defaultBackend = useSessionStore((s) => s.defaultBackend);
-  const backendToolPolicies = useSessionStore((s) => s.backendToolPolicies);
+  const backendRead = useBackendCatalog();
+  const engineCatalog = backendRead.status === "ready" ? backendRead.catalog : undefined;
   const showChat = useSessionStore((s) => s.showChat);
   const openAgentForm = useSessionStore((s) => s.openAgentForm);
   const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
@@ -157,7 +158,7 @@ function AgentFormInstance({
     description: editing?.description ?? "",
     avatar: editing?.avatar ?? "",
     systemPrompt: editing?.system_prompt ?? "",
-    backend: editing?.backend ?? defaultBackend,
+    backend: editing?.backend ?? "",
     credentialId: editing?.credential_id ?? "",
     model: editing?.model ?? "",
     reasoningEffort: editing?.reasoning_effort ?? "",
@@ -170,16 +171,16 @@ function AgentFormInstance({
   const [description, setDescription] = useState(initialDraft.description);
   const [avatar, setAvatar] = useState(initialDraft.avatar);
   const [systemPrompt, setSystemPrompt] = useState(initialDraft.systemPrompt);
-  const [backend, setBackend] = useState(initialDraft.backend);
-  const backendChosen = useRef(false);
+  const [backendChoice, setBackendChoice] = useState(initialDraft.backend);
+  const backend = backendChoice || (editingAgentId ? "" : engineCatalog?.default ?? "");
   const [credentialId, setCredentialId] = useState(initialDraft.credentialId);
   const [model, setModel] = useState(initialDraft.model);
   const [reasoningEffort, setReasoningEffort] = useState(initialDraft.reasoningEffort);
   const [serviceTier, setServiceTier] = useState(initialDraft.serviceTier);
-  const { catalog, error: catalogError } = useModelSettings(backend, credentialId, tab === "form");
+  const { catalog, error: catalogError } = useModelSettings(backend, credentialId, tab === "form" && !!backend);
   const [toolAllow, setToolAllow] = useState(initialDraft.toolAllow);
   const [toolDeny, setToolDeny] = useState(initialDraft.toolDeny);
-  const toolPolicy = backendToolPolicies[backend];
+  const toolPolicy = engineCatalog?.tool_policy[backend];
   const [connectorBindings, setConnectorBindings] = useState<ConnectorBindingRead>({ status: "loading" });
   const [connectorEdits, setConnectorEdits] = useState<Record<string, ConnectorBindingEdit | undefined>>({});
   const pendingConnectors = useRef(new Set<string>());
@@ -200,12 +201,6 @@ function AgentFormInstance({
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   };
-
-  // The install preference may finish loading after the form opens. Apply it
-  // to a new draft, preserving a backend the user has already chosen.
-  useEffect(() => {
-    if (!editingAgentId && !backendChosen.current && !saving.current) setBackend(defaultBackend);
-  }, [defaultBackend, editingAgentId]);
 
   useEffect(() => {
     if (!editingAgentId || connectorBindings.status !== "loading" || !isCurrent()) return;
@@ -233,12 +228,12 @@ function AgentFormInstance({
   }, [tab, token]);
 
   const save = async () => {
-    if (!isCurrent() || useSessionStore.getState().pageTab !== "form" || !name.trim() || saving.current) return;
+    if (!isCurrent() || useSessionStore.getState().pageTab !== "form" || !name.trim() || !backend || saving.current) return;
     for (const [field, value, supported] of [
       ["tool_allow", toolAllow, toolPolicy?.allow],
       ["tool_deny", toolDeny, toolPolicy?.deny],
     ] as const) {
-      if (value.trim() && !supported) {
+      if (value.trim() && supported === false) {
         setError(`${backend} cannot enforce ${field}. Clear this policy or select a backend that supports it.`);
         return;
       }
@@ -454,6 +449,7 @@ function AgentFormInstance({
   };
 
   const backendCreds = credentials.filter((c) => c.backend === backend);
+  const engineOptions = engineCatalog?.supported ?? (backend ? [backend] : []);
 
   return (
     <div className="agent-form-page agent-settings flex min-h-0 flex-1 flex-col">
@@ -496,7 +492,7 @@ function AgentFormInstance({
                   className="btn-agent-save"
                   size="sm"
                   onClick={save}
-                  disabled={busy || !name.trim()}
+                  disabled={busy || !name.trim() || !backend}
                 >
                   {editingAgentId ? "Save Agent" : "Create Agent"}
                 </Button>
@@ -597,9 +593,9 @@ function AgentFormInstance({
                     </span>
                   </Label>
                   <div className="agent-backend-select grid grid-cols-2 gap-3" role="radiogroup">
-                    {["claude-code", "codex"].map((b) => {
+                    {engineOptions.map((b) => {
                       const picked = backend === b;
-                      const usable = availableBackends.includes(b);
+                      const detected = engineCatalog?.available.includes(b);
                       return (
                         <button
                           key={b}
@@ -608,11 +604,11 @@ function AgentFormInstance({
                             picked
                               ? "border-primary-200 bg-primary-50"
                               : "border-gray-400 hover:bg-gray-50"
-                          } ${usable ? "" : "opacity-50"}`}
+                          }`}
+                          disabled={!engineCatalog}
                           onClick={() => {
-                            backendChosen.current = true;
+                            setBackendChoice(b);
                             if (b !== backend) {
-                              setBackend(b);
                               setCredentialId("");
                               setModel("");
                               setReasoningEffort("");
@@ -621,12 +617,11 @@ function AgentFormInstance({
                           }}
                           role="radio"
                           aria-checked={picked}
-                          title={usable ? undefined : `${b} is not installed here`}
                         >
                           <span className="flex items-center gap-2">
                             <span
                               className={`inline-block size-1.5 rounded-full ${
-                                usable ? "bg-success" : "bg-gray-500"
+                                detected ? "bg-success" : "bg-gray-500"
                               }`}
                             />
                             <span
@@ -634,21 +629,27 @@ function AgentFormInstance({
                                 picked ? "font-semibold text-primary" : "text-gray-900"
                               }`}
                             >
-                              {b === "claude-code" ? "Claude Code" : "Codex"}
+                              {backendLabel(b)}
                             </span>
                           </span>
+                          {detected === false && <span className="text-xs text-muted-foreground">CLI not detected</span>}
                         </button>
                       );
                     })}
                   </div>
+                  <BackendCatalogStatus read={backendRead} />
                   <select
                     id="agent-credential"
                     className="agent-credential-select mt-1 h-9 w-full rounded-lg border border-gray-400 bg-card px-3 text-[13.5px] text-gray-900 outline-none transition-colors focus:border-primary focus:ring-[3px] focus:ring-primary/10"
                     value={credentialId}
                     onChange={(e) => setCredentialId(e.target.value)}
                     aria-label="Credential"
+                    disabled={!backend}
                   >
                     <option value="">Host default sign-in</option>
+                    {credentialId && !backendCreds.some((c) => c.id === credentialId) && (
+                      <option value={credentialId}>Saved credential</option>
+                    )}
                     {backendCreds.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.label}
@@ -658,7 +659,7 @@ function AgentFormInstance({
                   <Label htmlFor="agent-model">Model</Label>
                   <Input
                     id="agent-model" list="agent-model-options" value={model}
-                    onChange={(e) => setModel(e.target.value)} disabled={busy}
+                    onChange={(e) => setModel(e.target.value)} disabled={busy || !backend}
                     placeholder={`CLI default${catalog?.default_model ? ` (${catalog.default_model})` : ""}`}
                   />
                   <datalist id="agent-model-options">
@@ -753,9 +754,9 @@ function AgentFormInstance({
                     )}
                   </div>
                   <p className="text-xs text-gray-700">
-                    {backend === "codex"
-                      ? "These switches select Octopus connectors. Codex can also load native MCP servers from its own configuration."
-                      : "These switches select Octopus connectors. Claude uses the MCP configuration supplied for this invocation."}
+                    These switches select Octopus connectors.
+                    {backend === "codex" && " Codex can also load native MCP servers from its own configuration."}
+                    {backend === "claude-code" && " Claude uses the MCP configuration supplied for this invocation."}
                   </p>
                 </div>
               </div>
@@ -778,7 +779,9 @@ function AgentFormInstance({
                     placeholder="allow (one per line) — empty allows everything"
                   />
                   <p id="agent-tool-allow-help" className="text-xs text-gray-700">
-                    {toolPolicy?.allow ? "Only the listed tools are allowed." : "This engine does not support a tool allow list. Clear any saved value before saving or running."}
+                    {toolPolicy?.allow ? "Only the listed tools are allowed."
+                      : toolPolicy ? "This engine does not support a tool allow list. Clear any saved value before saving or running."
+                      : "Engine tool policy details are unavailable."}
                   </p>
                 </div>
                 <div className="space-y-2">
@@ -795,7 +798,9 @@ function AgentFormInstance({
                     placeholder="deny (one per line)"
                   />
                   <p id="agent-tool-deny-help" className="text-xs text-gray-700">
-                    {toolPolicy?.deny ? "Uses the engine's native deny rules, including MCP tool patterns." : "This engine does not support tool deny rules. Clear any saved value before saving or running."}
+                    {toolPolicy?.deny ? "Uses the engine's native deny rules, including MCP tool patterns."
+                      : toolPolicy ? "This engine does not support tool deny rules. Clear any saved value before saving or running."
+                      : "Engine tool policy details are unavailable."}
                   </p>
                 </div>
               </div>
@@ -833,7 +838,9 @@ function SubagentEditor({
       <p className="text-xs text-gray-700">
         {backend === "claude-code"
           ? "These definitions are available to Claude Code for this agent."
-          : "Definitions are saved, but Codex does not yet use them as native roles or tool restrictions. Switching back to Claude Code keeps them available."}
+          : backend === "codex"
+            ? "Definitions are saved, but Codex does not yet use them as native roles or tool restrictions. Switching back to Claude Code keeps them available."
+            : "These definitions are saved with the agent."}
       </p>
       <div className="flex items-center justify-between">
         <Label>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { IconArrowRight, IconClock, IconTrash } from "@tabler/icons-react";
 import { useSessionStore, type Agent, type Schedule } from "../stores/sessionStore";
-import { schedules as scheduleList } from "../lib/scheduleList";
+import { schedules as scheduleList, selectNextScheduleRun } from "../lib/scheduleList";
 import { selectSession } from "../lib/selectSession";
 import { PageHeader } from "./PageHeader";
 
@@ -44,10 +44,7 @@ function ScheduleKnowledgeControl({ schedule }: { schedule: Schedule }) {
 }
 
 /** Format the next fire the way the design's header does: "next 09:00". */
-function formatNext(iso: string | null | undefined): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
+function formatNext(d: Date): string {
   const time = d.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
@@ -118,10 +115,7 @@ export function SchedulesPage({
 
   const agentById = (id: string): Agent | undefined =>
     agents.find((a) => a.id === id);
-  const soonest = schedules
-    .filter((s) => s.enabled && s.next_run_at)
-    .map((s) => s.next_run_at as string)
-    .sort()[0];
+  const soonest = selectNextScheduleRun(schedules);
 
   return (
     <div className="schedules-page flex min-h-0 flex-1 flex-col">

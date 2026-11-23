@@ -57,7 +57,7 @@ from server.session_manager import SessionManager, session_manager
 from server.users import UserManager
 from tests.accounts import create_account
 from tests.completion_models import CompletionModels
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -705,7 +705,7 @@ def application_model(manager, monkeypatch, *, entrypoint_exists, starts_path=No
     starts = []
 
     class Run(FakeRunBase):
-        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+        async def _start(self, prompt, working_dir, resume_id=None, credential=None):
             starts.append(prompt)
             if starts_path is not None:
                 with starts_path.open("a") as stream:
@@ -714,17 +714,17 @@ def application_model(manager, monkeypatch, *, entrypoint_exists, starts_path=No
                 Path(working_dir, "index.html").write_text("<h1>Verified application</h1>")
             entered.set()
 
-        async def stream(self):
+        async def _stream(self):
             await release.wait()
             yield HarnessEvent(type="result", is_error=False)
 
-        async def stop(self):
+        async def _stop_process(self):
             release.set()
 
         async def interrupt(self):
             await self.stop()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     return entered, release, starts
 
 
@@ -1981,8 +1981,8 @@ async def test_reorder_keeps_pins_added_by_the_writer_it_waits_for(db):
         timestamp = f"2026-01-{index:02d}"
         await db.save_application(app_id=app_id, name=app_id, app_dir=f"/tmp/{app_id}",
                                   created_at=timestamp, updated_at=timestamp, user_id=owner)
-    await db.set_application_pinned("new-a", False)
-    await db.set_application_pinned("new-z", False)
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE applications SET pinned = 0 WHERE id IN ('new-a', 'new-z')")
 
     started = asyncio.Event()
 
@@ -2078,6 +2078,59 @@ async def test_api_create_list_get(client):
     assert (
         await client.get("/api/applications/missing", headers=client.headers)
     ).status_code == 404
+
+
+@pytest.mark.parametrize("deletion_still_running", [False, True], ids=["deleted", "deleting"])
+async def test_api_create_reports_deletion_during_creation_notice(client, db, monkeypatch, deletion_still_running):
+    builder = await db.get_system_agent()
+    noticed = asyncio.Future()
+    release = asyncio.Event()
+    retiring = asyncio.Event()
+    finish_delete = asyncio.Event()
+    retire = session_manager.retire_application_writers
+
+    async def hold_notice(event):
+        if event["type"] == "application_created":
+            noticed.set_result(event["application_id"])
+            await release.wait()
+
+    async def hold_retirement(session_ids):
+        retiring.set()
+        await finish_delete.wait()
+        return await retire(session_ids)
+
+    if deletion_still_running:
+        monkeypatch.setattr(session_manager, "retire_application_writers", hold_retirement)
+    session_manager.on_broadcast("hold-create-for-deletion", hold_notice)
+    creating = asyncio.create_task(client.post("/api/applications", json={
+        "name": "Deleted during creation", "description": "Race the creation notice", "agent_id": builder["id"],
+    }))
+    deleting = None
+    try:
+        app_id = await asyncio.wait_for(noticed, 3)
+        deleting = asyncio.create_task(client.delete(f"/api/applications/{app_id}?keep_files=true"))
+        if deletion_still_running:
+            await asyncio.wait_for(retiring.wait(), 3)
+        else:
+            assert (await asyncio.wait_for(deleting, 3)).status_code == 204
+        release.set()
+        receipt = await asyncio.wait_for(creating, 3)
+        if deletion_still_running:
+            assert receipt.status_code == 201, receipt.text
+            assert receipt.json()["id"] == app_id
+            assert receipt.json()["deletion"] == {"phase": "retiring", "keep_files": True, "error": None}
+            finish_delete.set()
+            assert (await asyncio.wait_for(deleting, 3)).status_code == 204
+        else:
+            assert receipt.status_code == 409, receipt.text
+            assert receipt.json()["detail"]["code"] == "application_deleted_during_creation"
+            assert receipt.json()["detail"]["application_id"] == app_id
+        assert (await client.get(f"/api/applications/{app_id}")).status_code == 404
+    finally:
+        release.set()
+        finish_delete.set()
+        await asyncio.gather(*(task for task in (creating, deleting) if task is not None), return_exceptions=True)
+        session_manager.remove_broadcast("hold-create-for-deletion")
 
 
 async def test_api_archived_builder_is_refused_before_application_effects(client, db):
@@ -2207,38 +2260,41 @@ async def test_api_archive_and_restore(client):
 
 
 async def test_api_concurrent_restore_returns_renameable_conflict(client, db, monkeypatch):
-    app_ids = []
+    archived_rows = {}
     for name in ("Notes", "notes"):
         created = await _api_create(client, name=name)
-        app_ids.append(created["id"])
-        response = await client.post(f"/api/applications/{created['id']}/archive")
+        url = f"/api/applications/{created['id']}"
+        assert (await client.post(f"{url}/unpin")).status_code == 200
+        response = await client.post(f"{url}/archive")
         assert response.status_code == 200
+        archived_rows[created["id"]] = response.json()
 
-    # Both requests reach the write before either can claim the name in SQLite.
-    writes = asyncio.Barrier(2)
-    update_application = db.update_application
+    writers = asyncio.Barrier(2)
+    set_visibility = db.set_application_visibility
 
-    async def write_together(app_id, **fields):
-        if fields.get("archived") == 0:
-            await writes.wait()
-        await update_application(app_id, **fields)
+    async def restore_together(*args, **kwargs):
+        if kwargs["field"] == "archived" and not kwargs["value"]:
+            await asyncio.wait_for(writers.wait(), 3)
+        return await set_visibility(*args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(db, "update_application", write_together)
+        patch.setattr(db, "set_application_visibility", restore_together)
         async with asyncio.timeout(5):
             responses = await asyncio.gather(*(
-                client.post(f"/api/applications/{app_id}/unarchive") for app_id in app_ids
+                client.post(f"/api/applications/{app_id}/unarchive") for app_id in archived_rows
             ))
 
     assert sorted(response.status_code for response in responses) == [200, 409]
-    (_, winner_id), (conflict, loser_id) = sorted(
-        zip(responses, app_ids, strict=True), key=lambda result: result[0].status_code,
+    (restored, winner_id), (conflict, loser_id) = sorted(
+        zip(responses, archived_rows, strict=True), key=lambda result: result[0].status_code,
     )
     assert "rename" in conflict.json()["detail"].lower()
+    assert restored.json()["pinned"] is True
     live = (await client.get("/api/applications")).json()
     archived = (await client.get("/api/applications", params={"archived": "true"})).json()
-    assert [row["id"] for row in live] == [winner_id]
-    assert [row["id"] for row in archived] == [loser_id]
+    assert live == [restored.json()]
+    assert live[0]["id"] == winner_id
+    assert archived == [archived_rows[loser_id]]
 
     renamed = await client.patch(f"/api/applications/{loser_id}", json={"name": "Work Notes"})
     assert renamed.status_code == 200
@@ -2247,6 +2303,227 @@ async def test_api_concurrent_restore_returns_renameable_conflict(client, db, mo
     assert restored.status_code == 200
     assert restored.json()["name"] == "Work Notes"
     assert restored.json()["archived"] is False
+
+
+async def test_api_restore_commits_archive_and_pin_changes_together(client, db):
+    created = await _api_create(client)
+    url = f"/api/applications/{created['id']}"
+    assert (await client.post(f"{url}/unpin")).status_code == 200
+    assert (await client.post(f"{url}/archive")).status_code == 200
+
+    statements = []
+    await db.conn.set_trace_callback(statements.append)
+    try:
+        restored = await client.post(f"{url}/unarchive")
+        assert restored.status_code == 200
+        assert (restored.json()["archived"], restored.json()["pinned"]) == (False, True)
+    finally:
+        await db.conn.set_trace_callback(None)
+
+    writes = [sql for sql in statements if sql in {"BEGIN IMMEDIATE", "COMMIT"}
+              or sql.startswith("UPDATE applications SET")]
+    archive = next(index for index, sql in enumerate(writes) if sql.startswith("UPDATE applications SET archived"))
+    assert writes[archive - 1] == "BEGIN IMMEDIATE"
+    assert writes[archive + 1].startswith("UPDATE applications SET pinned")
+    assert writes[archive + 2] == "COMMIT"
+
+
+@pytest.mark.parametrize("changed", ["deletion", "account"])
+async def test_api_app_metadata_rechecks_write_eligibility_in_transaction(client, db, monkeypatch, changed):
+    from server import users
+
+    created = await _api_create(client)
+    app_id = created["id"]
+    url = f"/api/applications/{app_id}"
+    owner_id = (await db.get_system_agent())["user_id"]
+    checked, release = asyncio.Event(), asyncio.Event()
+    owner_is_available = users.owner_is_available
+    notices = []
+
+    async def hold_after_check(db, user_id):
+        available = await owner_is_available(db, user_id)
+        checked.set()
+        await release.wait()
+        return available
+
+    async def observe(event):
+        if event.get("application_id") == app_id:
+            notices.append(event)
+
+    monkeypatch.setattr(users, "owner_is_available", hold_after_check)
+    session_manager.on_broadcast("app-metadata-transaction-refusal", observe)
+    request = asyncio.create_task(client.post(f"{url}/archive"))
+    try:
+        await asyncio.wait_for(checked.wait(), 3)
+        if changed == "deletion":
+            await db.set_application_deletion(app_id, {"phase": "retiring", "keep_files": True, "error": None})
+        else:
+            assert await db.set_user_disabled(owner_id, at="2026-01-01T00:00:00+00:00")
+        release.set()
+        assert (await asyncio.wait_for(request, 3)).status_code == (409 if changed == "deletion" else 403)
+        row = await db.get_application(app_id, owner_id)
+        assert (row["archived"], row["pinned"], row["updated_at"]) == (False, True, created["updated_at"])
+        assert not notices
+    finally:
+        release.set()
+        await asyncio.gather(request, return_exceptions=True)
+        session_manager.remove_broadcast("app-metadata-transaction-refusal")
+
+
+@pytest.mark.parametrize("next_action", ["restore", "delete"])
+@pytest.mark.parametrize("subscriber_fails", [False, True])
+async def test_api_archive_snapshot_and_followup_notice_stay_ordered(client, next_action, subscriber_fails):
+    created = await _api_create(client)
+    app_id = created["id"]
+    url = f"/api/applications/{app_id}"
+    assert (await client.post(f"{url}/unpin")).status_code == 200
+    followups, notices = [], []
+
+    async def follow_up(event):
+        if event.get("application_id") == app_id and event["type"] == "application_archived":
+            if next_action == "restore":
+                followups.append(await client.post(f"{url}/unarchive"))
+            else:
+                followups.append(await client.delete(url))
+            if subscriber_fails:
+                raise RuntimeError("Archive subscriber failed after the follow-up")
+
+    async def observe(event):
+        if event.get("application_id") == app_id:
+            notices.append((event["type"], event["application"]["archived"], event["application"]["pinned"]))
+
+    session_manager.on_broadcast("archive-followup", follow_up, required=True)
+    session_manager.on_broadcast("archive-followup-observer", observe)
+    try:
+        archived = await asyncio.wait_for(client.post(f"{url}/archive"), 3)
+        assert archived.status_code == 200
+        assert (archived.json()["archived"], archived.json()["pinned"]) == (True, False)
+        assert len(followups) == 1
+        current = await client.get(url)
+        if next_action == "restore":
+            assert followups[0].status_code == current.status_code == 200
+            assert followups[0].json() == current.json()
+            assert notices[-1:] == [("application_updated", False, True)]
+        else:
+            assert followups[0].status_code == 204
+            assert current.status_code == 404
+            assert [kind for kind, _, _ in notices[-1:]] == ["application_deleted"]
+        assert notices[:-1] == ([] if subscriber_fails else [("application_archived", True, False)])
+    finally:
+        session_manager.remove_broadcast("archive-followup")
+        session_manager.remove_broadcast("archive-followup-observer")
+
+
+async def test_api_archived_app_patch_and_new_builder_publish_updates(client):
+    created = await _api_create(client)
+    app_id = created["id"]
+    url = f"/api/applications/{app_id}"
+    assert (await client.post(f"{url}/archive")).status_code == 200
+    original = created["session_id"]
+    assert (await client.delete(f"/api/sessions/{original}")).status_code == 204
+    notices = []
+
+    async def observe(event):
+        if event.get("application_id") == app_id:
+            notices.append((event["type"], event["application"]))
+
+    session_manager.on_broadcast("archived-app-updates", observe)
+    try:
+        patched = await client.patch(url, json={"name": "Renamed archived app"})
+        assert patched.status_code == 200
+        assert notices[-1][0] == "application_updated"
+        assert notices[-1][1]["name"] == patched.json()["name"]
+        assert notices[-1][1]["archived"] is True
+
+        rebuilt = await client.post(f"{url}/build", json={"prompt": "Use a new build session"})
+        assert rebuilt.status_code == 200
+        successor = rebuilt.json()["session_id"]
+        assert successor and successor != original
+        assert notices[-1][0] == "application_updated"
+        assert notices[-1][1]["session_id"] == successor
+        assert notices[-1][1]["archived"] is True
+    finally:
+        session_manager.remove_broadcast("archived-app-updates")
+
+
+async def test_api_app_metadata_does_not_expose_other_accounts_deletion(client, db, monkeypatch):
+    created = await _api_create(client)
+    app_id = created["id"]
+    url = f"/api/applications/{app_id}"
+    _, token = await create_account(db, username="other-app-observer")
+    foreign = {"Authorization": f"Bearer {token}"}
+    entered, release = asyncio.Event(), asyncio.Event()
+    retire_writers = session_manager.retire_application_writers
+
+    async def hold_deletion(session_ids):
+        entered.set()
+        await release.wait()
+        await retire_writers(session_ids)
+
+    monkeypatch.setattr(session_manager, "retire_application_writers", hold_deletion)
+    deletion = asyncio.create_task(client.delete(url))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert (await client.get(url)).json()["deletion"]["phase"] == "retiring"
+        for action in ("archive", "unarchive", "pin", "unpin"):
+            missing = await client.post(f"/api/applications/missing/{action}", headers=foreign)
+            denied = await client.post(f"{url}/{action}", headers=foreign)
+            assert (denied.status_code, denied.json()) == (missing.status_code, missing.json())
+            assert denied.status_code == 404
+            assert (await client.post(f"{url}/{action}")).status_code == 409
+    finally:
+        release.set()
+        assert (await asyncio.wait_for(deletion, 3)).status_code == 204
+
+
+async def test_api_cancelled_archive_commits_and_publishes_once(client, db, monkeypatch):
+    from server.db.transaction import Transaction
+
+    created = await _api_create(client)
+    app_id = created["id"]
+    url = f"/api/applications/{app_id}"
+    entered, release, published = (asyncio.Event() for _ in range(3))
+    notices = []
+    async with db.transaction(write=True) as tx:
+        await tx.execute("CREATE TEMP TABLE archive_writes (id TEXT, archived INTEGER)")
+        await tx.execute(
+            "CREATE TEMP TRIGGER archive_writes_audit AFTER UPDATE OF archived ON applications "
+            "BEGIN INSERT INTO archive_writes VALUES (NEW.id, NEW.archived); END"
+        )
+
+    execute = Transaction.execute
+
+    async def hold_archive(tx, sql, parameters=()):
+        cursor = await execute(tx, sql, parameters)
+        if sql.startswith("UPDATE applications SET archived"):
+            entered.set()
+            await release.wait()
+        return cursor
+
+    async def observe(event):
+        if event.get("application_id") == app_id:
+            notices.append((event["type"], event["application"]["archived"]))
+            published.set()
+
+    monkeypatch.setattr(Transaction, "execute", hold_archive)
+    session_manager.on_broadcast("cancelled-archive-observer", observe)
+    request = asyncio.create_task(client.post(f"{url}/archive"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(request, 3)
+        release.set()
+        await asyncio.wait_for(published.wait(), 3)
+        assert (await client.get(url)).json()["archived"] is True
+        async with db.transaction(write=False) as tx:
+            rows = await tx.fetch_all("SELECT id, archived FROM archive_writes")
+        assert [tuple(row) for row in rows] == [(app_id, 1)]
+        assert notices == [("application_archived", True)]
+    finally:
+        release.set()
+        await asyncio.gather(request, return_exceptions=True)
+        session_manager.remove_broadcast("cancelled-archive-observer")
 
 
 @pytest.mark.asyncio
@@ -3129,10 +3406,9 @@ async def test_api_reorders_only_the_current_accounts_live_pins(client, db):
         timestamp = f"2026-01-{index:02d}"
         await db.save_application(app_id=app_id, name=app_id, app_dir=f"/tmp/{app_id}",
                                   created_at=timestamp, updated_at=timestamp, user_id=user_id)
-    await db.set_application_pinned("a-unpinned", False)
-    await db.update_application("a-archived", archived=1)
-
     async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE applications SET pinned = 0 WHERE id = 'a-unpinned'")
+        await tx.execute("UPDATE applications SET archived = 1 WHERE id = 'a-archived'")
         await tx.execute("CREATE TEMP TABLE pin_writes (id TEXT, before INTEGER, after INTEGER)")
         await tx.execute(
             "CREATE TEMP TRIGGER audit_pin_order AFTER UPDATE OF pin_order ON applications "

@@ -34,9 +34,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from .agent_configuration import AgentConfigurationError
 from .aio import complete_cleanup
 from .applications import data_dir_for
 from .session_results import LiveReply, committed_result
+from .sessions.runtime_types import SessionAdmissionClosed
 
 if TYPE_CHECKING:
     from .applications import ApplicationManager
@@ -296,7 +298,7 @@ class AppAgentManager:
 
     # ------------------------------------------------------------- read-side
 
-    async def list_agents(self, user_id: str | None = None) -> list[dict[str, Any]]:
+    async def list_agents(self, user_id: str | None) -> list[dict[str, Any]]:
         """Who an app may address — its *owner's* agents (multi-tenancy.md §7).
 
         Name is the address (as with delegations), so the list carries exactly
@@ -307,13 +309,13 @@ class AppAgentManager:
         db = self._require_db()
         return [
             {
-                "name": a.get("name") or "",
-                "description": a.get("description") or "",
-                "avatar": a.get("avatar") or "",
-                "is_default": bool(a.get("is_system")),
+                "name": a["name"],
+                "description": a["description"] if isinstance(a["description"], str) else "",
+                "avatar": a["avatar"] if isinstance(a["avatar"], str) else "",
+                "is_default": bool(a["is_system"]),
             }
-            for a in await db.load_agents(user_id=user_id)
-            if not a.get("archived")
+            for a in await db.list_live_agent_directory(user_id)
+            if isinstance(a["name"], str) and a["name"].strip()
         ]
 
     def list_conversations(self, app_id: str) -> list[dict[str, Any]]:
@@ -545,6 +547,8 @@ class AppAgentManager:
                 self._release_turn(turn)
             if isinstance(exc, (asyncio.CancelledError, AppAgentError)):
                 raise
+            if isinstance(exc, AgentConfigurationError):
+                raise AppAgentError(str(exc), status_code=409) from exc
             raise AppAgentError(f"could not start the turn: {exc}", status_code=500) from exc
         return turn
 
@@ -629,7 +633,7 @@ class AppAgentManager:
                 status_code=429,
             )
 
-        agent = await self._resolve_agent(app_row, agent_name)
+        agent_id, agent_label = await self._resolve_agent(app_row, agent_name)
         # The app's data directory, not its code directory: files the agent
         # writes belong to the app's state and must survive a rebuild, and
         # the app's source is off-limits from here by design (§5).
@@ -638,40 +642,34 @@ class AppAgentManager:
 
         stamp = datetime.now(UTC).strftime("%H:%M")
         name = (title or "").strip() or f"{app_row['name']} — {stamp}"
-        session = await mgr.create_session(
-            agent_id=agent["id"],
-            name=name[:120],
-            working_dir=work_dir,
-            origin=ORIGIN_APP,
-            backend=(agent.get("backend") or "claude-code"),
-            app_id=app_id,
-        )
+        try:
+            session = await mgr.create_session(
+                agent_id=agent_id,
+                name=name[:120],
+                working_dir=work_dir,
+                origin=ORIGIN_APP,
+                app_id=app_id,
+            )
+        except (AgentConfigurationError, SessionAdmissionClosed) as exc:
+            raise AppAgentError(str(exc), status_code=409) from exc
         logger.info(
             "app %s opened conversation %s with agent %s",
-            app_id, session.id, agent.get("name"),
+            app_id, session.id, agent_label,
         )
         return session
 
     async def _resolve_agent(
         self, app_row: dict[str, Any], name: str | None
-    ) -> dict[str, Any]:
-        """By name, case-insensitively, over non-archived agents — the same
-        addressing delegations use. No name → the app's own agent, so the
-        common case needs no configuration at all."""
+    ) -> tuple[str, str]:
+        """Resolve the live identity before conversation creation reads its configuration."""
         db = self._require_db()
-        agents = await db.load_agents(user_id=app_row.get("user_id"))
-        live = [a for a in agents if not a.get("archived")]
-        wanted = (name or "").strip().lower()
-        if not wanted:
-            own = next(
-                (a for a in live if a["id"] == app_row.get("agent_id")), None
-            )
-            if own is None:
-                own = next((a for a in live if a.get("is_system")), None)
-            if own is None:
+        user_id = app_row.get("user_id")
+        if not name or not name.strip():
+            bound = await db.resolve_app_agent_identity(app_row.get("agent_id"), user_id)
+            if bound is None:
                 raise AppAgentError("no agent is available", status_code=409)
-            return own
-        matches = [a for a in live if (a.get("name") or "").lower() == wanted]
+            return bound
+        matches = await db.match_live_agents(name, user_id)
         if not matches:
             raise AppAgentError(f"no agent named {name!r}", status_code=404)
         if len(matches) > 1:

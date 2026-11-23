@@ -27,7 +27,7 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
 beforeEach(() => {
   useSessionStore.getState().setToken("token");
   useSessionStore.setState({ sessions: [session], agents: [{ id: "agent1", name: "Saved assistant", backend: "codex" } as Agent],
-    credentials: [], backendModels: {}, mainView: "chat", editingAgentId: null });
+    credentials: [], mainView: "chat", editingAgentId: null });
   fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
     if (init?.method === "PATCH") return json({ ...session, ...JSON.parse(String(init.body)) });
     return json(catalog);

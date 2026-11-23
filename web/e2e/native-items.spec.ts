@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test, type WebSocketRoute } from "./test";
 import { enterAccountCredentials } from "./current-account";
 import type { Message } from "../src/stores/sessionStore";
@@ -18,7 +19,7 @@ test("native failures, hook provenance and original image paths survive WS and h
     else if (pathname === "/api/auth/login") data = { token: "browser-token" };
     else if (pathname === "/api/auth/identity") data = { user_id: "browser-user", label: "Operator", is_admin: false };
     else if (pathname === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (pathname === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (pathname === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (pathname === "/api/sessions") data = [session];
     else if (pathname === `/api/sessions/${session.id}/submissions`) data = { items: [] };
     else if (pathname === `/api/sessions/${session.id}/files/meta`) {

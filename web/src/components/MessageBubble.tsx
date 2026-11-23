@@ -32,6 +32,10 @@ import { ToolInputDetails } from "./ToolInputDetails";
 import { nativeWorkKey } from "../lib/nativeOutput";
 import { chatRehypePlugins, chatRemarkPlugins } from "./chatMarkdown";
 import { markdownImageOptions } from "./MarkdownImage";
+import {
+  toolResultCardClass, toolResultHeaderClass, toolResultIconClass, toolResultLabelClass,
+  toolResultPresentation, toolResultPreviewClass,
+} from "./toolResultPresentation";
 
 // Store and composer updates still render the card's controls and attribution.
 // Only unchanged completed prose skips the synchronous Markdown pipeline.
@@ -550,19 +554,11 @@ function BgTaskResultMessage({ body, summary }: { body: string; summary: string 
 function ToolResultBlock({ message, sessionId, onExpand }: { message: Message; sessionId: string; onExpand?: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState("Copy path");
-  const content = message.content || "";
-  const previewStr =
-    typeof content === "string" ? content.slice(0, 120) : String(content);
-  const errored = !!message.is_error;
-  const nativeItem = message.runtime_metadata?.native && message.tool_input?.native_item;
-  const native = nativeItem && typeof nativeItem === "object" ? nativeItem as Record<string, unknown> : undefined;
-  const savedPath = native?.type === "imageGeneration" && native.status === "completed" && !errored
-    && typeof native.savedPath === "string" ? native.savedPath : undefined;
-  const label = native?.type === "hookPrompt" ? "Hook prompt" : errored ? "Error" : "Result";
+  const { content, preview, errored, savedPath, label } = toolResultPresentation(message);
 
   return (
     <div
-      className={`msg msg-tool-result rounded-lg border overflow-hidden ${
+      className={`${toolResultCardClass} ${
         errored
           ? "error border-destructive/50 bg-destructive/5"
           : "border-border bg-card"
@@ -571,28 +567,29 @@ function ToolResultBlock({ message, sessionId, onExpand }: { message: Message; s
       <button
         type="button"
         /* `pr-12` — the same reserved corner. */
-        className="tool-header w-full flex items-center gap-2 px-3 py-2 pr-12 text-left text-sm hover:bg-accent/50 transition-colors"
+        className={`${toolResultHeaderClass} hover:bg-accent/50 transition-colors`}
         aria-expanded={expanded}
         onClick={() => { if (!expanded) onExpand?.(); setExpanded(!expanded); }}
       >
-        <span className="tool-icon text-muted-foreground shrink-0">
+        <span className={toolResultIconClass}>
           {expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
         </span>
         <span
-          className={`tool-result-label text-xs font-semibold uppercase tracking-wider shrink-0 ${
+          className={`${toolResultLabelClass} ${
             errored ? "text-destructive" : "text-green-700"
           }`}
+          data-tool-result-error={errored || undefined}
         >
           {label}
         </span>
         {!expanded && (
-          <code className="tool-preview truncate text-xs text-muted-foreground font-mono">
-            {previewStr}
+          <code className={toolResultPreviewClass}>
+            {preview}
           </code>
         )}
       </button>
       {savedPath && <div className="px-3 pb-2 space-y-1 text-xs">
-        <code className="block select-text break-all">{savedPath}</code>
+        <code className="block select-text break-all" data-tool-result-path>{savedPath}</code>
         <div className="flex gap-3">
           <button type="button" className="underline" onClick={() => {
             if (!navigator.clipboard) { setCopyStatus("Copy unavailable"); return; }

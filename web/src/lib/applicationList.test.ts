@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApplicationList, orderedApplicationPins } from "./applicationList";
+import { sidebarApplications } from "./sidebarPins";
 import { useSessionStore, type Application } from "../stores/sessionStore";
 
 function deferred<T>() {
@@ -44,6 +45,7 @@ describe("application list observations", () => {
   });
 
   it("shares one read, coalesces pushes, and keeps reading after a second conflict", async () => {
+    useSessionStore.setState({ applications: [row()] });
     const first = list.refresh();
     expect(list.refresh()).toBe(first);
     list.receive({ type: "application_updated", application: row("a", { status: "ready" }) });
@@ -94,12 +96,178 @@ describe("application list observations", () => {
     expect(rows()).toHaveLength(1); expect(useSessionStore.getState().archivedApplications).toEqual([]);
   });
 
-  it.each(["application_archived", "application_deleted"] as const)("%s cannot be undone by a read and clears selection and failures", async (type) => {
+  it("an application deletion cannot be undone by an older read and clears selection and failures", async () => {
     useSessionStore.setState({ applications: [row()], activeApplicationId: "a", mainView: "application", unseenFailedApplications: ["a"] });
     const old = list.refresh();
-    list.receive({ type, application_id: "a" });
+    list.receive({ type: "application_deleted", application_id: "a" });
     expect(useSessionStore.getState()).toMatchObject({ applications: [], activeApplicationId: null, mainView: "chat", unseenFailedApplications: [] });
     calls[0].reply.resolve(json([row()])); await old; await flush(); expect(rows()).toEqual([]);
+  });
+
+  it("clears selection and failures once the read confirms an archive", async () => {
+    useSessionStore.setState({ applications: [row()], activeApplicationId: "a", mainView: "application", unseenFailedApplications: ["a"] });
+    const old = list.refresh();
+    list.receive({ type: "application_archived", application_id: "a" });
+    calls[0].reply.resolve(json([row()]));
+    expect(await old).toEqual({ state: "pending" });
+    expect(useSessionStore.getState().activeApplicationId).toBe("a");
+    await flush();
+    calls[1].reply.resolve(json([])); await flush();
+    expect(useSessionStore.getState()).toMatchObject({ applications: [], activeApplicationId: null, mainView: "chat", unseenFailedApplications: [] });
+  });
+
+  it("retires a creation's navigation eligibility when an archive hint arrives before opening", async () => {
+    const lifetime = new AbortController();
+    const creation = list.create({ name: "App", description: "Brief", agent_id: "agent" }, lifetime.signal);
+    calls[0].reply.resolve(json(row(), 201));
+    const result = await creation;
+    if (result.state !== "live") throw new Error(`Expected a live receipt, got ${result.state}`);
+    expect(result.canOpen()).toBe(true);
+    list.receive({ type: "application_archived", application_id: "a" });
+    expect(rows().map((app) => app.id)).toEqual(["a"]);
+    expect(result.canOpen()).toBe(false);
+    lifetime.abort();
+  });
+
+  it.each(["restore", "delete"] as const)("keeps a confirmed %s when an older archive frame arrives", async (action) => {
+    const archived = row("a", { archived: true, pinned: false });
+    useSessionStore.setState({ archivedApplications: [archived] });
+    if (action === "restore") {
+      const restored = list.restore("a");
+      calls[0].reply.resolve(json(row())); await restored;
+      useSessionStore.getState().openApplication("a");
+    } else {
+      const removed = list.remove("a", false);
+      calls[0].reply.resolve(new Response(null, { status: 204 })); await removed;
+    }
+    await flush();
+    list.receive({ type: "application_archived", application: archived });
+    expect(useSessionStore.getState()).toMatchObject({
+      applications: action === "restore" ? [row()] : [], archivedApplications: [],
+      activeApplicationId: action === "restore" ? "a" : null,
+      mainView: action === "restore" ? "application" : "chat",
+    });
+    calls[1].reply.resolve(json(action === "restore" ? [row()] : [])); await flush();
+    calls[2].reply.resolve(json(action === "restore" ? [row()] : [])); await flush();
+    expect(rows()).toEqual(action === "restore" ? [row()] : []);
+    expect(useSessionStore.getState().archivedApplications).toEqual([]);
+  });
+
+  it("confirms an archived update while observing its new builder session", async () => {
+    const archived = row("a", { archived: true, session_id: "replacement" });
+    useSessionStore.setState({ applications: [row()], activeApplicationId: "a", mainView: "application" });
+    list.receive({ type: "application_updated", application: archived });
+    expect(calls.some((call) => call.url.endsWith("/api/sessions/replacement/info"))).toBe(true);
+    expect(useSessionStore.getState().activeApplicationId).toBe("a");
+    await flush();
+    const confirmation = calls.find((call) => call.url.endsWith("/api/applications"))!;
+    confirmation.reply.resolve(json([])); await flush();
+    expect(useSessionStore.getState().activeApplicationId).toBeNull();
+  });
+
+  it.each(["failed", "ready", "archived", "deleted"] as const)("settles the first unseen build failure against a %s result", async (result) => {
+    const failed = row("a", { status: "failed", pinned: false });
+    list.receive({ type: "application_updated", application: failed });
+    expect(useSessionStore.getState().unseenFailedApplications).toEqual([]);
+    await flush();
+    if (result === "archived") void list.refresh("archived");
+    calls[0].reply.resolve(json(result === "failed" ? [failed] : result === "ready" ? [{ ...failed, status: "ready" }] : []));
+    await flush();
+    if (result === "archived") {
+      calls[1].reply.resolve(json([{ ...failed, archived: true }])); await flush();
+      expect(useSessionStore.getState().archivedApplications.map((app) => app.id)).toEqual(["a"]);
+    }
+    const state = useSessionStore.getState();
+    const visible = result === "failed" ? ["a"] : [];
+    expect(state.unseenFailedApplications).toEqual(visible);
+    expect(sidebarApplications(state.applications, state).present.map((app) => app.id)).toEqual(visible);
+  });
+
+  it("treats creation preparation failure as an unseen failure once confirmed", async () => {
+    const failed = row("a", { status: "failed" });
+    list.receive({ type: "application_created", application: failed });
+    await flush();
+    calls[0].reply.resolve(json([{ ...failed, pinned: false }])); await flush();
+    const state = useSessionStore.getState();
+    expect(sidebarApplications(state.applications, state).present.map((app) => app.id)).toEqual(["a"]);
+  });
+
+  it("keeps a pending failure seen when the user opens the HTTP result before the confirming read", async () => {
+    const failed = row("a", { status: "failed", pinned: false });
+    list.receive({ type: "application_updated", application: failed });
+    const write = list.setPinned("a", false);
+    calls[0].reply.resolve(json(failed)); await write; await flush();
+    expect(rows()).toEqual([failed]);
+    useSessionStore.getState().openApplication("a");
+    useSessionStore.getState().showChat();
+    const confirmation = calls.at(-1)!;
+    expect(confirmation.url).toMatch(/\/api\/applications$/);
+    confirmation.reply.resolve(json([failed])); await flush();
+    expect(useSessionStore.getState().unseenFailedApplications).toEqual([]);
+  });
+
+  it("does not apply a pending failure hint after replacing its socket", async () => {
+    const failed = row("a", { status: "failed", pinned: false });
+    const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+    list.connect(source);
+    list.receive({ type: "application_updated", application: failed }, source);
+    await flush();
+    list.disconnect(source);
+    list.connect({ ...source, socket: {} });
+    await flush();
+    calls[1].reply.resolve(json([failed])); await flush();
+    expect(rows()).toEqual([failed]);
+    expect(useSessionStore.getState().unseenFailedApplications).toEqual([]);
+  });
+
+  it("ignores failures from a socket that proves it belongs to a retired service", async () => {
+    const failed = row("a", { status: "failed", pinned: false });
+    const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+    list.connect(source);
+    list.receive({ type: "application_updated", application: failed }, source);
+    await flush();
+    useSessionStore.setState({ dispatchGeneration: "service-b" });
+    list.observeSocketGeneration(source, "service-a");
+    list.receive({ type: "application_updated", application: failed }, source);
+    await flush();
+    expect(calls).toHaveLength(2);
+    calls[1].reply.resolve(json([failed])); await flush();
+    expect(rows()).toEqual([failed]);
+    expect(useSessionStore.getState().unseenFailedApplications).toEqual([]);
+  });
+
+  it.each(["archive", "delete", "unpin"] as const)("keeps a confirmed %s when older live frames arrive", async (action) => {
+    const live = row();
+    useSessionStore.setState({ applications: [live], activeApplicationId: "a", mainView: "application" });
+    const saved = row("a", { archived: action === "archive", pinned: action !== "unpin" });
+    const write = action === "archive" ? list.archive("a") : action === "delete" ? list.remove("a", false) : list.setPinned("a", false);
+    calls[0].reply.resolve(action === "delete" ? new Response(null, { status: 204 }) : json(saved));
+    await write;
+    await flush();
+
+    for (const type of ["application_updated", "application_created"] as const) {
+      list.receive({ type, application: live });
+      expect(useSessionStore.getState()).toMatchObject({
+        applications: action === "unpin" ? [saved] : [],
+        archivedApplications: action === "archive" ? [saved] : [],
+        activeApplicationId: action === "unpin" ? "a" : null,
+      });
+    }
+  });
+
+  it.each(["error", "timeout"] as const)("confirms a later archive after the in-flight list read ends in %s", async (failure) => {
+    useSessionStore.setState({ applications: [row()], activeApplicationId: "a", mainView: "application", unseenFailedApplications: ["a"] });
+    const old = list.refresh();
+    list.receive({ type: "application_archived", application_id: "a" });
+    if (failure === "timeout") await vi.advanceTimersByTimeAsync(30_000);
+    else calls[0].reply.reject(new Error("offline"));
+    expect(await old).toMatchObject({ state: "failed" });
+    await flush();
+    expect(calls).toHaveLength(2);
+    expect(useSessionStore.getState().activeApplicationId).toBe("a");
+    calls[1].reply.resolve(json([])); await flush();
+    expect(calls).toHaveLength(2);
+    expect(useSessionStore.getState()).toMatchObject({ applications: [], activeApplicationId: null, mainView: "chat", unseenFailedApplications: [] });
   });
 
   it("times out body decoding, ignores the late body and waits for a new trigger", async () => {
@@ -116,15 +284,18 @@ describe("application list observations", () => {
     expect(rows()[0].id).toBe("new");
   });
 
-  it("a failed read preserves rows, stops dirty work and permits a later event", async () => {
+  it("a failed read preserves rows and lets another view read once", async () => {
     useSessionStore.setState({ applications: [row()] });
     const read = list.refresh(); void list.refresh("archived");
-    list.receive({ type: "application_updated", application: row() });
     calls[0].reply.reject(new Error("offline"));
     expect(await read).toMatchObject({ state: "failed" }); await flush();
-    expect(calls).toHaveLength(1); expect(rows()).toHaveLength(1);
-    list.receive({ type: "application_updated", application: row() }); await flush();
     expect(calls).toHaveLength(2);
+    expect(calls[1].url).toContain("archived=true");
+    calls[1].reply.reject(new Error("archive offline")); await flush();
+    expect(calls).toHaveLength(2); expect(rows()).toHaveLength(1);
+    list.receive({ type: "application_updated", application: row() }); await flush();
+    expect(calls).toHaveLength(3);
+    expect(calls[2].url).not.toContain("archived=true");
   });
 
   it.each(["account", "service", "socket"])("invalidates old decoded responses and callbacks on %s changes", async (kind) => {
@@ -142,6 +313,7 @@ describe("application list observations", () => {
   });
 
   it("rejects replaced socket events and hydration whose body finishes after disconnect", async () => {
+    useSessionStore.setState({ applications: [row()] });
     const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
     list.connect(source); await flush();
     list.receive({ type: "application_updated", application: row("a", { session_id: "build" }) }, source);
@@ -197,6 +369,28 @@ describe("application writes and ordering", () => {
     expect(useSessionStore.getState().applicationOrdering).toBe(true);
     calls[2].reply.resolve(json([row(), row("b")])); await second; await flush();
     expect(useSessionStore.getState().applicationOrdering).toBe(false);
+  });
+
+  it.each(["success", "failure"] as const)("keeps successful sorting while an archived read finishes with %s", async (result) => {
+    const live = list.refresh();
+    void list.refresh("archived");
+    const sorted = [row("b", { pin_order: 1 }), row("a", { pin_order: 2 })];
+    const order = list.reorder(["b", "a"]);
+    for (const app of sorted) list.receive({ type: "application_updated", application: app });
+    calls[1].reply.resolve(json(sorted)); await order; await flush();
+    expect(await live).toEqual({ state: "pending" });
+    expect(calls[0].init?.signal?.aborted).toBe(true);
+    expect(calls[2].url).toContain("archived=true");
+    if (result === "success") calls[2].reply.resolve(json([]));
+    else calls[2].reply.reject(new Error("archived read failed"));
+    await flush();
+
+    expect(calls[3].url).not.toContain("archived=true");
+    expect(useSessionStore.getState().applicationPinOrder).toEqual(["b", "a"]);
+    expect(orderedApplicationPins(rows(), useSessionStore.getState().applicationPinOrder).map((app) => app.id)).toEqual(["b", "a"]);
+    calls[3].reply.resolve(json(sorted)); await flush();
+    expect(useSessionStore.getState().applicationPinOrder).toBeNull();
+    expect(orderedApplicationPins(rows(), null).map((app) => app.id)).toEqual(["b", "a"]);
   });
 
   it.each([409, 500])("drops optimistic order on HTTP %i without restoring old rows or replaying", async (status) => {

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { SchedulesPage } from "./SchedulesPage";
+import { SidebarManage } from "./SidebarManage";
 import { useSessionStore, type Schedule } from "../stores/sessionStore";
 
 const schedule = (o: Partial<Schedule> = {}): Schedule =>
@@ -66,6 +67,46 @@ afterEach(() => {
   useSessionStore.getState().setToken("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+describe("Schedule summaries", () => {
+  const ineligible = [
+    schedule({ id: "disabled", enabled: false, next_run_at: "2026-03-10T04:00:00Z" }),
+    schedule({ id: "missing" }),
+    schedule({ id: "invalid", next_run_at: "invalid time" }),
+  ];
+
+  it.each([
+    {
+      name: "choose the earliest instant across offsets",
+      rows: [
+        ...ineligible,
+        schedule({ id: "later", next_run_at: "2026-03-10T05:00:00-02:00" }),
+        schedule({ id: "earlier", next_run_at: "2026-03-10T14:00:00+08:00" }),
+      ],
+      next: new Date("2026-03-10T06:00:00Z"),
+    },
+    { name: "omit the next time when no schedule qualifies", rows: ineligible, next: null },
+  ])("the page and sidebar $name", async ({ rows, next }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-03-08T00:00:00Z"));
+    vi.mocked(fetch).mockImplementation(async (url) =>
+      Response.json(String(url).endsWith("/api/schedules") ? rows : [])
+    );
+    render(<><SidebarManage /><SchedulesPage onToggleSidebar={() => {}} /></>);
+
+    const count = rows.length;
+    const heading = await screen.findByText(new RegExp(`^${count} schedules`));
+    const sidebar = screen.getByRole("button", { name: /^Schedules/ });
+    const label = next
+      ? ` · next ${next.toLocaleDateString([], { weekday: "short" })} ${next.toLocaleTimeString([], {
+        hour: "2-digit", minute: "2-digit", hour12: false,
+      })}`
+      : "";
+    expect(heading.textContent).toBe(`${count} schedules${label}`);
+    expect(sidebar.textContent).toBe(`Schedules${count}${label}`);
+  });
 });
 
 describe("SchedulesPage run history", () => {

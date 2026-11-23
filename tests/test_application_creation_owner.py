@@ -352,6 +352,23 @@ async def test_a_creation_subscriber_can_archive_the_builder_before_input(creati
     assert starts == []
 
 
+async def test_bad_builder_config_after_creation_notice_is_a_confirmed_input_refusal(creation):
+    runtime, apps, builder = creation
+    manager, database, _, _, starts, _ = runtime
+
+    async def damage_before_input(event):
+        if event.get("type") == "application_created":
+            async with database.transaction(write=True) as tx:
+                await tx.execute("UPDATE agents SET subagents = 'null' WHERE id = ?", (builder["id"],))
+
+    manager.on_broadcast("damage-builder-config", damage_before_input)
+    row = await apps.create_application(name="Confirmed bad builder", description="Prepare and refuse", agent_id=builder["id"])
+    assert row["status"] == "failed" and row["session_id"] is None
+    assert builder["id"] in row["error"] and "subagents" in row["error"]
+    assert "unconfirmed" not in row["error"]
+    assert await database.application_session_ids(row["id"]) == [] and not starts
+
+
 async def test_cancelled_creation_notification_does_not_abandon_the_original_build(creation, tmp_path):
     runtime, apps, builder = creation
     manager, _, _, _, starts, _ = runtime

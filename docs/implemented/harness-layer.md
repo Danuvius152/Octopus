@@ -91,11 +91,13 @@ binary digest. Availability proves resolvability/executability, not
 authentication, model access or readiness of the separate Research exec leaf,
 tool-free worker and device-login commands.
 
-SessionOwner owns mutable execution state. Managed preparation, spawn, stdin,
-reader and retirement operations report their original results to it. HarnessRun
-retains native resources and bounded event delivery through confirmed retirement.
-Input delivery, committed business outcome, notification and resource exit are
-separate facts under the [execution contract](input-reliability.md#原请求完成与失败交接).
+SessionOwner owns mutable execution state. For each attempt it binds the
+deadline, input recorders and question wakeup to its HarnessRun. Managed
+preparation, spawn, stdin, reader and retirement operations report their
+original results to the Owner. HarnessRun retains native resources and bounded
+event delivery through confirmed retirement. Input delivery, committed business
+outcome, notification and resource exit are separate facts under the
+[execution contract](input-reliability.md#原请求完成与失败交接).
 
 Cancelling a start waiter leaves the original spawn owned by the original
 retirement task. Only that spawn's completed result can establish a definite
@@ -334,11 +336,20 @@ even after a request driver ends; cancellation of the waiter leaves resource
 ownership intact. The [execution observation contract](input-reliability.md#原执行的观察)
 defines the receipt's request/attempt/work scope and consumer lifetime.
 
-Claude uses stream-JSON input and can retain a process between turns. Ordinary
-Codex steers only its bound active root and retires its host after that root. Settings
-changes invalidate the held-process signature when needed while preserving the
-native resume identity. See [steering](inline-steering.md),
-[model settings](model-reasoning.md) and [turn safety](turn-safety.md).
+Claude uses stream-JSON input and can retain a compatible, live process between
+turns. Ordinary Codex steers only its bound active root and retires its host
+after that root. When a request needs a new host, the Owner waits for the
+preceding writer's successful retirement before reading the committed native
+resume identity. See [steering](inline-steering.md), [model settings](model-reasoning.md)
+and [turn safety](turn-safety.md).
+
+The manager calculates excess capacity from the full held set. A request to keep
+the just-finished session protects it only if it belongs to that set. The cap
+and idle reaper each select candidates from their own snapshot, capturing the
+backend and held timestamp. The manager checks that the original session is
+still registered. Its Owner rechecks activity, backend identity and held
+timestamp before starting retirement.
+
 Steer configuration compatibility reuses the same assembled spawn signature,
 including current connector selection, while retaining the active request's
 instructions. The ordinary Claude steering path still passes through the

@@ -836,7 +836,7 @@ test.describe("Credentials Panel", () => {
     const selector = page.locator(".session-credential-select");
     await expect(selector).toBeVisible();
     await expect(selector.locator("option")).toContainText([
-      "Agent's credential",
+      "Host default sign-in",
       "E2E Cred Renamed",
     ]);
   });

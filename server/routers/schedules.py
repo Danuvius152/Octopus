@@ -133,7 +133,7 @@ async def create_schedule_for_agent(
     route, and the natural-language `from_text` route. `origin_session_id` (the
     session the command was issued from) makes each fire append into that
     conversation instead of a throwaway session."""
-    await validate_schedule_target(agent_id, origin_session_id)
+    agent = await validate_schedule_target(agent_id, origin_session_id)
     try:
         parsed = build_explicit_schedule(
             prompt=prompt, name=name, interval_seconds=interval_seconds,
@@ -144,9 +144,6 @@ async def create_schedule_for_agent(
     name, prompt = parsed.name, parsed.prompt
     interval_seconds, cron, run_at, tz = parsed.interval_seconds, parsed.cron, parsed.run_at, parsed.timezone
     schedule_id = uuid.uuid4().hex[:12]
-    agent = await _get_db().get_agent(agent_id)
-    if agent is None:
-        raise HTTPException(404, "Agent not found")
     if knowledge_context is None:
         # Internal creation is a separately trusted entry, never a lookup of
         # the latest turn in origin_session_id.
@@ -221,10 +218,10 @@ async def apply_schedule_edit(existing: dict, req: UpdateScheduleRequest,
     return existing
 
 
-async def validate_schedule_target(agent_id: str | None, origin_session_id: str | None, *, allow_missing_origin: bool = False) -> None:
+async def validate_schedule_target(agent_id: str | None, origin_session_id: str | None, *, allow_missing_origin: bool = False) -> dict:
     """Use the same domain check for all HTTP/internal creation paths."""
     try:
-        await resolve_schedule_target(_get_db(), agent_id, origin_session_id, allow_missing_origin=allow_missing_origin)
+        return await resolve_schedule_target(_get_db(), agent_id, origin_session_id, allow_missing_origin=allow_missing_origin)
     except ScheduleTargetError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
 
@@ -312,7 +309,7 @@ async def create_schedule(
 
     agent_id = req.agent_id
     assert session_manager.db is not None
-    if await session_manager.db.get_agent(agent_id, user_id) is None:
+    if await session_manager.db.get_agent_identity(agent_id, user_id) is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     row = await create_schedule_for_agent(

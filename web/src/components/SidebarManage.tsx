@@ -1,21 +1,14 @@
 import { useEffect } from "react";
 import { IconActivity, IconBolt, IconClock, IconSettings } from "@tabler/icons-react";
-import { useSessionStore, type Schedule } from "../stores/sessionStore";
+import { useSessionStore } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
-import { schedules as scheduleList } from "../lib/scheduleList";
+import { schedules as scheduleList, selectNextScheduleRun } from "../lib/scheduleList";
 import { modelCredentials } from "../lib/modelCredentials";
 
 /** Format the next fire as the design writes it — "next 09:00". Anything
  * further out than today says which day, because "next 09:00" on a Monday
  * schedule read on Friday is a lie. */
-function nextRunLabel(schedules: Schedule[]): string | null {
-  const upcoming = schedules
-    .filter((s) => s.enabled && s.next_run_at)
-    .map((s) => new Date(s.next_run_at as string))
-    .filter((d) => !Number.isNaN(d.getTime()))
-    .sort((a, b) => a.getTime() - b.getTime());
-  const next = upcoming[0];
-  if (!next) return null;
+function nextRunLabel(next: Date): string {
   const time = next.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
   const sameDay = next.toDateString() === new Date().toDateString();
   return sameDay ? `next ${time}` : `next ${next.toLocaleDateString([], { weekday: "short" })} ${time}`;
@@ -54,7 +47,7 @@ export function SidebarManage() {
   const credentialError = !!credentialRead.error || credentials.some(
     (c) => c.needs_reconnect
   );
-  const next = nextRunLabel(schedules);
+  const next = selectNextScheduleRun(schedules);
 
   return (
     <div className="manage-section shrink-0">
@@ -71,7 +64,7 @@ export function SidebarManage() {
           summary={
             <>
               {scheduleRead.error ? "not synchronized" : scheduleRead.loading && !scheduleRead.loaded && !schedules.length ? "loading…" : schedules.length}
-              {next && <span className="text-gray-600"> · {next}</span>}
+              {next && <span className="text-gray-600"> · {nextRunLabel(next)}</span>}
             </>
           }
         />

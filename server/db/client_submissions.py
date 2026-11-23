@@ -16,7 +16,13 @@ from ..session_operations import (
 from ..submission_models import InputRecoveryUnavailable, NativeInputEvidence
 from .applications import require_application_writable
 from .base import DatabaseBase
-from .schedules import ScheduleChangedError
+from .schedules import (
+    OneShotFire,
+    ScheduleChangedError,
+    ScheduleOriginChanged,
+    schedule_delivery_id,
+    stored_run_at,
+)
 from .transaction import Transaction
 from .users import owner_is_available
 
@@ -34,6 +40,11 @@ _SELECT = (
     "AND (i.execution_owner IS NULL OR i.execution_owner=i.request_id OR i.delivery_state<>'none') "
     "LEFT JOIN client_submissions successor ON successor.session_id=i.session_id AND successor.recovery_of=i.client_id "
 )
+
+_SOURCE_INPUT = ("i.client_id=? AND json_extract(i.payload,'$.source')=? "
+                 "AND json_extract(i.payload,'$.delivery_id')=?")
+_ONE_SHOT_FIELDS = ("agent_id", "name", "prompt", "recurrence_label",
+                    "run_at", "knowledge_context", "enabled")
 
 # Only unresolved steer acceptance needs a notice. Accepted evidence stays on
 # the original input without requiring the user to dismiss a success notice.
@@ -173,7 +184,7 @@ def verify_ticket_acceptance_evidence(rows) -> None:
                                           or execution.primary is None):
                 raise ValueError("The adopted input has no distinct human carrier")
             if instruction_id == carrier_id:
-                matched = execution.primary is not None
+                matched = execution.primary is not None and (is_update or not execution.progress_only)
             else:
                 matched = any(edit.reference.request_id == instruction_id for _, edit in execution.steers)
             if not matched:
@@ -343,15 +354,20 @@ class ClientSubmissionsMixin(DatabaseBase):
             )
             return row is not None
 
-    async def adopt_ticket_batch_update(self, session_id: str, origin_id: str, request_id: str) -> str:
+    async def adopt_ticket_batch_update(self, session_id: str, origin_id: str, request_id: str, *, progress_only: bool) -> str:
+        patch: dict[str, str | bool] = {"ticket_batch_update_for": origin_id}
+        if progress_only:
+            patch["ticket_batch_progress_only"] = True
         async with self.transaction(write=True) as tx:
             adopted = await tx.execute(
-                "UPDATE client_submissions SET payload=json_set(payload,'$.ticket_batch_update_for',?) "
+                "UPDATE client_submissions SET payload=json_patch(payload,?) "
                 "WHERE session_id=? AND request_id=? AND execution_state='running' AND execution_owner=request_id "
                 "AND json_extract(payload,'$.ticket_batch_candidate_for')=? "
                 "AND json_extract(payload,'$.ticket_batch') IS NULL "
-                "AND json_extract(payload,'$.finish_ticket_batch_for') IS NULL",
-                (origin_id, session_id, request_id, origin_id),
+                "AND json_extract(payload,'$.finish_ticket_batch_for') IS NULL "
+                "AND (json_extract(payload,'$.ticket_batch_update_for') IS NULL "
+                "OR COALESCE(json_extract(payload,'$.ticket_batch_progress_only'),0)=?)",
+                (json.dumps(patch), session_id, request_id, origin_id, progress_only),
             )
             original = await tx.fetch_one(
                 "SELECT json_extract(payload,'$.ticket_batch') FROM client_submissions WHERE session_id=? AND request_id=? "
@@ -625,9 +641,8 @@ class ClientSubmissionsMixin(DatabaseBase):
         """Resolve the committed source identity, including its original target."""
         async with self.transaction(write=False) as tx:
             row = await tx.fetch_one(
-                _SELECT + "WHERE i.client_id=? AND json_extract(i.payload,'$.source')=? "
-                "AND json_extract(i.payload,'$.delivery_id')=? "
-                + ("AND i.session_id=?" if session_id is not None else ""),
+                _SELECT + "WHERE " + _SOURCE_INPUT
+                + (" AND i.session_id=?" if session_id is not None else ""),
                 (f"{source}:{delivery_id}", source, delivery_id, *((session_id,) if session_id is not None else ())),
             )
             return _submission(row) if row else None
@@ -676,7 +691,7 @@ class ClientSubmissionsMixin(DatabaseBase):
     async def admit_client_submission(self, session_id: str, client_id: str, payload_sha256: str,
                                       request_id: str, *, payload: dict, receipt: dict,
                                       recovery_of: str | None = None,
-                                      schedule: dict | None = None, new_session: dict | None = None,
+                                      schedule: OneShotFire | None = None, new_session: dict | None = None,
                                       superseded_handoff: tuple[str, str] | None = None) -> tuple[bool, dict[str, Any]]:
         """Commit the complete input and its acceptance in the same operation.
 
@@ -700,15 +715,29 @@ class ClientSubmissionsMixin(DatabaseBase):
             if schedule is not None:
                 # The fire consumes exactly the definition it authorized. No
                 # session or input can survive a missing or concurrently edited
-                # one-shot; a later callback can try the current definition.
-                fields = ("agent_id", "origin_session_id", "prompt", "run_at", "knowledge_context", "enabled")
-                current = await tx.fetch_one(
-                    f"SELECT {','.join(fields)} FROM schedules WHERE id=?", (schedule["id"],),
-                )
-                if current is None or tuple(current) != tuple(schedule.get(field) for field in fields):
-                    raise ScheduleChangedError("Schedule changed before its fire was admitted")
-                if not schedule["enabled"] or not schedule["run_at"]:
+                # one-shot. Compare after acquiring SQLite write ownership.
+                definition = schedule.definition
+                run_at = definition.get("run_at")
+                if not definition["enabled"] or not run_at:
                     raise ValueError("Only an enabled one-shot can be consumed at admission")
+                current = await tx.fetch_one(
+                    f"SELECT origin_session_id,{','.join(_ONE_SHOT_FIELDS)} FROM schedules WHERE id=?", (definition["id"],),
+                )
+                if current is None:
+                    raise ScheduleChangedError("Schedule disappeared before its fire was admitted")
+                current_origin, *current_definition = current
+                if tuple(current_definition) != tuple(definition.get(field) for field in _ONE_SHOT_FIELDS):
+                    raise ScheduleChangedError("Schedule changed before its fire was admitted")
+                if stored_run_at(run_at) > datetime.now(UTC):
+                    raise ScheduleChangedError("The original one-shot time is not due")
+                if current_origin != definition.get("origin_session_id"):
+                    raise ScheduleOriginChanged("The one-shot was rebound before its fire was admitted")
+                delivery_id = schedule_delivery_id(definition["id"], run_at)
+                if await tx.fetch_one(
+                    "SELECT 1 FROM client_submissions i WHERE " + _SOURCE_INPUT,
+                    (f"schedule:{delivery_id}", "schedule", delivery_id),
+                ) is not None:
+                    raise ScheduleChangedError("The original one-shot was already admitted")
             if new_session is not None:
                 from .sessions import insert_session
 
@@ -751,7 +780,11 @@ class ClientSubmissionsMixin(DatabaseBase):
             if restored_handoff_history is not None:
                 row["restored_handoff_history"] = restored_handoff_history
             if schedule is not None:
-                await tx.execute("DELETE FROM schedules WHERE id=?", (schedule["id"],))
+                await tx.execute("DELETE FROM schedules WHERE id=?", (schedule.definition["id"],))
+                # Use the last synchronous boundary before COMMIT so a newer
+                # registration or relationship phase can still refuse this fire.
+                await tx.finish()
+                schedule.validate_admission()
             return created, row
 
     async def claim_client_submission(self, session_id: str, request_id: str, owner: str, generation: str) -> bool:

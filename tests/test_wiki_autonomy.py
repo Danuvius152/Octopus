@@ -60,10 +60,10 @@ async def test_current_modes_and_recovered_read_keep_lookup_and_enforce_maintena
             def set_idle_handler(self, handler):
                 pass
 
-            async def start(self, *args, **kwargs):
+            async def _start(self, *args, **kwargs):
                 pass
 
-            async def stream(self):
+            async def _stream(self):
                 assert wiki is not None
                 task = tasks.active[run_config.wiki_task_id]
                 assert task.mode == expected
@@ -105,13 +105,13 @@ async def test_current_modes_and_recovered_read_keep_lookup_and_enforce_maintena
                 assert response.status_code == 403
                 yield HarnessEvent(type="result", content="done", is_error=False)
 
-            async def stop(self):
+            async def _stop_process(self):
                 pass
 
             async def interrupt(self):
                 pass
 
-        return Run()
+        return Run(backend="codex", config=run_config)
 
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     kwargs = {"wiki_mode": selected} if selected is not None else {}

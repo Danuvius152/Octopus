@@ -8,7 +8,7 @@ from server.agent_manager import AgentManager
 from server.app_agent import AppAgentManager
 from server.applications import ApplicationManager
 from server.config import settings
-from server.delegations import DelegationManager
+from server.delegations import DelegationError, DelegationManager
 from tests import native_app_server as native_tests
 from tests.app_sse import app_sse_event
 from tests.native_app_server import (
@@ -184,6 +184,80 @@ async def test_named_delegation_delivers_only_the_bound_roots_selected_final(nat
         assert saved["payload"]["operation"]["content"].endswith(
             f"[agent-reply:Native worker delegation={work.delegation_id}]\nFirst final\n\nSecond final")
         assert len(starts) == (2 if recovery else 1) and work.state == "completed"
+    finally:
+        delegations.shutdown()
+
+
+async def test_bad_target_refuses_delegation_and_keeps_original_round(native_runtime, tmp_path):
+    manager, database, parent, mode, _, _ = native_runtime
+    mode[0] = "control_output"
+    worker = await AgentManager(database).create_agent(name="Worker", backend="codex", user_id=parent.user_id)
+    delegations = DelegationManager()
+    delegations.bind(manager, database)
+
+    async def set_tools(value):
+        async with database.transaction(write=True) as tx:
+            await tx.execute("UPDATE agents SET mcp_servers = ? WHERE id = ?", (value, worker["id"]))
+
+    try:
+        await set_tools("null")
+        with pytest.raises(DelegationError, match="mcp_servers") as absent:
+            await delegations.start_delegation(parent_session_id=parent.id, agent_name="worker", request="Reject initial round")
+        assert absent.value.status_code == 409 and worker["id"] in str(absent.value)
+        assert not delegations.list_delegations(parent.id)
+
+        await set_tools("[]")
+        original = await delegations.start_delegation(parent_session_id=parent.id, agent_name="worker", request="Run original round")
+        child = manager.get_session(original.delegation_id)
+        await until(lambda: child._run.backend is not None and child._run.backend.active_turn is not None)
+        original_request = manager.dispatch_snapshot(child.id)["active_request_id"]
+        inject(tmp_path, *answer_frames("turn-1"))
+        await wait_dispatch_idle(manager, child.id)
+        await until(lambda: original.state == "completed")
+        original_reply = await database.read_session_result(child.id, original_request)
+        assert original_reply.reply_text() == "First final\n\nSecond final"
+
+        await set_tools('["ask", 42]')
+        with pytest.raises(DelegationError, match="mcp_servers") as refused:
+            await delegations.follow_up_delegation(parent_session_id=parent.id, delegation_id=child.id, request="Reject new round")
+        assert refused.value.status_code == 409 and worker["id"] in str(refused.value)
+        assert delegations.list_delegations(parent.id) == [original]
+        assert await database.read_session_result(child.id, original_request) == original_reply
+
+        await set_tools("[]")
+        retry = await delegations.follow_up_delegation(parent_session_id=parent.id, delegation_id=child.id, request="Resume after repair")
+        assert retry.delegation_id == child.id and retry.work_id != original.work_id
+        await until(lambda: child._run.backend is not None and child._run.backend.active_turn is not None)
+        inject(tmp_path, *answer_frames(child._run.backend.active_turn.turn_id))
+        await wait_dispatch_idle(manager, child.id)
+        await until(lambda: retry.state == "completed")
+    finally:
+        delegations.shutdown()
+
+
+async def test_initial_delegation_settles_if_config_breaks_at_input_admission(native_runtime, monkeypatch):
+    manager, database, parent, _, starts, _ = native_runtime
+    worker = await AgentManager(database).create_agent(name="Worker", backend="codex", user_id=parent.user_id)
+    starts.clear()  # The save-time argument check never reaches input admission.
+    delegations = DelegationManager()
+    delegations.bind(manager, database)
+    start = manager.start_message
+
+    async def damage_before_admission(session_id, *args, **kwargs):
+        if kwargs.get("source") == "delegation":
+            async with database.transaction(write=True) as tx:
+                await tx.execute("UPDATE agents SET mcp_servers = 'null' WHERE id = ?", (worker["id"],))
+        return await start(session_id, *args, **kwargs)
+
+    monkeypatch.setattr(manager, "start_message", damage_before_admission)
+    try:
+        with pytest.raises(DelegationError, match="mcp_servers") as refusal:
+            await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="New round")
+        assert refusal.value.status_code == 409
+        cancelled, = delegations.list_delegations(parent.id)
+        assert cancelled.state == "cancelled" and worker["id"] in cancelled.error
+        assert manager.get_session(cancelled.delegation_id) is None
+        assert not starts
     finally:
         delegations.shutdown()
 

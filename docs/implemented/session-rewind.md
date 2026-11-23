@@ -302,13 +302,19 @@ state clears.
 <a id="567-crash-recovery"></a>
 #### Crash recovery
 
-An `initializing` fork is cleaned using its exact saved identity; failed cleanup
-preserves retry responsibility. A crash during `reverting` produces
-`unknown_post_crash` and a usable ready conversation with an explicit inspection
-message. Recovery does not repeat uncertain Git effects or claim the stash/revert
-finished. It persists and refreshes the same unknown-result first-turn note
-before use, including an already live successor. Rewind borrows the parent's directory, including when the parent is
-itself a full copy under the fork base. Recovery never derives directory
+Startup requires a successful scan of incomplete forks before the service can
+become ready. Recovery cleans each `initializing` fork using its exact saved
+identity. If cleanup fails, its row and copied messages remain for the next
+startup to retry, and recovery continues with the other rows.
+
+A crash during `reverting` produces `unknown_post_crash` and a usable ready
+conversation with an explicit inspection message. Recovery persists the result
+and first-turn note before use and refreshes any already live successor. Failure
+to persist the result blocks startup. Recovery does not repeat uncertain Git
+effects or claim the stash/revert finished.
+
+Rewind borrows the parent's directory, including when the parent is itself a
+full copy under the fork base. Recovery never derives directory
 ownership from that prefix. Only an initializing full-copy row with its matching
 creation receipt may remove its independent directory; cleanup must finish
 before deleting the recovery row. The [full-copy contract](session-fork.md#crash-safety--limits)

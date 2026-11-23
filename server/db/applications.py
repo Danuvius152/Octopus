@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from .base import DatabaseBase
 from .transaction import Transaction
@@ -36,6 +36,10 @@ class ApplicationNameConflict(Exception):
     """The active application name is already held by another app in the account."""
 
 
+type ApplicationVisibilityField = Literal["archived", "pinned"]
+type ApplicationVisibilityRefusal = Literal["missing", "deleting", "owner_unavailable", "archived"]
+
+
 async def _execute_application_write(tx: Transaction, sql: str, parameters: Iterable[Any]) -> None:
     try:
         await tx.execute(sql, parameters)
@@ -49,13 +53,17 @@ async def _execute_application_write(tx: Transaction, sql: str, parameters: Iter
         raise
 
 
-async def require_application_writable(tx: Transaction, session_id: str) -> None:
+async def application_deletion_blocks_session(tx: Transaction, session_id: str) -> bool:
     blocked = await tx.fetch_one(
         "SELECT 1 FROM applications a JOIN sessions s ON "
         "(a.id=s.app_id OR a.session_id=s.id) AND a.user_id IS s.user_id "
         "WHERE s.id=? AND a.deletion IS NOT NULL LIMIT 1", (session_id,),
     )
-    if blocked:
+    return blocked is not None
+
+
+async def require_application_writable(tx: Transaction, session_id: str) -> None:
+    if await application_deletion_blocks_session(tx, session_id):
         raise ApplicationDeleting("Application deletion is unfinished; retry deletion before writing")
 
 
@@ -195,7 +203,7 @@ class ApplicationsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             allowed = {
                 "name", "description", "icon", "icon_src", "agent_id",
-                "session_id", "entrypoint", "status", "error", "archived",
+                "session_id", "entrypoint", "status", "error",
                 "updated_at", "last_built_at",
             }
             updates = {k: v for k, v in fields.items() if k in allowed}
@@ -298,10 +306,40 @@ class ApplicationsMixin(DatabaseBase):
             )
             return {**row, **updates}
 
-    async def set_application_pinned(self, app_id: str, pinned: bool) -> None:
-        """Put the application in the sidebar (at the bottom) or take it out."""
+    async def set_application_visibility(
+        self, app_id: str, user_id: str | None, *, field: ApplicationVisibilityField,
+        value: bool, updated_at: str,
+    ) -> tuple[dict[str, Any], bool] | ApplicationVisibilityRefusal:
+        """Check write eligibility and capture the row in the metadata transaction."""
         async with self.transaction(write=True) as tx:
-            await self._set_pinned(tx, "applications", app_id, pinned)
+            select = f"SELECT {self._APPLICATION_COLS} FROM applications WHERE id=? AND user_id IS ?"
+            scope = (app_id, user_id)
+            raw = await tx.fetch_one(select, scope)
+            if raw is None:
+                return "missing"
+            row = self._row_to_application(raw)
+            if row["deletion"] is not None:
+                return "deleting"
+            if not await owner_is_available(tx, user_id):
+                return "owner_unavailable"
+
+            if field == "archived":
+                if row["archived"] == value:
+                    return row, False
+                await _execute_application_write(
+                    tx, "UPDATE applications SET archived = ?, updated_at = ? WHERE id = ?",
+                    (int(value), updated_at, app_id),
+                )
+                if not value:
+                    await self._set_pinned(tx, "applications", app_id, True)
+            else:
+                if row["archived"]:
+                    return "archived"
+                await self._set_pinned(tx, "applications", app_id, value)
+
+            updated = await tx.fetch_one(select, scope)
+            assert updated is not None
+            return self._row_to_application(updated), True
 
     async def reorder_application_pins(
         self, ordered_ids: list[str], *, user_id: str | None = None,

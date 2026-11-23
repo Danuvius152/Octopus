@@ -20,6 +20,10 @@ from .transaction import Transaction
 logger = logging.getLogger(__name__)
 
 
+class DatabaseBusy(TimeoutError):
+    """The transaction could not acquire ownership and ran no domain SQL."""
+
+
 def _load_json_list(raw: Any) -> list[Any]:
     """A JSON-list column as a list, whatever shape the column is in.
 
@@ -154,9 +158,13 @@ class DatabaseBase:
         if self._write_owner is asyncio.current_task():
             raise RuntimeError("Nested database operation; pass the current transaction to its SQL helper")
         deadline = asyncio.get_running_loop().time() + timeout
-        async with asyncio.timeout_at(deadline):
-            await self._write_lock.acquire()
-            try:
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._write_lock.acquire()
+        except TimeoutError as error:
+            raise DatabaseBusy("Timed out waiting for the database transaction lock") from error
+        try:
+            async with asyncio.timeout_at(deadline):
                 self.health.require_healthy()
                 await self._ensure_connected()
                 self._write_owner = asyncio.current_task()
@@ -165,7 +173,7 @@ class DatabaseBase:
                     await tx.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 except sqlite3.OperationalError as error:
                     if (getattr(error, "sqlite_errorcode", 0) & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} and not self.conn.in_transaction:
-                        raise
+                        raise DatabaseBusy("SQLite did not grant transaction ownership") from error
                     self.health.fail(error)
                 except BaseException as error:
                     self.health.fail(error)
@@ -189,9 +197,9 @@ class DatabaseBase:
                         self.health.fail(failure)
                     if tx.cancelled is not None:
                         raise tx.cancelled
-            finally:
-                self._write_owner = None
-                self._write_lock.release()
+        finally:
+            self._write_owner = None
+            self._write_lock.release()
 
     async def inspect(self) -> None:
         """Check retained storage before creating a key or opening its writer."""

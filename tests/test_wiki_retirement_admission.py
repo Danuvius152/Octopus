@@ -36,7 +36,7 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
         async def interrupt(self):
             pass
 
-        async def stop(self):
+        async def _stop_process(self):
             entered.set()
             await release.wait()
             if outcome == "failed":
@@ -47,7 +47,9 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
         # Exercise the HTTP guard's retained-failure projection in isolation.
         # A live Owner observing this failed task instead enters real fatal
         # cleanup, covered by the subprocess owner-failure tests.
-        retirement = asyncio.create_task(backend.stop())
+        backend.retire()
+        retirement = backend._retirement._task
+        assert retirement is not None
         session._run.retirements[id(backend)] = BackendRetirement(backend, retirement)
     else:
         retirement = await manager._retire_backend(session, backend)

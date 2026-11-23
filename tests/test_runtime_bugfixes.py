@@ -32,7 +32,7 @@ from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from tests import test_service_shutdown, test_session_manager
 from tests import wiki_job_runtime as test_wiki_jobs
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 
 service = test_service_shutdown.service
 manager = test_session_manager.manager
@@ -171,10 +171,10 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
     tokens = []
 
     class HeldRun(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             pass
 
-        async def stream(self):
+        async def _stream(self):
             session = next(s for s in manager.sessions.values() if s.origin == "wiki")
             tokens.append(grants.open(session, "maintain", request_id=session._run.request.request_id))
             entered.set()
@@ -182,7 +182,7 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
             from server.harness import HarnessEvent
             yield HarnessEvent(type="result")
 
-        async def stop(self):
+        async def _stop_process(self):
             release.set()
 
         async def interrupt(self):
@@ -193,7 +193,7 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
         run.work_id = session._run.work_id
         return run
 
-    monkeypatch.setattr(manager, "_make_run", held_run)
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(held_run))
     job = jobs.maintain("registration-change", "# Original\nRetain source.\n", "organize", [], "Library/source.md", [], "human")
     worker = WikiWorker()
     await worker.start(manager)
@@ -449,13 +449,14 @@ async def _wiki_terminal_commit_child(jobs, monkeypatch, tmp_path):
 
     class PublishingRun(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.started = asyncio.Event()
 
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             calls.append("model")
             self.started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await self.started.wait()
             from server.mcp_identity import mint, verify
             from server.wiki.tasks import tasks
@@ -473,10 +474,10 @@ async def _wiki_terminal_commit_child(jobs, monkeypatch, tmp_path):
                 tasks.close(token)
             yield HarnessEvent(type="result")
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: PublishingRun())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: PublishingRun()))
     job = jobs.maintain("blocked-recording-rebind", "# Original\nKeep this source.\n", "organize", [], "Library/blocked.md", [], "human")
     selected = None
     input_content = None
@@ -587,18 +588,18 @@ async def test_overall_deadline_during_first_preparation(manager, tmp_path, monk
             preparation_exited.set()
 
     class Run(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             starts.append(self)
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await started.wait()
             yield HarnessEvent(type="result", is_error=False)
 
         async def interrupt(self):
             pass
 
-        async def stop(self):
+        async def _stop_process(self):
             assert preparation_exited.is_set()
             retiring.set()
             await release_retirement.wait()
@@ -609,7 +610,7 @@ async def test_overall_deadline_during_first_preparation(manager, tmp_path, monk
             terminal.set()
 
     monkeypatch.setattr(agent_memory, "ensure_agent_dirs", hold_preparation)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     manager.on_broadcast("observe-preparation-timeout", observe)
     receipt = await manager.start_message(session.id, "Wait for the original preparation")
     assert receipt.execution is not None
@@ -707,6 +708,7 @@ async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_n
 
     class WebRun(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.started = asyncio.Event()
 
         def bind_activity(self, callback):
@@ -719,10 +721,10 @@ async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_n
         def unbind_activity(self, token):
             observed.unbind_activity(token)
 
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             self.started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await self.started.wait()
             for row in rows:
                 await observed._handle_line(json.dumps(row))
@@ -735,7 +737,7 @@ async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_n
             if False:
                 yield
 
-        async def stop(self):
+        async def _stop_process(self):
             observed._begin_retirement()
             await observed.stop()
             stopped.set()
@@ -746,7 +748,7 @@ async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_n
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .2)
     monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
     monkeypatch.setattr(settings, "turn_max_seconds", 0)
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: WebRun())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: WebRun()))
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "Captured web activity", str(tmp_path), backend="codex")
     receipt = await manager.start_message(session.id, "Wait for real web activity")
@@ -804,9 +806,10 @@ async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(mana
 
     class ParsedRun(FakeRunBase):
         def __init__(self):
+            super().__init__()
             self.started = asyncio.Event()
 
-        async def start(self, *a, **k):
+        async def _start(self, *a, **k):
             self.parser = CodexEventParser()
             self.initial_events = self.parser.parse({"type": "thread.started", "thread_id": "metrics-thread"}).events
             self.parser.parse({"type": "turn.started"})
@@ -814,7 +817,7 @@ async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(mana
             starts.append(clock.now)
             self.started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await self.started.wait()
             for event in self.initial_events:
                 yield event
@@ -823,13 +826,13 @@ async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(mana
             for event in self.parser.parse(raw).events:
                 yield event
 
-        async def stop(self):
+        async def _stop_process(self):
             pass
 
         async def interrupt(self):
             await self.stop()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: ParsedRun())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *a, **k: ParsedRun()))
     try:
         events = []
 

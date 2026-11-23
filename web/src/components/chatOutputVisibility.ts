@@ -9,6 +9,10 @@ import { streamingTranscriptSource, type BgTask, type Message, type SubagentRun,
 import type { RuntimeMetadata } from "../api";
 import { clippedMathmlSelector, formulaBodySelector, formulaProbeOptions, projectMarkdownOutput } from "./chatMarkdown";
 import { bgTaskCardClass, bgTaskOutputClass, bgTaskSummaryClass, bgTaskSummaryDetails } from "./bgTaskSummary";
+import {
+  toolResultCardClass, toolResultHeaderClass, toolResultIconClass, toolResultLabelClass,
+  toolResultPresentation, toolResultPreviewClass,
+} from "./toolResultPresentation";
 
 type SessionState = ReturnType<typeof useSessionStore.getState>;
 
@@ -131,9 +135,13 @@ function backgroundOutputHasBody(change: LiveOutputChange) {
 }
 
 export function backgroundOutputOutside(body: HTMLElement, change: LiveOutputChange, port?: ReturnType<typeof scrollportBounds>) {
+  return singleLinePreviewOutside(body, change.text, changedCharacters(change.text, change.previous), port);
+}
+
+function singleLinePreviewOutside(body: HTMLElement, value: string, changed: TextSpan, port?: ReturnType<typeof scrollportBounds>,
+  segmentHasText = (segment: string) => Boolean(segment.trim())) {
   const clip = body.getBoundingClientRect();
   if (!clip.width || (port && clip.top >= port.top - 1 && clip.bottom <= port.bottom + 1)) return false;
-  const changed = changedCharacters(change.text, change.previous);
   const text = body.firstChild;
   if (!text || text.nodeType !== Node.TEXT_NODE) return false;
   const range = body.ownerDocument.createRange();
@@ -160,10 +168,10 @@ export function backgroundOutputOutside(body: HTMLElement, change: LiveOutputCha
     ellipsis.remove();
   }
   const firstEdge = Math.min(...line.map(leadingEdge));
-  for (const { index, segment } of new Intl.Segmenter().segment(change.text)) {
+  for (const { index, segment } of new Intl.Segmenter().segment(value)) {
     if (index >= changed.end) break;
     const end = index + segment.length;
-    if (end <= changed.start || !segment.trim()) continue;
+    if (end <= changed.start || !segmentHasText(segment)) continue;
     range.setStart(text, index);
     range.setEnd(text, end);
     const readable = Array.from(range.getClientRects()).some((box) => {
@@ -267,9 +275,15 @@ export function recordTranscriptOutput(pending: PendingTranscriptOutput, sid: st
     const known = new Set(oldRows?.map((message) => message.seq));
     const oldest = before.oldestSeq[sid] ?? ((before.lastAppliedSeq[sid] ?? -1) + 1);
     for (const message of rows) {
-      if (message.seq === undefined || message.seq < oldest || known.has(message.seq) || !message.content?.trim()) continue;
-      if ((message.type === "tool_result" && !isNativeChild(message.runtime_metadata)) ||
-        (message.role === "user" && message.type === "text" && backgroundResultMessage(message)?.summary.trim())) {
+      if (message.seq === undefined || message.seq < oldest || known.has(message.seq)) continue;
+      if (message.type === "tool_result") {
+        if (isNativeChild(message.runtime_metadata)) continue;
+        const { preview, errored, savedPath } = toolResultPresentation(message);
+        if (toolPreviewHasText(preview) || errored || savedPath?.trim()) pending.saved.set(message.seq, { message, previous: "" });
+        continue;
+      }
+      if (!message.content?.trim()) continue;
+      if (message.role === "user" && message.type === "text" && backgroundResultMessage(message)?.summary.trim()) {
         pending.saved.set(message.seq, { message, previous: "" });
         continue;
       }
@@ -458,8 +472,54 @@ function savedMarkdownChange(change: SavedOutputChange) {
   return projectMarkdownOutput(source, change.previous ? changedCharacters(source, change.previous) : undefined);
 }
 
-export function savedOutputHasBody(change: SavedOutputChange, viewport: HTMLElement) {
-  if (change.message.type === "tool_result") return true;
+function toolPreviewHasText(text: string) {
+  // A whole preview made of whitespace, format controls or Braille blanks has no visible text.
+  return /[^\s\p{Default_Ignorable_Code_Point}\u2800]/u.test(text);
+}
+
+function toolPreviewOutside(body: HTMLElement, port?: ReturnType<typeof scrollportBounds>) {
+  const text = body.textContent ?? "";
+  return toolPreviewHasText(text) && singleLinePreviewOutside(body, text, { start: 0, end: text.length }, port, toolPreviewHasText);
+}
+
+function collapsedToolResultHasBody(message: Message, row: HTMLElement) {
+  const { preview, errored, savedPath, label } = toolResultPresentation(message);
+  if (errored || savedPath?.trim()) return true;
+  if (!row.clientWidth || !toolPreviewHasText(preview)) return false;
+
+  const doc = row.ownerDocument;
+  const card = doc.createElement("div");
+  card.className = toolResultCardClass;
+  card.setAttribute("aria-hidden", "true");
+  // A probe outside the transcript cannot publish a layout mutation to its scroll observer.
+  const { fontFamily, direction } = getComputedStyle(row);
+  const zoom = row.currentCSSZoom ?? 1;
+  Object.assign(card.style, { position: "fixed", inset: "0 auto auto -10000px", visibility: "hidden",
+    width: `${row.getBoundingClientRect().width / zoom}px`, fontFamily, direction,
+    zoom: String(zoom / (doc.body.currentCSSZoom ?? 1)) });
+  const header = doc.createElement("button");
+  header.type = "button";
+  header.className = toolResultHeaderClass;
+  const icon = doc.createElement("span");
+  icon.className = toolResultIconClass;
+  const caption = doc.createElement("span");
+  caption.className = toolResultLabelClass;
+  caption.textContent = label;
+  const body = doc.createElement("code");
+  body.className = toolResultPreviewClass;
+  body.textContent = preview;
+  header.append(icon, caption, body);
+  card.append(header);
+  doc.body.append(card);
+  try {
+    return toolPreviewOutside(body);
+  } finally {
+    card.remove();
+  }
+}
+
+export function savedOutputHasBody(change: SavedOutputChange, viewport: HTMLElement, row: HTMLElement) {
+  if (change.message.type === "tool_result") return collapsedToolResultHasBody(change.message, row);
   if (change.message.role === "user") return !!backgroundResultMessage(change.message)?.summary.trim();
   const { spans, images, mathOutput } = savedMarkdownChange(change);
   if (spans.length || images.length) return true;
@@ -485,8 +545,16 @@ export function savedOutputHasBody(change: SavedOutputChange, viewport: HTMLElem
 }
 
 export function savedOutputOutside(row: HTMLElement, change: SavedOutputChange, port: ReturnType<typeof scrollportBounds>) {
-  const selector = change.message.type === "tool_result" ? ".tool-preview" : ".msg-content";
-  const body = row.querySelector<HTMLElement>(selector);
+  if (change.message.type === "tool_result") {
+    const card = row.querySelector<HTMLElement>(".msg-tool-result");
+    if (!card) return false;
+    const preview = card.querySelector<HTMLElement>(".tool-preview");
+    if (preview && toolPreviewOutside(preview, port)) return true;
+    const clip = card.getBoundingClientRect();
+    return Array.from(card.querySelectorAll<HTMLElement>("[data-tool-result-error], [data-tool-result-path]")).some((body) =>
+      readableSpansOutside(body, [{ start: 0, end: body.textContent?.length ?? 0 }], port, clip));
+  }
+  const body = row.querySelector<HTMLElement>(".msg-content");
   if (!body) return false;
   if (!change.previous && !body.querySelector(formulaBodySelector)) return readableChangeOutside(body, "", port);
   const projected = savedMarkdownChange(change);

@@ -3,13 +3,18 @@
 import asyncio
 import tempfile
 import threading
+from datetime import UTC, datetime
 
 import pytest
 from starlette import formparsers
 from starlette.datastructures import UploadFile
 
+from server import deps
 from server.attachments import MAX_FILE_BYTES, get_path
+from server.main import app
 from server.session_manager import session_manager
+from server.sessions import SessionManager
+from server.workspace import paths_for
 from tests.attachment_runtime import account_user_id as account_user_id
 from tests.attachment_runtime import client as client
 from tests.attachment_runtime import users_root as users_root
@@ -56,6 +61,85 @@ async def test_admission_rejects_before_receiving_or_parsing(client, upload_url,
     assert response.status_code == (401 if rejection == "unauthorized" else 404)
     assert consumed == []
     assert temporary_files == []
+
+
+@pytest.mark.parametrize("transition", ["archive", "delete", "archive-and-restore", "disable-account"])
+async def test_upload_rechecks_the_original_session_after_read(
+    client, upload_url, account_user_id, temporary_files, monkeypatch, transition,
+):
+    session_url = upload_url.removesuffix("/attachments")
+    destination = paths_for(account_user_id).attachments / session_url.rsplit("/", 1)[1]
+    read_finished, release = asyncio.Event(), asyncio.Event()
+    read = UploadFile.read
+
+    async def hold_after_read(file, size=-1):
+        data = await read(file, size)
+        read_finished.set()
+        await release.wait()
+        return data
+
+    monkeypatch.setattr(UploadFile, "read", hold_after_read)
+    pending = asyncio.create_task(client.post(upload_url, files={"file": ("old.bin", b"old upload")}))
+    try:
+        await asyncio.wait_for(read_finished.wait(), 3)
+        if transition == "disable-account":
+            assert await session_manager.db.set_user_disabled(account_user_id, at=datetime.now(UTC).isoformat())
+        else:
+            if transition == "delete":
+                closed = await client.delete(session_url)
+            else:
+                closed = await client.post(f"{session_url}/archive", params={"replace": "false"})
+            assert closed.status_code == 204, closed.text
+        if transition == "archive-and-restore":
+            status = await client.get(f"{session_url}/restoration")
+            assert status.status_code == 200, status.text
+            restored = await client.post(f"{session_url}/unarchive", json={
+                "operation_id": "restore-during-upload",
+                "service_generation": status.json()["service_generation"],
+            })
+            assert restored.status_code == 200, restored.text
+            assert restored.json()["state"] == "finished", restored.text
+        release.set()
+        rejected = await asyncio.wait_for(pending, 3)
+        assert rejected.status_code == 404, rejected.text
+        assert temporary_files and all(file.closed for file in temporary_files)
+        assert list(destination.glob("*")) == []
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
+
+    if transition == "archive-and-restore":
+        fresh = await client.post(upload_url, files={"file": ("new.bin", b"new upload")})
+        assert fresh.status_code == 201, fresh.text
+        downloaded = await client.get(f"{upload_url}/{fresh.json()['id']}")
+        assert downloaded.content == b"new upload"
+
+
+async def test_upload_refuses_a_failed_owner_before_its_cleanup_callback(
+    client, upload_url, account_user_id, temporary_files, monkeypatch,
+):
+    session_id = upload_url.split("/")[3]
+    manager = SessionManager()
+    await manager.initialize(session_manager.db)
+    monkeypatch.setitem(app.dependency_overrides, deps.get_session_manager, lambda: manager)
+    owner_ended = manager._owner_ended
+    cleanup_pending = asyncio.Event()
+
+    def delay_cleanup(owner, task):
+        cleanup_pending.set()
+
+    monkeypatch.setattr(manager, "_owner_ended", delay_cleanup)
+    owner = manager._session_owner(manager.get_session(session_id))
+    owner.task.cancel()
+    try:
+        await asyncio.wait_for(cleanup_pending.wait(), 3)
+        response = await client.post(upload_url, files={"file": ("closed.bin", b"must not save")})
+        assert response.status_code == 409, response.text
+        assert temporary_files and all(file.closed for file in temporary_files)
+        assert list((paths_for(account_user_id).attachments / session_id).glob("*")) == []
+    finally:
+        await asyncio.gather(owner.task, return_exceptions=True)
+        owner_ended(owner, owner.task)
 
 
 @pytest.mark.parametrize("declared_length", [None, "1"])
@@ -154,7 +238,9 @@ async def test_cancellation_during_parse_closes_rolled_files(client, upload_url,
     assert (await client.post(upload_url, files={"file": ("after.bin", b"complete")})).status_code == 201
 
 
-async def test_close_keeps_ownership_through_repeated_cancellation(client, upload_url, temporary_files, monkeypatch):
+async def test_close_keeps_ownership_and_saved_file_through_repeated_cancellation(
+    client, upload_url, account_user_id, temporary_files, monkeypatch,
+):
     closing, release = asyncio.Event(), asyncio.Event()
     close = UploadFile.close
 
@@ -181,6 +267,12 @@ async def test_close_keeps_ownership_through_repeated_cancellation(client, uploa
         release.set()
         request.cancel()
         await asyncio.gather(request, return_exceptions=True)
+    session_id = upload_url.split("/")[3]
+    [stored] = list((paths_for(account_user_id).attachments / session_id).iterdir())
+    attachment_id, filename = stored.name.split("__", 1)
+    assert filename == "rolled.bin"
+    download = await client.get(f"{upload_url}/{attachment_id}")
+    assert download.status_code == 200 and download.content == b"x" * (2 * 1024 * 1024)
     assert (await client.post(upload_url, files={"file": ("after.bin", b"complete")})).status_code == 201
 
 

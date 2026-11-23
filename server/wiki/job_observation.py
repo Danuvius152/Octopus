@@ -3,7 +3,6 @@
 from typing import Any
 
 from ..mcp_identity import McpScope
-from . import job_events
 from .contracts import JobSnapshot
 from .registry import registry
 from .store import WikiError
@@ -26,7 +25,6 @@ def _current_cards(user_id: str | None, cards: list[dict[str, Any]], scope: McpS
     with store.operation(), registry.registered(user_id, store) as registration, store.connect() as db:
         tasks.caller(user_id, scope, registration)
         db.execute("BEGIN")
-        job_events.require(db)
         result = []
         for card in cards:
             if card["vault_id"] != registration["vault_id"]:

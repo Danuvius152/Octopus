@@ -8,7 +8,8 @@ import pytest
 
 from server.harness import HarnessEvent
 from tests import wiki_api
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
+from tests.schedule_support import dispatch_schedule
 from tests.test_scheduler import save_schedule
 from tests.test_scheduler import setup as setup
 from tests.test_wiki_job_events import enqueue
@@ -21,22 +22,23 @@ def asking_runs(manager, monkeypatch, failure=None):
     starts = []
     class Run(FakeRunBase):
         def __init__(self, session_id):
+            super().__init__()
             self.session_id = session_id
             self.ready = asyncio.Event()
-        async def start(self, prompt, *args, **kwargs):
+        async def _start(self, prompt, *args, **kwargs):
             starts.append(self.session_id)
             self.ready.set()
-        async def stream(self):
+        async def _stream(self):
             await self.ready.wait()
             qid = await manager.create_pending_question(self.session_id, [{"question": "Which destination is authorized?"}])
             assert not manager.has_pending_question(self.session_id, qid)
             yield HarnessEvent(type="text", content="Independent analysis is complete. Destination decision is still needed; dependent publication stopped.")
             yield HarnessEvent(type="result", content=failure, is_error=failure is not None)
-        async def stop(self):
+        async def _stop_process(self):
             pass
         async def interrupt(self):
             pass
-    monkeypatch.setattr(manager, "_make_run", lambda session, *args, **kwargs: Run(session.id))
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda session, *args, **kwargs: Run(session.id)))
     return starts
 
 
@@ -46,14 +48,14 @@ async def test_one_shot_missing_decision_consumes_original_fire_without_automati
     starts = asking_runs(manager, monkeypatch)
     await save_schedule(database, schedule_id="missing-decision-fire", agent_id=agent["id"], name="Missing destination",
         prompt="Analyze independently; publish only to an authorized destination", run_at="2026-11-01T01:00:00+00:00", created_at="2026-11-01")
-    await runner._fire("missing-decision-fire")
+    await dispatch_schedule(runner, "missing-decision-fire")
     assert len(starts) == 1
     rows = await database.load_messages(starts[0])
     closed, = [row for row in rows if row["type"] == "question_closed"]
     assert closed["tool_input"]["reason"] == "needs_input"
     assert "destination" in closed["content"].lower()
     assert await database.get_schedule_definition("missing-decision-fire") is None
-    await runner._fire("missing-decision-fire")
+    await dispatch_schedule(runner, "missing-decision-fire")
     assert len(starts) == 1
 
 

@@ -1,3 +1,4 @@
+import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { enterAccountCredentials } from "./current-account";
 import { expect, test, type Page, type WebSocketRoute } from "./test";
 import type { PendingQuestion } from "../src/stores/sessionStore";
@@ -25,7 +26,7 @@ test("optional input pauses only on user interaction and both pages read the pau
     else if (path === "/api/auth/login") data = { token: "browser-token" };
     else if (path === "/api/auth/identity") data = { user_id: "browser-user", label: "Operator", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
-    else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
+    else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
     else if (path === `/api/sessions/${session.id}/submissions`) data = { items: [] };
     else if (path === `/api/sessions/${session.id}`) data = { ...session,

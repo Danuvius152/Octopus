@@ -9,7 +9,7 @@ import pytest
 
 from tests.accounts import create_account
 from tests.browser_message_samples import control_sample
-from tests.fake_run import FakeRunBase
+from tests.fake_run import FakeRunBase, model_run_factory
 from tests.message_export_runtime import export_runtime as export_runtime
 from tests.websocket_client import connection, frame
 
@@ -495,10 +495,10 @@ async def test_pending_question_keeps_saved_reference_outside_the_browser_window
     started, release, emitted, finish = (asyncio.Event() for _ in range(4))
 
     class Run(FakeRunBase):
-        async def start(self, *args, **kwargs):
+        async def _start(self, *args, **kwargs):
             started.set()
 
-        async def stream(self):
+        async def _stream(self):
             await release.wait()
             for _ in range(100):
                 yield HarnessEvent(type="text", content="Later text " * 4_000)
@@ -506,14 +506,14 @@ async def test_pending_question_keeps_saved_reference_outside_the_browser_window
             await finish.wait()
             yield HarnessEvent(type="result", session_id="question-browser-native")
 
-        async def stop(self):
+        async def _stop_process(self):
             release.set()
             finish.set()
 
         async def interrupt(self):
             await self.stop()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    monkeypatch.setattr(manager, "_make_run", model_run_factory(lambda *args, **kwargs: Run()))
     questions = [{"question": "Question body " * 20_000, "options": [{"label": "Keep the exact original option"}]}]
     receipt = await manager.start_message(session.id, "Keep the question visible")
     try:

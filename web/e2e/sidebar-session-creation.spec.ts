@@ -1,7 +1,7 @@
 import { ACCOUNT_API } from "./account-resources";
 import { accountToken, enterAccountCredentials } from "./current-account";
 import { systemAgentId } from "./system-agent";
-import { expect, test, type APIRequestContext, type Page } from "./test";
+import { expect, test, type APIRequestContext, type Page, type WebSocketRoute } from "./test";
 
 const endpoint = `${ACCOUNT_API}/sessions`;
 const touchOptions = { viewport: { width: 320, height: 844 }, isMobile: true, hasTouch: true };
@@ -10,15 +10,18 @@ async function observeSession(page: Page, request: APIRequestContext, agentId: s
   const response = await request.post(endpoint, { headers, data: { agent_id: agentId, name: "Existing conversation" } });
   expect(response.ok()).toBe(true);
   const { id } = await response.json() as { id: string };
-  let status = "idle";
-  // Publish running to the browser while keeping the real creation API offline.
+  let status: "idle" | "running" | undefined;
+  // Use the scripted session status for list refreshes as well as WS events.
   await page.route("**/api/sessions", async (route) => {
-    if (status === "idle") return route.fallback();
+    if (status === undefined) return route.fallback();
     const response = await route.fetch();
     const sessions = await response.json() as { id: string }[];
     await route.fulfill({ response, json: sessions.map((session) => session.id === id ? { ...session, status } : session) });
   });
-  return { id, markRunning: () => { status = "running"; } };
+  return {
+    id,
+    setStatus: (next: "idle" | "running") => { status = next; },
+  };
 }
 
 for (const touch of [false, true]) {
@@ -29,7 +32,7 @@ for (const touch of [false, true]) {
       const headers = { Authorization: `Bearer ${accountToken()}` };
       const agentId = await systemAgentId(request, endpoint, headers);
       const original = await observeSession(page, request, agentId, headers);
-      if (touch) original.markRunning();
+      if (touch) original.setStatus("running");
 
       await page.goto("/");
       await enterAccountCredentials(page);
@@ -57,11 +60,13 @@ for (const touch of [false, true]) {
         await expect(sessionName).toBeHidden();
         await expect(add).toHaveCSS("opacity", "1");
         await add.tap();
+        await expect(page.getByRole("complementary", { name: "Sidebar" })).toHaveClass(/\bopen\b/);
+        await expect(page.getByRole("button", { name: "Save Agent" })).toBeHidden();
       } else {
         await row.hover();
         await expect(add).toHaveCSS("opacity", "1");
         const idleX = (await add.boundingBox())!.x;
-        original.markRunning();
+        original.setStatus("running");
         await page.reload();
         await row.hover();
         await expect(badge).toBeVisible();
@@ -119,7 +124,10 @@ for (const touch of [false, true]) {
       if (touch) await openDrawer.tap();
       await expect(badge).toBeVisible();
       await expect(page.locator(`.session-item[data-session-id="${original.id}"] .status-running`)).toBeVisible();
-      if (!touch) {
+      if (touch) {
+        await row.dblclick();
+        await expect(page.getByRole("button", { name: "Save Agent" })).toBeVisible();
+      } else {
         await page.mouse.move(263, 400);
         await page.getByRole("button", { name: "Collapse sidebar" }).click();
         await expect(add).toBeHidden();
@@ -130,46 +138,185 @@ for (const touch of [false, true]) {
   });
 }
 
-test.describe("touch sidebar actions", () => {
-  test.use(touchOptions);
-
-  test("a running agent's pin and add buttons have distinct tap targets", async ({ page, request }) => {
-    const headers = { Authorization: `Bearer ${accountToken()}` };
-    const name = "An agent with a long display name";
-    const response = await request.post(`${ACCOUNT_API}/agents`, { headers, data: { name } });
-    expect(response.ok()).toBe(true);
-    const { id } = await response.json() as { id: string };
-    const original = await observeSession(page, request, id, headers);
-    original.markRunning();
-
+for (const hiddenBy of ["closed drawer", "collapsed desktop rail"] as const) {
+test(`hiding the creating form with the ${hiddenBy} retires its navigation`, async ({ page, request }) => {
+  const headers = { Authorization: `Bearer ${accountToken()}` };
+  const agentId = await systemAgentId(request, endpoint, headers);
+  const original = await observeSession(page, request, agentId, headers);
+  const path = `/api/agents/${agentId}/sessions`;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route((url) => url.pathname === path, async (route) => {
+    const response = await route.fetch();
+    await held;
+    await route.fulfill({ response });
+  });
+  try {
     await page.goto("/");
     await enterAccountCredentials(page);
-    expect(await page.evaluate(() => matchMedia("(hover: none)").matches)).toBe(true);
-    const openDrawer = page.getByRole("button", { name: "Toggle sidebar", exact: true });
-    await openDrawer.tap();
-    const row = page.locator(".agent-item", { hasText: name });
-    await row.getByText(name, { exact: true }).tap();
-    await expect(row.getByText("1 running", { exact: true })).toBeVisible();
-    const unpin = row.getByRole("button", { name: `Unpin ${name} from the sidebar`, exact: true });
-    const pin = row.getByRole("button", { name: `Pin ${name} to the sidebar`, exact: true });
-    const sessionName = page.getByPlaceholder("Session name");
+    const agent = page.locator(".agent-item", { hasText: "Octo" });
+    await agent.click();
+    await page.locator(`[data-session-id="${original.id}"]`).click();
+    const desktop = page.viewportSize()!;
+    const narrow = { width: 700, height: desktop.height };
+    if (hiddenBy === "collapsed desktop rail") {
+      await page.getByRole("button", { name: "Collapse sidebar" }).press("Enter");
+      await page.setViewportSize(narrow);
+      await page.getByRole("button", { name: "Toggle sidebar", exact: true }).click();
+    }
+    const add = page.getByRole("button", { name: "New session for Octo", exact: true });
+    const name = page.getByPlaceholder("Session name");
+    await add.click();
+    await name.fill("Created before resizing");
+    const posted = page.waitForRequest((outbound) => new URL(outbound.url()).pathname === path && outbound.method() === "POST");
+    await page.getByRole("button", { name: "Create session" }).click();
+    await posted;
 
-    await expect(unpin).toHaveCSS("opacity", "1");
-    const unpinBounds = (await unpin.boundingBox())!;
-    await page.touchscreen.tap(Math.floor(unpinBounds.x + unpinBounds.width) - 1, unpinBounds.y + unpinBounds.height / 2);
-    await expect(pin).toBeInViewport();
-    await expect(sessionName).toBeHidden();
+    if (hiddenBy === "collapsed desktop rail") {
+      await page.setViewportSize(desktop);
+      await expect(add).toBeHidden();
+    } else {
+      await page.setViewportSize(narrow);
+      await expect(name).toHaveCount(0);
+      await page.setViewportSize(desktop);
+      await add.click();
+      await name.fill("Independent draft");
+    }
 
-    // Reopen from the persisted unpinned state as a separate interaction.
-    await page.reload();
-    await openDrawer.tap();
-    await row.getByText(name, { exact: true }).tap();
-    await expect(pin).toHaveCSS("opacity", "1");
-    const pinBounds = (await pin.boundingBox())!;
-    await page.touchscreen.tap(Math.floor(pinBounds.x + pinBounds.width) - 1, pinBounds.y + pinBounds.height / 2);
-    await expect(unpin).toBeVisible();
-    await expect(sessionName).toBeHidden();
-    await row.getByRole("button", { name: `New session for ${name}`, exact: true }).tap();
-    await expect(sessionName).toBeVisible();
-  });
+    const receipt = page.waitForResponse((response) => new URL(response.url()).pathname === path);
+    release();
+    const result = await receipt;
+    expect(result.status()).toBe(201);
+    const created: { id: string } = await result.json();
+    if (hiddenBy === "collapsed desktop rail") {
+      await page.getByRole("button", { name: "Expand sidebar" }).press("Enter");
+    }
+    await expect(page.locator(`[data-session-id="${created.id}"]`)).toBeVisible();
+    if (hiddenBy === "closed drawer") await expect(name).toHaveValue("Independent draft");
+    else await expect(name).toHaveCount(0);
+    await expect(page.locator(`[data-chat-session="${original.id}"]`)).toBeVisible();
+  } finally { release(); }
 });
+}
+
+for (const touch of [false, true]) {
+  test.describe(touch ? "touch sidebar actions" : "desktop sidebar actions", () => {
+    if (touch) test.use(touchOptions);
+
+    test("an ordinary agent swaps pin controls for the running badge", async ({ page, request }) => {
+      const headers = { Authorization: `Bearer ${accountToken()}` };
+      const name = "An agent with a long display name";
+      const response = await request.post(`${ACCOUNT_API}/agents`, { headers, data: { name } });
+      expect(response.ok()).toBe(true);
+      const { id } = await response.json() as { id: string };
+      const original = await observeSession(page, request, id, headers);
+      original.setStatus("idle");
+      let socket: WebSocketRoute | undefined;
+      await page.routeWebSocket("**/ws?*", (ws) => { socket = ws; });
+
+      await page.goto("/");
+      await enterAccountCredentials(page);
+      expect(await page.evaluate(() => matchMedia("(hover: none)").matches)).toBe(touch);
+      const openDrawer = page.getByRole("button", { name: "Toggle sidebar", exact: true });
+      const showDrawer = async () => {
+        await openDrawer.tap();
+        await expect(page.getByRole("complementary", { name: "Sidebar" })).toHaveCSS("left", "0px");
+      };
+      if (touch) await showDrawer();
+      const row = page.locator(".agent-item", { hasText: name });
+      const agentName = row.getByText(name, { exact: true });
+      const session = page.locator(`.session-item[data-session-id="${original.id}"]`);
+      const openOriginalSession = async () => {
+        if (touch) {
+          await agentName.tap();
+          await session.tap();
+        } else {
+          await agentName.click();
+          await session.click();
+        }
+        await expect(page.locator(`[data-chat-session="${original.id}"]`)).toBeVisible();
+        if (touch) await showDrawer();
+        else await row.hover();
+        await expect(row).toHaveClass(/expanded/);
+        await expect.poll(() => Boolean(socket)).toBe(true);
+      };
+      await openOriginalSession();
+
+      const badge = row.getByText("1 running", { exact: true });
+      const unpin = row.getByRole("button", { name: `Unpin ${name} from the sidebar`, exact: true });
+      const pin = row.getByRole("button", { name: `Pin ${name} to the sidebar`, exact: true });
+      const add = row.getByRole("button", { name: `New session for ${name}`, exact: true });
+      const sessionName = page.getByPlaceholder("Session name");
+      const publish = (status: "running" | "idle") => {
+        original.setStatus(status);
+        socket!.send(JSON.stringify({ type: "status", session_id: original.id, status }));
+      };
+      const pressPinAction = async (button: typeof pin) => {
+        await expect(button).toHaveCSS("opacity", "1");
+        if (!touch) return button.click();
+        const bounds = (await button.boundingBox())!;
+        await page.touchscreen.tap(Math.floor(bounds.x + bounds.width) - 1, bounds.y + bounds.height / 2);
+      };
+
+      await expect(unpin).toBeVisible();
+      const addX = (await add.boundingBox())!.x;
+      publish("running");
+      await expect(badge).toBeVisible();
+      await expect(unpin).toHaveCount(0);
+      await expect(add).toHaveCSS("opacity", "1");
+      expect((await add.boundingBox())!.x).toBe(addX);
+      if (touch) {
+        const bounds = (await add.boundingBox())!;
+        await page.touchscreen.tap(bounds.x - 6, bounds.y + bounds.height / 2);
+      } else {
+        await add.click();
+      }
+      await expect(sessionName).toBeVisible();
+      const cancel = page.getByRole("button", { name: "Cancel new session" });
+      if (touch) await cancel.tap();
+      else await cancel.click();
+      await expect(sessionName).toBeHidden();
+
+      publish("idle");
+      await expect(badge).toHaveCount(0);
+      if (!touch) await row.hover();
+      await pressPinAction(unpin);
+      await expect(row).toHaveClass(/unpinned/);
+      await expect(sessionName).toBeHidden();
+      publish("running");
+      await expect(badge).toBeVisible();
+      await expect(pin).toHaveCount(0);
+      publish("idle");
+      await expect(badge).toHaveCount(0);
+      await expect(pin).toBeVisible();
+
+      if (touch) {
+        // Keep the unpinned row present on reload until its session is opened.
+        original.setStatus("running");
+        socket = undefined;
+        await page.reload();
+        await showDrawer();
+        await expect(row).toHaveClass(/unpinned/);
+        await expect(badge).toBeVisible();
+        await openOriginalSession();
+        publish("idle");
+        await expect(badge).toHaveCount(0);
+        await expect(pin).toHaveCSS("opacity", "1");
+        await expect(add).toHaveCSS("opacity", "1");
+        const bounds = (await add.boundingBox())!;
+        // The adjacent Pin limits the enlarged + target to its half of the gap.
+        await page.touchscreen.tap(bounds.x - 2, bounds.y + bounds.height / 2);
+        await expect(sessionName).toBeVisible();
+        await expect(row).toHaveClass(/unpinned/);
+        await cancel.tap();
+        await expect(sessionName).toBeHidden();
+      } else {
+        await row.hover();
+      }
+      await pressPinAction(pin);
+      await expect(row).not.toHaveClass(/unpinned/);
+      await expect(unpin).toBeVisible();
+      await expect(sessionName).toBeHidden();
+    });
+  });
+}
