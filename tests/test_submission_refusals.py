@@ -33,7 +33,7 @@ async def test_corrupt_subagent_extension_is_refused_before_admitting_a_request(
 
     async with session_client(manager, session) as http:
         response = await http.post(f"/api/sessions/{session.id}/submissions", json={
-            "client_request_id": "bad-subagent-extension", "content": "Refuse before input is admitted",
+            "expected_backend": "codex", "client_request_id": "bad-subagent-extension", "content": "Refuse before input is admitted",
         })
     assert response.status_code == 200
     refusal = response.json()
@@ -106,7 +106,7 @@ async def test_invalid_submission_json_has_serializable_refusals_and_keeps_socke
         assert starts.empty()
 
         await socket[0].put({"type": "websocket.receive", "text": json.dumps({
-            "type": "send_message", "session_id": session.id, "client_request_id": "valid-unicode", "content": "Valid 🙌 中文",
+            "type": "send_message", "session_id": session.id, "expected_backend": "codex", "client_request_id": "valid-unicode", "content": "Valid 🙌 中文",
         })})
         followup = await receipt_frame(socket[1], "submission")
         assert followup["accepted"] is True and followup["input"]["content"] == "Valid 🙌 中文"
@@ -132,7 +132,7 @@ async def test_submission_does_not_echo_unencodable_socket_identities(runtime):
         assert await db.get_client_submission(session.id, "valid-identity") is None
         assert starts.empty()
 
-        await send(session_id=session.id, client_request_id="valid-identity")
+        await send(session_id=session.id, client_request_id="valid-identity", expected_backend=session.backend)
         assert (await receipt_frame(socket[1], "submission"))["accepted"] is True
         await wait_dispatch_idle(manager, session.id)
 
@@ -215,7 +215,7 @@ async def test_transports_accept_same_message_text_attachments_and_wiki_control(
     async with session_client(manager, session) as http, session_socket(manager, session) as send:
         async def submit(transport):
             body = {"operation": {"kind": "message", **fields}} if transport == "typed" else fields
-            payload = {"client_request_id": "same-input", **body}
+            payload = {"expected_backend": "codex", "client_request_id": "same-input", **body}
             if transport == "http":
                 response = await http.post(endpoint, json=payload)
                 assert response.status_code == 200
@@ -235,7 +235,7 @@ async def test_transports_accept_same_message_text_attachments_and_wiki_control(
         assert status["input"]["attachment_ids"] == attachment_ids
         assert [item["id"] for item in status["input"]["attachments"]] == attachment_ids
         assert status["input"]["wiki_mode"] == "maintain"
-        reordered = await send({"session_id": session.id, "client_request_id": "same-input", **fields,
+        reordered = await send({"session_id": session.id, "expected_backend": "codex", "client_request_id": "same-input", **fields,
                                 "attachment_ids": list(reversed(attachment_ids))})
         assert reordered["accepted"] is False and reordered["code"] == "submission_conflict"
 
@@ -252,7 +252,7 @@ async def test_flat_websocket_attachment_only_message_may_omit_content(runtime, 
     manager, db, session, _, starts, _ = runtime
     attachment = save_upload(session.id, "only.txt", b"document", user_id=session.user_id)
     endpoint = f"/api/sessions/{session.id}/submissions"
-    payload = {"client_request_id": "file-only", "attachment_ids": [attachment.id], **shape}
+    payload = {"expected_backend": "codex", "client_request_id": "file-only", "attachment_ids": [attachment.id], **shape}
     async with session_client(manager, session) as http, session_socket(manager, session) as send:
         receipt = await send({"session_id": session.id, **payload})
         assert receipt["accepted"] is True and receipt["input"]["content"] == ""
@@ -279,12 +279,12 @@ async def test_attachment_unreadable_at_hash_is_refused_before_admission(runtime
         return open_file(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", deny_attachment_open)
-    payload = {"client_request_id": "unreadable-file", "attachment_ids": [attachment.id]}
+    payload = {"expected_backend": "codex", "client_request_id": "unreadable-file", "attachment_ids": [attachment.id]}
     async with session_client(manager, session) as http, session_socket(manager, session) as send:
         http_response = await http.post(endpoint, json=payload)
         assert http_response.status_code == 200
         flat = await send({"session_id": session.id, **payload})
-        typed = await send({"session_id": session.id, "client_request_id": "unreadable-file", "operation": {
+        typed = await send({"session_id": session.id, "expected_backend": "codex", "client_request_id": "unreadable-file", "operation": {
             "kind": "message", "content": "", "attachment_ids": [attachment.id],
         }})
         for refusal in (http_response.json(), flat, typed):
@@ -303,7 +303,7 @@ async def test_committed_submission_with_unreadable_receipt_is_confirmed_by_orig
     manager, db, session, _, starts, _ = runtime
     file = save_upload(session.id, "keep.txt", b"document", user_id=session.user_id)
     message = {"content": "  Keep the original input 中文\n", "attachment_ids": [file.id]}
-    payload = {"client_request_id": "lost-receipt", **message}
+    payload = {"expected_backend": "codex", "client_request_id": "lost-receipt", **message}
     endpoint = f"/api/sessions/{session.id}/submissions"
     read = db.get_client_submission
     lost = []
@@ -324,7 +324,7 @@ async def test_committed_submission_with_unreadable_receipt_is_confirmed_by_orig
             assert response.status_code == 200
             first = response.json()
         else:
-            first = await send({"session_id": session.id, "client_request_id": "lost-receipt",
+            first = await send({"session_id": session.id, "expected_backend": "codex", "client_request_id": "lost-receipt",
                                 "operation": {"kind": "message", **message}})
         assert first["accepted"] is False and first["state"] == "unknown"
         assert first["code"] == "admission_unknown" and first["client_request_id"] == "lost-receipt"
@@ -345,7 +345,7 @@ async def test_committed_submission_with_unreadable_receipt_is_confirmed_by_orig
 async def test_concurrent_duplicate_confirms_original_when_owner_receipt_read_fails(runtime, monkeypatch):
     manager, db, session, _, starts, _ = runtime
     endpoint = f"/api/sessions/{session.id}/submissions"
-    payload = {"client_request_id": "concurrent-input", "content": "Process this once"}
+    payload = {"expected_backend": "codex", "client_request_id": "concurrent-input", "content": "Process this once"}
     read = db.get_client_submission
     both_prechecked = asyncio.Event()
     prechecked = 0
@@ -384,7 +384,7 @@ async def test_concurrent_duplicate_confirms_original_when_owner_receipt_read_fa
 async def test_transports_return_the_same_validated_receipt_types(runtime, monkeypatch):
     manager, db, session, _, starts, _ = runtime
     endpoint = f"/api/sessions/{session.id}/submissions"
-    payload = {"client_request_id": "legacy-boolean", "content": "Process this once"}
+    payload = {"expected_backend": "codex", "client_request_id": "legacy-boolean", "content": "Process this once"}
     read = db.get_client_submission
 
     async def read_snapshot_with_legacy_boolean(session_id, client_id):
@@ -408,7 +408,7 @@ async def test_transports_return_the_same_validated_receipt_types(runtime, monke
 
 async def test_untrusted_commit_inside_owner_stops_public_confirmation_and_replay(runtime, monkeypatch):
     manager, db, session, _, starts, _ = runtime
-    payload = {"client_request_id": "untrusted-commit", "content": "Do not replay this input"}
+    payload = {"expected_backend": "codex", "client_request_id": "untrusted-commit", "content": "Do not replay this input"}
     endpoint = f"/api/sessions/{session.id}/submissions"
     admit, commit = db.admit_client_submission, db.conn.commit
     statements, exit_codes = [], []
@@ -453,7 +453,7 @@ async def test_untrusted_commit_inside_owner_stops_public_confirmation_and_repla
 async def test_owner_post_commit_failure_keeps_original_input_observable(runtime, monkeypatch):
     manager, db, session, _, starts, _ = runtime
     endpoint = f"/api/sessions/{session.id}/submissions"
-    payload = {"client_request_id": "committed-before-owner-error", "content": "Keep this input"}
+    payload = {"expected_backend": "codex", "client_request_id": "committed-before-owner-error", "content": "Keep this input"}
 
     async def fail_settlement(self, *, withdraw_returns):
         raise ValueError("Prior work could not settle")

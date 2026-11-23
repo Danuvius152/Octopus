@@ -318,11 +318,16 @@ terminal 及原 Owner 接管。它们不证明生产已经部署。
 ## HTTP and WebSocket
 
 `POST /api/sessions/{session_id}/submissions` and WebSocket `send_message`
-share the same authenticated admission path. The HTTP request contains
-`client_request_id`, `content`, optional `attachment_ids`, `wiki_mode` and
-`recovery_of_client_id`. A refusal has `accepted: false`; an uncertain
-acknowledgment also has `state: "unknown"` and must not be treated as proof
-that the input was never accepted.
+share the same authenticated admission path. New submissions carry
+`client_request_id`, the engine shown by the client in `expected_backend`,
+and the operation or message data. A refusal has `accepted: false`.
+An uncertain acknowledgment also has `state: "unknown"`.
+
+The original receipt takes precedence over the engine precondition. A first
+submission with a missing or stale engine returns `engine_changed` before
+admission. The browser refreshes the conversation and retains the rejected
+text and files for explicit restoration. The engine precondition does not
+participate in the input digest.
 
 `GET /api/sessions/{session_id}/submissions/{client_id}` returns the original
 input, attachment evidence and execution result. The collection GET returns

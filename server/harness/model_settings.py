@@ -28,13 +28,14 @@ async def model_settings_for(
     return harness.model_settings(credential)
 
 
+SESSION_OVERRIDE_FIELDS = ("model", "reasoning_effort", "service_tier", "credential_id")
+
+
 def effective_settings(session: Any, agent: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Resolve each override independently; an empty override inherits."""
-    defaults = agent or {}
-    def value(field: str):
-        override = session.get(field) if isinstance(session, Mapping) else getattr(session, field, None)
-        return override or defaults.get(field)
-    return {field: value(field) for field in ("model", "reasoning_effort", "service_tier", "credential_id")}
+    """Resolve overrides using the source saved when the engine was chosen."""
+    read = session.get if isinstance(session, Mapping) else lambda field, default=None: getattr(session, field, default)
+    defaults = (agent or {}) if read("defaults_source", "agent") == "agent" else {}
+    return {field: read(field) or defaults.get(field) for field in SESSION_OVERRIDE_FIELDS}
 
 
 @dataclass
@@ -54,16 +55,23 @@ class ModelSettings:
     default_reasoning_effort: str | None = None
     service_tiers: list[str] = field(default_factory=list)
     default_service_tier: str | None = None
+    catalog_error: str | None = None
+    saved_model_options: list[ModelOption] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        # Not a dataclass field: hidden models constrain validation without
-        # leaking into the public picker or the serialized catalog.
+        # Hidden models constrain validation. Only explicitly requested saved
+        # IDs are projected for editing; they stay out of the picker.
         self._known_models = {model.id: model for model in self.models}
 
     def add_model(self, option: ModelOption, *, visible: bool) -> None:
         self._known_models[option.id] = option
         if visible:
             self.models.append(option)
+
+    def options_for_saved_models(self, model_ids: list[str]) -> list[ModelOption]:
+        visible = {model.id for model in self.models}
+        return [self._known_models[model_id] for model_id in dict.fromkeys(model_ids)
+                if model_id in self._known_models and model_id not in visible]
 
     def efforts_for(self, model: str | None) -> list[str]:
         selected = model or self.default_model

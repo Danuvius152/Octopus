@@ -1495,18 +1495,15 @@ async def test_competing_archive_cannot_report_a_commit_owned_by_the_other_post(
 
 
 @pytest.mark.asyncio
-async def test_archive_configuration_failure_reports_committed_effect_and_successor(manager, monkeypatch):
+async def test_archive_configuration_failure_preserves_history_without_a_partial_successor(manager, monkeypatch):
     old = await _new(manager, name="Archive partial result")
     old.model = "original-model"
     await manager.db.update_session_field(old.id, model=old.model)
-    update = manager.db.update_session_field
+    async def refuse_successor_configuration(**fields):
+        assert fields["model"] == old.model
+        raise ValueError("Successor configuration storage refused")
 
-    async def refuse_successor_configuration(session_id, **fields):
-        if session_id != old.id and "model" in fields:
-            raise ValueError("Successor configuration storage refused")
-        await update(session_id, **fields)
-
-    monkeypatch.setattr(manager.db, "update_session_field", refuse_successor_configuration)
+    monkeypatch.setattr(manager.db, "save_session", refuse_successor_configuration)
     events = []
     manager.on_broadcast("partial-archive-test", lambda event: asyncio.sleep(0, result=events.append(copy.deepcopy(event))))
     async with await _session_client(manager, old) as client:
@@ -1515,14 +1512,13 @@ async def test_archive_configuration_failure_reports_committed_effect_and_succes
         result = response.json()
         assert result == {
             "old_session_id": old.id, "archived": True,
-            "new_session_id": manager.list_sessions()[0].id,
-            "failure_stage": "successor_configuration",
+            "new_session_id": None,
+            "failure_stage": "successor_creation",
             "message": "Successor configuration storage refused",
         }
         archived = await client.get(f"/api/sessions/{old.id}")
         assert archived.json()["archived"] is True
-        successor = await client.get(f"/api/sessions/{result['new_session_id']}")
-        assert successor.json()["model"] is None
+        assert manager.list_sessions() == []
     frames = [event for event in events if event.get("type") == "session_archived"]
     assert len(frames) == 1
     assert frames[0]["archive_result"] == result
@@ -1535,20 +1531,19 @@ async def test_archive_successor_is_private_until_configuration_settles(manager,
     old.model = "original-model"
     await manager.db.update_session_field(old.id, model=old.model)
     entered, release = asyncio.Event(), asyncio.Event()
-    update = manager.db.update_session_field
+    save = manager.db.save_session
     successor_id = None
 
-    async def block_configuration(session_id, **fields):
+    async def block_configuration(**fields):
         nonlocal successor_id
-        if session_id != old.id and "model" in fields:
-            successor_id = session_id
-            entered.set()
-            await release.wait()
-            if fail:
-                raise ValueError("Configuration unavailable")
-        await update(session_id, **fields)
+        successor_id = fields["session_id"]
+        entered.set()
+        await release.wait()
+        if fail:
+            raise ValueError("Configuration unavailable")
+        await save(**fields)
 
-    monkeypatch.setattr(manager.db, "update_session_field", block_configuration)
+    monkeypatch.setattr(manager.db, "save_session", block_configuration)
     async with await _session_client(manager, old) as client:
         archive = asyncio.create_task(client.post(f"/api/sessions/{old.id}/archive"))
         try:
@@ -1566,10 +1561,12 @@ async def test_archive_successor_is_private_until_configuration_settles(manager,
             response = await asyncio.wait_for(archive, 2)
         assert response.status_code == (500 if fail else 201)
         successor = manager.get_session(successor_id)
-        assert successor is not None
-        assert successor.model == (None if fail else old.model)
-        saved = next(row for row in await manager.db.load_sessions() if row["id"] == successor_id)
-        assert saved["model"] == successor.model
+        saved = await manager.db.load_sessions()
+        if fail:
+            assert successor is None and saved == []
+        else:
+            assert successor is not None and successor.model == old.model
+            assert len(saved) == 1 and saved[0]["model"] == successor.model
 
 
 @pytest.mark.asyncio
@@ -1611,17 +1608,16 @@ async def test_archive_private_successor_preserves_credential_deletion_consisten
     )
     old = await _new(manager, credential_id="archive-binding")
     entered, release = asyncio.Event(), asyncio.Event()
-    update = manager.db.update_session_field
+    save = manager.db.save_session
 
-    async def block_configuration(session_id, **fields):
-        if session_id != old.id and "model" in fields:
-            entered.set()
-            await release.wait()
-            if fail:
-                raise ValueError("Configuration unavailable")
-        await update(session_id, **fields)
+    async def block_configuration(**fields):
+        entered.set()
+        await release.wait()
+        if fail:
+            raise ValueError("Configuration unavailable")
+        await save(**fields)
 
-    monkeypatch.setattr(manager.db, "update_session_field", block_configuration)
+    monkeypatch.setattr(manager.db, "save_session", block_configuration)
     async with await _session_client(manager, old) as client:
         archive = asyncio.create_task(client.post(f"/api/sessions/{old.id}/archive"))
         deleting = None
@@ -1640,10 +1636,36 @@ async def test_archive_private_successor_preserves_credential_deletion_consisten
                 deleted = await asyncio.wait_for(deleting, 2)
         assert response.status_code == (500 if fail else 201)
         assert deleted is not None
-    successor = manager.list_sessions()[0]
-    saved = next(row for row in await manager.db.load_sessions() if row["id"] == successor.id)
     assert await manager.db.get_credential("archive-binding", owner) is None
-    assert successor.credential_id == saved["credential_id"] is None
+    saved = await manager.db.load_sessions()
+    if fail:
+        assert manager.list_sessions() == [] and saved == []
+    else:
+        successor, = manager.list_sessions()
+        row, = saved
+        assert successor.credential_id == row["credential_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_archive_successor_reads_binding_if_credential_deletion_finishes_first(manager, monkeypatch):
+    owner = (await manager.db.get_system_agent())["user_id"]
+    await manager.db.save_credential(
+        credential_id="archive-binding", backend="claude-code", label="Archive binding",
+        auth_type="api_key", secret_encrypted="unused", created_at="2026-11-17T00:00:00+00:00", user_id=owner,
+    )
+    old = await _new(manager, credential_id="archive-binding")
+    prepare = manager._prepare_archive_successor
+
+    async def delete_then_prepare(archived, successor):
+        assert archived.id not in manager.sessions
+        assert await manager.delete_credential_binding("archive-binding", owner) is not None
+        return await prepare(archived, successor)
+
+    monkeypatch.setattr(manager, "_prepare_archive_successor", delete_then_prepare)
+    successor = await manager.archive_session(old.id)
+    rows = {row["id"]: row for row in await manager.db.load_sessions(include_archived=True)}
+    assert rows[old.id]["credential_id"] is None
+    assert successor.credential_id is None and rows[successor.id]["credential_id"] is None
 
 
 @pytest.mark.asyncio
@@ -2507,7 +2529,7 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
                 nonlocal attempt_count
                 attempt_count += 1
                 if attempt_count == 1:
-                    changed = await client.patch(f"/api/sessions/{session.id}", json={field: after})
+                    changed = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", field: after})
                     assert changed.status_code == 200, changed.text
                     yield HarnessEvent(type="session_started", session_id="saved-thread")
                     yield HarnessEvent(type="error", content="stream disconnected", is_error=True)
@@ -2523,7 +2545,7 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
 
     monkeypatch.setattr(manager, "_make_run", model_run_factory(factory))
     async with await _session_client(manager, session) as client:
-        configured = await client.patch(f"/api/sessions/{session.id}", json={field: before})
+        configured = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", field: before})
         assert configured.status_code == 200, configured.text
         events = await _request_events(manager, session, "work")
         assert settings_seen == [before, before], events

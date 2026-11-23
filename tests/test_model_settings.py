@@ -39,7 +39,7 @@ def catalog_home(tmp_path, monkeypatch):
         {"slug": "model-b", "display_name": "Model B", "visibility": "list",
          "supported_reasoning_levels": [{"effort": e} for e in ("low", "medium")],
          "default_reasoning_level": "medium"},
-        {"slug": "hidden", "visibility": "hide"},
+        {"slug": "hidden", "visibility": "hide", "supported_reasoning_levels": [{"effort": "low"}]},
     ]}))
     monkeypatch.setenv("CODEX_HOME", str(home))
     return home
@@ -84,7 +84,18 @@ def test_fast_metadata_and_normal_default_override_cli_preferences(catalog_home,
 @pytest.mark.parametrize("cache", ["invalid json", "[]", '{"models":null}', '{"models":[null,{}]}'])
 def test_unavailable_catalog_keeps_basic_controls(catalog_home, cache):
     (catalog_home / "models_cache.json").write_text(cache)
-    assert read_model_settings().reasoning_efforts == ["low", "medium", "high", "xhigh"]
+    settings = read_model_settings()
+    assert settings.reasoning_efforts == ["low", "medium", "high", "xhigh"]
+    assert settings.catalog_error and "retry" in settings.catalog_error
+
+
+def test_empty_catalog_is_distinct_from_missing_catalog(catalog_home):
+    cache = catalog_home / "models_cache.json"
+    cache.unlink()
+    assert read_model_settings().catalog_error
+    cache.write_text('{"models":[]}')
+    settings = read_model_settings()
+    assert settings.models == [] and settings.catalog_error is None
 
 
 async def native_rounds(tmp_path, **options):
@@ -180,7 +191,7 @@ async def test_independent_overrides_preserve_history_resume_and_reload(client, 
     first_run = session_manager._make_run(current, agent)
     assert first_run._config.reasoning_effort == "low"
 
-    response = await client.patch(path, headers=client.headers, json={"reasoning_effort": "high"})
+    response = await client.patch(path, headers=client.headers, json={"expected_backend": backend, "reasoning_effort": "high"})
     assert response.status_code == 200, response.text
     assert response.json()["model"] is None
     assert response.json()["reasoning_effort"] == "high"
@@ -197,12 +208,12 @@ async def test_independent_overrides_preserve_history_resume_and_reload(client, 
     assert restored.get_session(session_id).claude_session_id == "original-thread"
 
     if backend == "codex":
-        rejected = await client.patch(path, headers=client.headers, json={"model": "model-b"})
+        rejected = await client.patch(path, headers=client.headers, json={"expected_backend": backend, "model": "model-b"})
         assert rejected.status_code == 400
         assert current.model is None
-    valid = await client.patch(path, headers=client.headers, json={"model": "model-b", "reasoning_effort": "medium"})
+    valid = await client.patch(path, headers=client.headers, json={"expected_backend": backend, "model": "model-b", "reasoning_effort": "medium"})
     assert valid.status_code == 200
-    cleared = await client.patch(path, headers=client.headers, json={"reasoning_effort": None})
+    cleared = await client.patch(path, headers=client.headers, json={"expected_backend": backend, "reasoning_effort": None})
     assert cleared.status_code == 200
     assert cleared.json()["model"] == "model-b"
     assert session_manager._make_run(current, agent)._config.reasoning_effort == "low"
@@ -227,6 +238,12 @@ async def test_invalid_effort_and_backend_are_rejected(client):
     assert response.status_code == 200
     assert response.json()["default_reasoning_effort"] == "max"
     assert "DO_NOT_EXPOSE" not in response.text
+    assert response.json()["saved_model_options"] == []
+    response = await client.get("/api/backends/codex/models?saved_model=hidden&saved_model=missing", headers=client.headers)
+    assert [item["id"] for item in response.json()["models"]] == ["model-a", "model-b"]
+    hidden, = response.json()["saved_model_options"]
+    assert hidden["id"] == "hidden" and hidden["reasoning_efforts"] == ["low"]
+    assert hidden["service_tiers"] == ["default"]
     response = await client.get("/api/backends/codex/models?credential_id=missing", headers=client.headers)
     assert response.status_code == 404
 
@@ -251,7 +268,7 @@ async def test_speed_inheritance_clear_reload_and_history(client):
     current = session_manager.get_session(sid)
     original_run = session_manager._make_run(current, agent)
     assert original_run._config.service_tier == "fast"
-    changed = await client.patch(path, headers=client.headers, json={"service_tier": "default"})
+    changed = await client.patch(path, headers=client.headers, json={"expected_backend": "codex", "service_tier": "default"})
     assert changed.status_code == 200, changed.text
     assert changed.json()["model"] is None
     assert changed.json()["reasoning_effort"] is None
@@ -261,7 +278,7 @@ async def test_speed_inheritance_clear_reload_and_history(client):
     await restored.initialize(session_manager.db)
     assert restored.get_session(sid).service_tier == "default"
     assert restored.get_session(sid).claude_session_id == "original-thread"
-    cleared = await client.patch(path, headers=client.headers, json={"service_tier": None})
+    cleared = await client.patch(path, headers=client.headers, json={"expected_backend": "codex", "service_tier": None})
     assert cleared.status_code == 200
     assert cleared.json()["service_tier"] is None
     assert session_manager._make_run(current, agent)._config.service_tier == "fast"
@@ -286,16 +303,16 @@ async def test_speed_validation_is_atomic_and_model_specific(client):
     response = await client.post(f"/api/agents/{agent['id']}/sessions", headers=client.headers, json={})
     sid = response.json()["id"]
     path = f"/api/sessions/{sid}"
-    assert (await client.patch(path, headers=client.headers, json={"service_tier": "fast"})).status_code == 200
-    rejected = await client.patch(path, headers=client.headers, json={"model": "model-b"})
+    assert (await client.patch(path, headers=client.headers, json={"expected_backend": "codex", "service_tier": "fast"})).status_code == 200
+    rejected = await client.patch(path, headers=client.headers, json={"expected_backend": "codex", "model": "model-b"})
     assert rejected.status_code == 400
     current = session_manager.get_session(sid)
     assert current.model is None and current.service_tier == "fast"
-    rejected = await client.patch(path, headers=client.headers, json={"model": "hidden"})
+    rejected = await client.patch(path, headers=client.headers, json={"expected_backend": "codex", "model": "hidden"})
     assert rejected.status_code == 400
-    changed = await client.patch(path, headers=client.headers, json={"model": "model-b", "service_tier": "default"})
+    changed = await client.patch(path, headers=client.headers, json={"expected_backend": "codex", "model": "model-b", "service_tier": "default"})
     assert changed.status_code == 200
-    assert (await client.patch(path, headers=client.headers, json={"service_tier": "ultrafast"})).status_code == 422
+    assert (await client.patch(path, headers=client.headers, json={"expected_backend": "codex", "service_tier": "ultrafast"})).status_code == 422
     for backend, model in (("claude-code", None), ("codex", "model-b")):
         rejected = await client.post("/api/agents", headers=client.headers, json={
             "name": "Unsupported", "backend": backend, "model": model, "service_tier": "fast",
@@ -330,8 +347,8 @@ async def test_concurrent_model_and_speed_updates_validate_the_committed_state(c
 
     monkeypatch.setattr(model_settings, "model_settings_for", delayed_catalog)
     results = await asyncio.gather(
-        client.patch(path, headers=client.headers, json={"model": "model-b"}),
-        client.patch(path, headers=client.headers, json={"service_tier": "fast"}),
+        client.patch(path, headers=client.headers, json={"expected_backend": "codex", "model": "model-b"}),
+        client.patch(path, headers=client.headers, json={"expected_backend": "codex", "service_tier": "fast"}),
     )
     assert sorted(r.status_code for r in results) == [200, 400]
     saved = (await client.get(path, headers=client.headers)).json()
@@ -378,7 +395,7 @@ async def test_legal_defaults_save_before_an_old_session_is_repaired_and_resumed
     assert response.status_code == 201, response.text
     sid = response.json()['id']
     session_path = f'/api/sessions/{sid}'
-    assert (await client.patch(session_path, json={'model': 'model-b'})).status_code == 200
+    assert (await client.patch(session_path, json={'expected_backend': 'codex', 'model': 'model-b'})).status_code == 200
     before = (await client.get(session_path)).json()
     if archived:
         await session_manager.archive_session(sid, replace=False)
@@ -396,7 +413,7 @@ async def test_legal_defaults_save_before_an_old_session_is_repaired_and_resumed
     assert after['backend'] == 'codex' and after['claude_session_id'] == 'original-thread'
     assert after['model'] == 'model-b' and after[field] is None
     assert after['messages'][:len(before['messages'])] == before['messages']
-    repaired = await client.patch(session_path, json={field: correction})
+    repaired = await client.patch(session_path, json={'expected_backend': 'codex', field: correction})
     assert repaired.status_code == 200, repaired.text
     receipt = await session_manager.start_message(sid, 'Continue the original history after correction')
     succeeded = await asyncio.wait_for(receipt.wait(), 5)
@@ -412,10 +429,12 @@ async def test_legal_defaults_save_before_an_old_session_is_repaired_and_resumed
 async def test_invocation_rejects_unavailable_inherited_speed_before_spawning(client, monkeypatch):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
+    configured = await client.patch(f"/api/agents/{agent['id']}", json={"backend": "codex"})
+    assert configured.status_code == 200, configured.text
     response = await client.post("/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "backend": "codex"})
     session = session_manager.get_session(response.json()["id"])
     assert (await client.patch(
-        f"/api/sessions/{session.id}", headers=client.headers, json={"model": "model-b"},
+        f"/api/sessions/{session.id}", headers=client.headers, json={"expected_backend": "codex", "model": "model-b"},
     )).status_code == 200
     await session_manager.db.update_agent(session.agent_id, service_tier="fast")
 
@@ -451,14 +470,14 @@ async def test_empty_capability_rejects_saved_controls_before_spawn(client, monk
     assert created.status_code == 201, created.text
     session_path = f"/api/sessions/{created.json()['id']}"
     if source == 'session override':
-        assert (await client.patch(session_path, json={field: value})).status_code == 200
+        assert (await client.patch(session_path, json={'expected_backend': backend, field: value})).status_code == 200
     harness = get_harness(backend)
     monkeypatch.setattr(harness, 'profile', replace(
         harness.profile, binary=sys.executable, model_settings=lambda credential: ModelSettings(),
     ))
     edit_path = agent_path if source == 'Agent default' else session_path
     before = (await client.get(edit_path)).json()
-    rejected = await client.patch(edit_path, json={field: value, 'name': 'Must not be saved'})
+    rejected = await client.patch(edit_path, json={'expected_backend': backend, field: value, 'name': 'Must not be saved'})
     assert rejected.status_code == 400, rejected.text
     assert (await client.get(edit_path)).json()['name'] == before['name']
     spawned = []
@@ -546,7 +565,7 @@ async def test_speed_survives_archive_replacement_restore_and_fork(client):
     assert agent is not None
     response = await client.post("/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "backend": "codex"})
     sid = response.json()["id"]
-    assert (await client.patch(f"/api/sessions/{sid}", headers=client.headers, json={"service_tier": "fast"})).status_code == 200
+    assert (await client.patch(f"/api/sessions/{sid}", headers=client.headers, json={"expected_backend": "codex", "service_tier": "fast"})).status_code == 200
     old = session_manager.get_session(sid)
     replacement = await session_manager.archive_session(sid, replace=True)
     assert replacement.service_tier == "fast"

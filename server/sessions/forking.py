@@ -18,7 +18,7 @@ from ..aio import complete_cleanup
 from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
 from ..credential_bindings import CredentialBindingError
-from ..harness import BackendForkNotSupported, HarnessRun, get_harness
+from ..harness import HarnessRun, get_harness
 from ..harness.fork import ForkCheckpoint, ForkCwd, ForkHooks, read_fork_checkpoint
 from ..models import MessageContent
 from ..workspace import WorkspaceError, confine
@@ -128,7 +128,7 @@ class ForkingMixin(SessionManagerBase):
                             eff_cred_id = None
                     if not eff_cred_id:
                         eff_cred_id = row.get("credential_id")
-                    if not eff_cred_id and row.get("agent_id"):
+                    if not eff_cred_id and row["defaults_source"] == "agent" and row.get("agent_id"):
                         eff_cred_id = await self.db.get_agent_credential_id(row["agent_id"], row.get("user_id"))
                     cred = await self.resolve_credential_by_id(
                         eff_cred_id,
@@ -278,10 +278,6 @@ class ForkingMixin(SessionManagerBase):
             target["content"] if isinstance(target["content"], str) else ""
         )
 
-        harness = get_harness(parent.backend)
-        if not harness.can_fork:
-            raise BackendForkNotSupported(parent.backend)
-
         # A running turn holds this lock until it exits. Refuse it before
         # waiting, so adoption can join this command and then stop that turn.
         if self.session_is_executing(parent):
@@ -292,6 +288,7 @@ class ForkingMixin(SessionManagerBase):
         # 2. Acquire the lock, validate no live parent work, claim `_forking`.
         owner = self._session_owner(parent)
         source = await owner.call_runtime(ReserveFork(True))
+        harness = get_harness(source.backend)
 
         reservation_held = True
         fork_id = uuid.uuid4().hex[:12]
@@ -347,6 +344,7 @@ class ForkingMixin(SessionManagerBase):
                 model=source.model,
                 reasoning_effort=source.reasoning_effort,
                 service_tier=source.service_tier,
+                defaults_source=source.defaults_source,
                 user_id=source.user_id,
                 agent_id=source.agent_id,
                 credential_id=source.credential_id,
@@ -363,6 +361,7 @@ class ForkingMixin(SessionManagerBase):
                 model=source.model,
                 reasoning_effort=source.reasoning_effort,
                 service_tier=source.service_tier,
+                defaults_source=source.defaults_source,
                 agent_id=source.agent_id,
                 app_id=app_id,
                 origin="fork",
@@ -501,10 +500,6 @@ class ForkingMixin(SessionManagerBase):
                 f"Session {parent_id} not found",
                 reason="parent_not_found", status_code=404,
             )
-        harness = get_harness(parent.backend)
-        if not harness.can_fork:
-            raise BackendForkNotSupported(parent.backend)
-
         # Same idle guard as fork_session — a copy of a mid-turn workspace would
         # be inconsistent, and the resume artifact needs a settled transcript.
         if self.session_is_executing(parent):
@@ -512,6 +507,7 @@ class ForkingMixin(SessionManagerBase):
                             reason="fork_blocked_parent_turn_active", status_code=409)
         owner = self._session_owner(parent)
         source = await owner.call_runtime(ReserveFork(True))
+        harness = get_harness(source.backend)
 
         fork_id = uuid.uuid4().hex[:12]
         resume_id_hint = str(uuid.uuid4())
@@ -551,7 +547,7 @@ class ForkingMixin(SessionManagerBase):
             # later lapses. Fork preparation makes no model inference call;
             # a native backend may use management RPCs to copy its history.
             eff_cred_id = source.credential_id
-            if not eff_cred_id and self.db is not None and source.agent_id:
+            if not eff_cred_id and source.defaults_source == "agent" and self.db is not None and source.agent_id:
                 eff_cred_id = await self.db.get_agent_credential_id(source.agent_id, source.user_id)
             parent_cred = await self.resolve_credential_by_id(
                 eff_cred_id, backend=harness.profile.backend,
@@ -586,10 +582,11 @@ class ForkingMixin(SessionManagerBase):
             assert self.db is not None  # Original saga drains before DB close.
             await self.db.create_fork_session(
                 fork_id=fork_id, name=fork_name, working_dir=dest,
-                created_at=now, parent_id=parent_id, backend=parent.backend,
+                created_at=now, parent_id=parent_id, backend=source.backend,
                 model=source.model,
                 reasoning_effort=source.reasoning_effort,
                 service_tier=source.service_tier,
+                defaults_source=source.defaults_source,
                 user_id=parent.user_id,
                 agent_id=parent.agent_id, credential_id=source.credential_id,
                 resume_id=resume_id_hint, fork_after_seq=last_seq,
@@ -599,10 +596,11 @@ class ForkingMixin(SessionManagerBase):
             fork = Session(
                 id=fork_id, name=fork_name, working_dir=dest, created_at=now,
                 claude_session_id=resume_id_hint, credential_id=source.credential_id,
-                agent_id=parent.agent_id, origin="fork", backend=parent.backend,
+                agent_id=parent.agent_id, origin="fork", backend=source.backend,
                 model=source.model,
                 reasoning_effort=source.reasoning_effort,
                 service_tier=source.service_tier,
+                defaults_source=source.defaults_source,
                 user_id=parent.user_id,
                 forked_from_session_id=parent_id, fork_after_seq=last_seq,
                 fork_metadata=fork_meta, fork_status="initializing",

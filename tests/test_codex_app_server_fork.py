@@ -165,11 +165,18 @@ async def test_full_fork_copies_history_with_bad_agent_tools_but_refuses_new_inp
 
 async def test_native_fork_rechecks_binding_before_writing_the_history_request(fork_source, tmp_path, monkeypatch):
     runtime, _ = fork_source
-    manager, database, parent, _, starts, _ = runtime
+    manager, database, parent, _, _, _ = runtime
     update = database.update_session_field
     unrelated = tmp_path / "unrelated"
     unrelated.mkdir()
     (unrelated / "keep.txt").write_text("Unrelated data")
+    history_cwds = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def observe_spawn(*argv, **kwargs):
+        if str(native_tests.PEER) in argv:
+            history_cwds.append(kwargs["cwd"])
+        return await spawn(*argv, **kwargs)
 
     async def replace_after_checkpoint(session_id, **fields):
         await update(session_id, **fields)
@@ -179,13 +186,14 @@ async def test_native_fork_rechecks_binding_before_writing_the_history_request(f
             copy.rename(tmp_path / "displaced")
             copy.symlink_to(unrelated, target_is_directory=True)
 
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
     monkeypatch.setattr(database, "update_session_field", replace_after_checkpoint)
     with pytest.raises(ForkError, match="cwd changed"):
         await manager.duplicate_session(parent.id, user_id=parent.user_id)
     pending, = await database.load_incomplete_forks()
     frames = wire_frames(tmp_path)
     config_cwd = [frame["params"]["cwd"] for frame in frames if frame.get("method") == "config/read"][-1]
-    assert config_cwd.startswith("/proc/") and starts[-1].working_dir == str(tmp_path)
+    assert config_cwd.startswith("/proc/") and history_cwds == [str(tmp_path)]
     assert not any(frame.get("method") == "thread/fork" for frame in frames)
     assert not (tmp_path / "actual-native-fork.jsonl").exists()
     assert manager.get_session(pending["id"], parent.user_id) is None

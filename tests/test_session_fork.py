@@ -18,7 +18,9 @@ from server.delegations import DelegationRunState, _RoundPublication, delegation
 from server.harness import BackendForkNotSupported, get_harness
 from server.harness.events import HarnessEvent
 from server.session_manager import ForkError, SessionManager
-from server.sessions import forking as sm_forking
+from server.sessions import owner_runtime
+from server.sessions.configuration import SessionConfigurationError
+from server.sessions.owner_runtime import ReserveFork
 from server.sessions.publication import WorkPublication
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase, model_run_factory
@@ -101,6 +103,58 @@ async def test_fork_codex_history_replay(manager):
     assert fork.fork_needs_replay is True
     assert fork.claude_session_id is None  # resume id arrives on thread.started
     assert fork.fork_status == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_first", [True, False])
+async def test_duplicate_uses_the_engine_at_its_reservation(manager, tmp_path, monkeypatch, switch_first):
+    parent_dir = tmp_path / "parent"
+    parent_dir.mkdir()
+    parent = await _seed_parent(manager, working_dir=str(parent_dir), n_user=0)
+    owner = manager._session_owner(parent)
+    real_call = owner.call_runtime
+    reserved = asyncio.Event()
+    release = asyncio.Event()
+    selected = []
+    real_resolve = manager.resolve_credential_by_id
+
+    async def call(command):
+        if not isinstance(command, ReserveFork) or not command.reserve:
+            return await real_call(command)
+        if switch_first:
+            reserved.set()
+            await release.wait()
+            return await real_call(command)
+        snapshot = await real_call(command)
+        reserved.set()
+        await release.wait()
+        return snapshot
+
+    async def resolve(credential_id, **kwargs):
+        selected.append(kwargs["backend"])
+        return await real_resolve(credential_id, **kwargs)
+
+    monkeypatch.setattr(owner, "call_runtime", call)
+    monkeypatch.setattr(manager, "resolve_credential_by_id", resolve)
+    copying = asyncio.create_task(manager.duplicate_session(parent.id))
+    fields = {"expected_backend": "claude-code", "backend": "codex", "model": None,
+              "reasoning_effort": None, "service_tier": None, "credential_id": None}
+    try:
+        await asyncio.wait_for(reserved.wait(), 2)
+        if switch_first:
+            await manager.update_session_configuration(parent.id, fields)
+        else:
+            with pytest.raises(SessionConfigurationError) as refused:
+                await manager.update_session_configuration(parent.id, fields)
+            assert refused.value.code == "conversation_busy"
+    finally:
+        release.set()
+        duplicate = await asyncio.wait_for(copying, 5)
+    expected = "codex" if switch_first else "claude-code"
+    assert duplicate.backend == expected
+    assert selected == [expected]
+    if not switch_first:
+        assert (await manager.update_session_configuration(parent.id, fields)).backend == "codex"
 
 
 @pytest.mark.asyncio
@@ -256,7 +310,7 @@ async def test_fork_backend_not_supported(manager, monkeypatch):
     class _NoFork:
         can_fork = False
 
-    monkeypatch.setattr(sm_forking, "get_harness", lambda b: _NoFork())
+    monkeypatch.setattr(owner_runtime, "get_harness", lambda b: _NoFork())
     with pytest.raises(BackendForkNotSupported):
         await manager.fork_session(parent.id, 0)
     # No half-created row.
@@ -381,6 +435,32 @@ async def test_recover_purges_initializing(manager, monkeypatch):
     assert seen["args"] == ("/repo", "resume-xyz", "orphan01")
     rows = await manager.db.load_sessions(include_archived=True)
     assert not any(r["id"] == "orphan01" for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_startup_recovers_backend_default_fork_with_host_login(manager, monkeypatch):
+    parent = await _seed_parent(manager, backend="codex")
+    await manager.db.save_credential(
+        credential_id="claude-login", backend="claude-code", label="Claude login", auth_type="api_key",
+        secret_encrypted="unused", created_at="2026-11-17T00:00:00+00:00", user_id=parent.user_id,
+    )
+    await manager.db.update_agent(parent.agent_id, backend="claude-code", credential_id="claude-login")
+    await manager.db.create_fork_session(
+        fork_id="interrupted-host-fork", name="Interrupted", working_dir=parent.working_dir,
+        created_at="2026-11-17T00:00:00+00:00", parent_id=parent.id,
+        backend="codex", agent_id=parent.agent_id, user_id=parent.user_id,
+        credential_id=None, defaults_source="backend", resume_id="interrupted-native-id", fork_after_seq=1,
+    )
+    observed = []
+
+    async def cleanup(_path, _resume_id, fork_id, *, credential, artifact, hooks):
+        observed.append((fork_id, credential))
+
+    monkeypatch.setattr(get_harness("codex"), "cleanup_incomplete_fork_artifacts", cleanup)
+    restarted = SessionManager()
+    await restarted.initialize(manager.db)
+    assert observed == [("interrupted-host-fork", None)]
+    assert await manager.db.load_incomplete_forks() == []
 
 
 @pytest.mark.asyncio

@@ -543,8 +543,21 @@ body {
     gap: 0.5rem;
   }
 
-  .chat-header :is(.crumb-lead, .crumb-sep, .chat-model-label, .credential-label, .conn-label) {
+  .chat-header :is(.crumb-lead, .crumb-sep, .chat-model-detail, .conn-label, .page-header-meta:has(.status-idle)) {
     display: none;
+  }
+
+  .btn-model-settings {
+    gap: 0.25rem;
+    padding-inline: 0.25rem;
+  }
+
+  .btn-model-settings svg {
+    display: none;
+  }
+
+  .chat-model-label {
+    max-width: min(7rem, 12cqi);
   }
 }
 
@@ -810,14 +823,7 @@ summary {
   overflow-wrap: anywhere;
 }
 
-/* The engine-credential chip is a desktop affordance: it names a credential
-   and opens a picker, which needs more width than a phone header has to
-   spare. It stays from 641px up (tablets, landscape), where it fits. */
 @media (max-width: 640px) {
-  .credential-chip {
-    display: none;
-  }
-
   .page-body {
     padding: 16px 14px 32px;
   }

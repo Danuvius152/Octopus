@@ -203,7 +203,6 @@ test(title, async ({ page, request }, info) => {
       await page.keyboard.press("Enter");
       await expect.poll(() => writes).toBe(1);
     };
-    const model = page.getByRole("button", { name: "Model, reasoning and speed settings" });
     if (reopened) {
       await submit();
       await page.locator(".session-item", { hasText: otherName }).click();
@@ -223,7 +222,7 @@ test(title, async ({ page, request }, info) => {
     const sourceTop = await sourceViewport.evaluate((element) => element.scrollTop);
     const originalOffset = (await original.boundingBox())!.y - (await sourceViewport.boundingBox())!.y;
     if (reopened) {
-      await model.focus();
+      await sourceViewport.evaluate((element) => element.focus({ preventScroll: true }));
       const receipt = page.waitForResponse((response) => response.request().method() === "POST" &&
         new URL(response.url()).pathname === `/api/sessions/${source.id}/archive`);
       releaseWrite();
@@ -250,7 +249,7 @@ test(title, async ({ page, request }, info) => {
     const openSuccessor = page.getByRole("button", { name: "Open successor" });
     if (reopened) {
       await expect(openSuccessor).toBeVisible();
-      await expect(model).toBeFocused();
+      await expect(sourceViewport).toBeFocused();
       expect(await page.locator("[data-chat-session]:not([inert])").getAttribute("data-chat-session")).toBe(source.id);
       expect(writes).toBe(1);
       expect(detailReads).toBe(0);
@@ -313,7 +312,8 @@ test(title, async ({ page, request }, info) => {
       let preparedHeight: number | undefined;
       let preparedTailHeight: number | undefined;
       let first: { sameNode: boolean; sameHeight: boolean; sameTailHeight: boolean; tailInView: boolean;
-        fractionalTail: boolean; horizontalScrollbar: boolean; titleInView: boolean; ownedComposer: boolean; height: number } | undefined;
+        fractionalTail: boolean; horizontalScrollbar: boolean; titleInView: boolean; ownedComposer: boolean; height: number;
+        titleGeometry: { text: DOMRect; title?: DOMRect; header?: DOMRect; hitTarget?: string; titleText?: string } } | undefined;
       const transitions: string[] = [];
       const findTail = (rendered: Element | null | undefined) => Array.from(rendered?.querySelectorAll(".msg-content") ?? [])
         .find((node) => node.textContent === marker);
@@ -345,14 +345,16 @@ test(title, async ({ page, request }, info) => {
         const glyphs = document.createRange();
         if (title) glyphs.selectNodeContents(title);
         const textRect = glyphs.getBoundingClientRect(), titleRect = title?.getBoundingClientRect();
+        const titleHit = document.elementFromPoint(textRect.x + textRect.width / 2, textRect.y + textRect.height / 2);
         const titleInView = !!titleRect && title?.textContent === successorName &&
           textRect.width > 0 && textRect.left >= titleRect.left && textRect.right <= titleRect.right + 1 &&
-          title.contains(document.elementFromPoint(textRect.x + textRect.width / 2, textRect.y + textRect.height / 2));
+          title.contains(titleHit);
         first = { sameNode: measured === rendered && !!measured,
           sameHeight: preparedHeight !== undefined && preparedHeight === rendered?.clientHeight,
           sameTailHeight: preparedTailHeight !== undefined && preparedTailHeight === rowHeight,
           ...tailGeometry(rendered, content),
           titleInView, ownedComposer: Boolean(visible!.querySelector('.chat-input-bar textarea:not([readonly])')),
+          titleGeometry: { text: textRect, title: titleRect, header: heading?.getBoundingClientRect(), hitTarget: titleHit?.outerHTML.slice(0, 120), titleText: title?.textContent ?? undefined },
           height: rendered?.clientHeight ?? 0 };
       };
       const observer = new MutationObserver(sample);
@@ -384,7 +386,7 @@ test(title, async ({ page, request }, info) => {
         await expect(page.getByLabel("Questions outside the history window")).toBeVisible();
         const first = await tracker.evaluate((record) => record.read());
         await info.attach("archive-handoff.json", { contentType: "application/json", body: JSON.stringify({ first, frames }) });
-        expect(first).toMatchObject({
+        expect(first, JSON.stringify(first?.titleGeometry)).toMatchObject({
           sameNode: true, sameHeight: true, sameTailHeight: true, tailInView: true, fractionalTail: true,
           horizontalScrollbar: true, titleInView: true, ownedComposer: true,
         });
@@ -514,8 +516,8 @@ for (const outcome of ["refusal", "lost-reply", "partial-failure"] as const) {
           // Exercise the generated partial-result wire consumer after a real
           // archive effect. Backend tests inject the actual storage failure.
           await route.fulfill({ status: 500, json: { old_session_id: source.id, archived: true,
-            new_session_id: successor, failure_stage: "successor_configuration",
-            message: "Inherited configuration could not be saved" } });
+            new_session_id: successor, failure_stage: "schedule_rebinding",
+            message: "Schedule links could not be saved" } });
         }
       }
     });
@@ -536,7 +538,7 @@ for (const outcome of ["refusal", "lost-reply", "partial-failure"] as const) {
         expect((await (await request.get(`${API}/sessions/${source.id}`, { headers })).json()).archived).toBe(false);
       } else if (outcome === "partial-failure") {
         await expect(page.getByRole("alert")).toContainText("Archive committed");
-        await expect(page.getByRole("alert")).toContainText("Inherited configuration could not be saved");
+        await expect(page.getByRole("alert")).toContainText("Schedule links could not be saved");
         await expect(page.getByRole("button", { name: "Open successor" })).toBeVisible();
         await expect(page.locator(".msg-user .msg-content")).toContainText("Original archive feedback history");
         const old = await request.get(`${API}/sessions/${source.id}`, { headers });

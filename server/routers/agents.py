@@ -21,7 +21,6 @@ from ..models import (
     ScheduleInfo,
     SessionInfo,
 )
-from ..sessions.presentation import session_info
 from .request_validation import SafeInputValidationRoute
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -60,6 +59,8 @@ async def _publish(session_manager, kind: str, agent: dict) -> None:
 
 def _agent_http_error(e: AgentError | CredentialBindingError) -> HTTPException:
     msg = str(e)
+    if isinstance(e, AgentError) and e.field:
+        return HTTPException(status.HTTP_400_BAD_REQUEST, {"message": msg, "field": e.field})
     code = status.HTTP_404_NOT_FOUND if "not found" in msg.lower() else status.HTTP_400_BAD_REQUEST
     return HTTPException(code, msg)
 
@@ -225,11 +226,7 @@ async def delete_agent(
 async def list_agent_sessions(session_manager: SessionMgr, agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     if await _get_manager().db.get_agent_identity(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-    return [
-        session_info(s)
-        for s in session_manager.list_sessions()
-        if s.agent_id == agent_id
-    ]
+    return await session_manager.list_live_session_infos(user_id, agent_id=agent_id)
 
 
 @router.post(

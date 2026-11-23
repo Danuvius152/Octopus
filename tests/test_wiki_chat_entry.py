@@ -182,6 +182,7 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
         assert isinstance(kwargs["client_request_id"], str) and len(kwargs["client_request_id"]) == 32
         assert {key: value for key, value in kwargs.items() if key != "client_request_id"} == {
             "attachment_ids": [], "steerable": True, "wiki_mode": None, "recovery_of_client_id": None,
+            "expected_backend": "codex",
         }
         saved = await db.get_client_submission(probe.last_session_id, kwargs["client_request_id"])
         if outcome == "rejected":

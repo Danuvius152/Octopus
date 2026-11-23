@@ -10,16 +10,43 @@ from typing import Any
 from ..aio import complete_cleanup
 from ..context_models import align_context, context_target, invalidate_context
 from ..credential_bindings import validate_credential_binding
+from ..database import Database
 from ..db.credentials import CredentialOwnerUnavailable
 from ..harness import all_backends, get_harness, has_backend, model_settings
+from ..models import SessionInfo
 from .base import Session, SessionManagerBase
+from .presentation import session_info
 from .runtime_types import SessionOwnerUnavailable
 
 
 class SessionConfigurationError(ValueError):
-    def __init__(self, message: str, status_code: int = 400) -> None:
+    def __init__(self, message: str, status_code: int = 400, *, code: str | None = None) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.code = code
+
+
+async def validate_session_settings(db: Database, candidate: Session, agent: dict[str, Any] | None) -> None:
+    effective = model_settings.effective_settings(candidate, agent)
+    credential = effective["credential_id"]
+    if effective["reasoning_effort"] is None and effective["service_tier"] is None:
+        await validate_credential_binding(db, credential, candidate.backend, candidate.user_id)
+        return
+    catalog = await model_settings.model_settings_for(db, candidate.backend, credential, candidate.user_id)
+    try:
+        model_settings.validate_controls(catalog, effective["model"], effective["reasoning_effort"], effective["service_tier"])
+    except model_settings.ModelControlError as error:
+        raise SessionConfigurationError(error.describe(
+            candidate.backend, inherited=not bool(getattr(candidate, error.field)),
+        )) from error
+
+
+def validate_session_tool_policy(backend: str, agent: dict[str, Any] | None) -> None:
+    settings = agent or {}
+    try:
+        get_harness(backend).profile.tool_policy.validate(backend, settings.get("tool_allow"), settings.get("tool_deny"))
+    except ValueError as error:
+        raise SessionConfigurationError(str(error)) from error
 
 
 class ConfigurationMixin(SessionManagerBase):
@@ -58,11 +85,12 @@ class ConfigurationMixin(SessionManagerBase):
             state = align_context(defaults.context_state, context_target(defaults, agent))
             return replace(context, backend=defaults.backend, credential_id=defaults.credential_id,
                            model=defaults.model, reasoning_effort=defaults.reasoning_effort,
-                           service_tier=defaults.service_tier, context_state=state), agent
+                           service_tier=defaults.service_tier, defaults_source=defaults.defaults_source,
+                           context_state=state), agent
 
     async def update_session_configuration(
         self, session_id: str, fields: dict[str, Any], user_id: str | None = None,
-    ) -> Session:
+    ) -> SessionInfo:
         from .owner_runtime import UpdateConfiguration
 
         session = self.get_session(session_id, user_id)
@@ -72,37 +100,46 @@ class ConfigurationMixin(SessionManagerBase):
 
     async def _save_session_configuration(
         self, session_id: str, fields: dict[str, Any], user_id: str | None,
-    ) -> Session:
+    ) -> SessionInfo:
         session = self.get_session(session_id, user_id)
         if session is None:
             raise SessionConfigurationError("Session not found", 404)
         assert self.db is not None
-        updates: dict[str, Any] = {}
-        if "credential_id" in fields:
-            credential_id = fields["credential_id"] or None
-            await validate_credential_binding(self.db, credential_id, session.backend, user_id)
-            updates["credential_id"] = credential_id
-        if "model" in fields:
-            raw = fields["model"]
-            updates["model"] = (str(raw).strip() or None) if raw is not None else None
-        for field in ("reasoning_effort", "service_tier"):
-            if field in fields:
-                updates[field] = fields[field]
+        expected = fields.get("expected_backend")
+        if expected is not None and expected != session.backend:
+            raise SessionConfigurationError(
+                "The conversation engine changed. Reload its settings.", 409, code="engine_changed",
+            )
+        backend = fields.get("backend") or session.backend
+        switching = backend != session.backend
+        updates: dict[str, Any] = {
+            field: fields[field] or None for field in model_settings.SESSION_OVERRIDE_FIELDS if field in fields
+        }
+        if updates.get("model"):
+            updates["model"] = str(updates["model"]).strip() or None
+        has_inputs = None
+        if switching:
+            get_harness(backend)
+            if any(field not in updates for field in model_settings.SESSION_OVERRIDE_FIELDS):
+                raise SessionConfigurationError("Changing engines requires model, reasoning effort, speed, and sign-in settings.")
+            if (session._forking or session._archive_reservation is not None or session._admission_closed
+                    or self.session_deleting(session.id)):
+                raise SessionConfigurationError("The conversation is busy. Try again shortly.", 409, code="conversation_busy")
+            has_inputs = await self.db.session_has_inputs(session.id)
+            if session.claude_session_id or self.session_is_executing(session) or has_inputs:
+                raise SessionConfigurationError(
+                    "This conversation already has input. Start a new conversation to change engines.", 409,
+                    code="conversation_started",
+                )
+            updates["backend"] = backend
         state = session.context_state
         if updates:
             agent = await self.db.get_agent(session.agent_id, user_id) if session.agent_id else None
+            if switching:
+                validate_session_tool_policy(backend, agent)
+                updates["defaults_source"] = "agent" if agent is not None and agent["backend"] == backend else "backend"
             candidate = replace(session, **updates)
-            effective = model_settings.effective_settings(candidate, agent)
-            if effective["reasoning_effort"] is not None or effective["service_tier"] is not None:
-                catalog = await model_settings.model_settings_for(
-                    self.db, session.backend, effective["credential_id"], user_id,
-                )
-                try:
-                    model_settings.validate_controls(catalog, effective["model"], effective["reasoning_effort"], effective["service_tier"])
-                except model_settings.ModelControlError as error:
-                    raise SessionConfigurationError(error.describe(
-                        session.backend, inherited=not bool(getattr(candidate, error.field)),
-                    )) from error
+            await validate_session_settings(self.db, candidate, agent)
             target = context_target(candidate, agent)
             state = align_context(state, target)
             if state is None and context_target(session, agent) != target:
@@ -112,6 +149,8 @@ class ConfigurationMixin(SessionManagerBase):
             if not name:
                 raise SessionConfigurationError("Session name cannot be empty")
             updates["name"] = name
+        if has_inputs is None:
+            has_inputs = await self.db.session_has_inputs(session.id)
         if updates:
             owner = self._require_session_writer(session)
             if state != session.context_state:
@@ -124,7 +163,7 @@ class ConfigurationMixin(SessionManagerBase):
                 session.context_state = state
                 if owner is not None:
                     owner.runtime.context_changed()
-        return session
+        return session_info(session, has_inputs=has_inputs)
 
     async def delete_credential_binding(self, credential_id: str, user_id: str | None) -> dict[str, Any] | None:
         """Propagate only a committed deletion; captured runs remain revocable."""

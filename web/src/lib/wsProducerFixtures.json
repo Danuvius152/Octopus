@@ -85,7 +85,7 @@
       "activity": null,
       "binding_revision": 1,
       "binding_target": {
-        "agent_settings_revision": 0,
+        "agent_settings_revision": null,
         "effective_config_key": "3f7e1b2ce73d05bf12ca3b06335f337a625188c75e1cd5a04b95c379f8acbb29",
         "native_session_id": null
       },
@@ -316,12 +316,14 @@
       "compact_unavailable_reason": "No resumable native history is available to compact.",
       "created_at": "2026-01-01T00:00:00+00:00",
       "credential_id": null,
+      "defaults_source": "backend",
       "delegation_request": null,
       "fork_after_seq": null,
       "fork_is_full_copy": false,
       "fork_prefilled_prompt": null,
       "fork_revert_record": null,
       "forked_from_session_id": null,
+      "has_inputs": true,
       "id": "session",
       "message_count": 0,
       "model": "context-model",

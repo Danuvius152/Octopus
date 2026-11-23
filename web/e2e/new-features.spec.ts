@@ -877,12 +877,17 @@ test.describe("Session credential picker", () => {
       "Credential Swap"
     );
 
-    const chip = page.locator(".credential-chip");
-    await expect(chip).toContainText("E2E Old Key");
-
-    await chip.click();
-    await page.locator(".credential-option", { hasText: "E2E New Key" }).click();
-    await expect(chip).toContainText("E2E New Key");
+    const settings = page.getByRole("button", { name: /^Conversation settings:/ });
+    const dialog = page.getByRole("dialog", { name: "Conversation settings" });
+    const signIn = dialog.getByLabel("Sign-in for this conversation");
+    await expect(page.locator(".chat-header")).not.toContainText("E2E Old Key");
+    await settings.click();
+    await expect(signIn).toBeHidden();
+    await dialog.getByText("Sign-in", { exact: true }).click();
+    await expect(signIn.locator("option:checked")).toHaveText("E2E Old Key · API key");
+    await signIn.selectOption({ label: "E2E New Key · API key" });
+    await dialog.getByRole("button", { name: "Apply" }).click();
+    await expect(dialog).toBeHidden();
 
     // It stuck server-side, not just in the store.
     const after = await request.get(`${API}/sessions/${sessionId}`, {
@@ -892,9 +897,16 @@ test.describe("Session credential picker", () => {
     expect(newId).not.toBe(oldId);
 
     // And it can fall back to the agent's credential / host default.
-    await chip.click();
-    await page.locator(".credential-option-inherit").click();
-    await expect(chip).toContainText("host default");
+    await settings.click();
+    await dialog.getByText("Sign-in", { exact: true }).click();
+    await expect(signIn.locator("option:checked")).toHaveText("E2E New Key · API key");
+    await signIn.selectOption("");
+    await dialog.getByRole("button", { name: "Apply" }).click();
+    await expect(dialog).toBeHidden();
+    const inherited = await request.get(`${API}/sessions/${sessionId}`, {
+      headers: { Authorization: `Bearer ${accountToken()}` },
+    });
+    expect((await inherited.json()).credential_id).toBeNull();
   });
 });
 
@@ -2647,6 +2659,55 @@ test.describe("Composer history", () => {
 });
 
 test.describe("/model", () => {
+  test("switches an empty conversation in place and opens a separate conversation when history exists", async ({ page, request }) => {
+    const headers = { Authorization: `Bearer ${accountToken()}` };
+    const emptyRes = await request.post(`${API}/sessions/import`, {
+      headers, data: { name: "Switchable empty", backend: "claude-code" },
+    });
+    expect(emptyRes.ok()).toBeTruthy();
+    const empty = await emptyRes.json();
+    const historyRes = await request.post(`${API}/sessions/import`, {
+      headers, data: { name: "Switchable history", backend: "claude-code",
+        messages: [{ role: "user", type: "text", content: "Keep my conversation history" }] },
+    });
+    expect(historyRes.ok()).toBeTruthy();
+    const history = await historyRes.json();
+    await page.route("**/api/backends", async (route) => {
+      const response = await route.fetch();
+      const catalog = await response.json();
+      await route.fulfill({ response, json: { ...catalog, available: ["codex", "claude-code"] } });
+    });
+    await page.route("**/api/backends/codex/models*", (route) => route.fulfill({ json: { models: [] } }));
+    await login(page);
+    const open = () => page.getByRole("button", { name: /^Conversation settings:/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Conversation settings" });
+    const switchToCodex = () => dialog.getByText("Codex", { exact: true }).click();
+    await page.locator(".session-item .session-name", { hasText: "Switchable empty" }).click();
+    await open();
+    await switchToCodex();
+    await expect(dialog.getByLabel("Model", { exact: true })).toBeEnabled();
+    await dialog.getByRole("button", { name: "Apply", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole("button", { name: /^Conversation settings: Codex/ })).toBeVisible();
+    const saved = await (await request.get(`${API}/sessions/${empty.id}`, { headers })).json();
+    expect(saved.backend).toBe("codex");
+
+    await page.locator(".session-item .session-name", { hasText: "Switchable history" }).click();
+    await open();
+    await switchToCodex();
+    const created = page.waitForResponse((response) => response.request().method() === "POST" &&
+      response.url().endsWith(`/api/agents/${history.agent_id}/sessions`));
+    await dialog.getByRole("button", { name: "New session with Codex" }).click();
+    const response = await created;
+    expect(response.status()).toBe(201);
+    const next = await response.json();
+    expect(next).toMatchObject({ backend: "codex", agent_id: history.agent_id, working_dir: history.working_dir, message_count: 0 });
+    await expect(dialog).toBeHidden();
+    await expect(page.locator(".msg", { hasText: "Keep my conversation history" })).toBeHidden();
+    await page.locator(".session-item .session-name", { hasText: "Switchable history" }).click();
+    await expect(page.locator(".msg", { hasText: "Keep my conversation history" })).toBeVisible();
+  });
+
   test("keeps replacement overrides visible after explicitly opening another client's archive successor", async ({ page, request }) => {
     const headers = { Authorization: `Bearer ${accountToken()}` };
     const settings = { model: "archive-override-probe", reasoning_effort: "high", service_tier: "fast" };
@@ -2663,7 +2724,7 @@ test.describe("/model", () => {
     });
     expect(imported.ok()).toBeTruthy();
     const old = await imported.json();
-    const updated = await request.patch(`${API}/sessions/${old.id}`, { headers, data: settings });
+    const updated = await request.patch(`${API}/sessions/${old.id}`, { headers, data: { ...settings, expected_backend: "codex" } });
     expect(updated.ok()).toBeTruthy();
     await login(page);
     await page.locator(".session-item .session-name", { hasText: "Archive Settings Probe" }).click();
@@ -2685,14 +2746,14 @@ test.describe("/model", () => {
       await expect(page.locator(".session-item.active .session-name")).toHaveText("Archive Settings Probe");
       await page.locator(".btn-model-settings").click();
       const dialog = page.locator(".model-picker-dialog");
-      await expect(dialog.getByLabel("Model name")).toHaveValue(settings.model);
+      await expect(dialog.getByLabel("Model", { exact: true })).toHaveValue(settings.model);
       await expect(dialog.getByLabel("Reasoning effort")).toHaveValue(settings.reasoning_effort);
       await expect(dialog.getByLabel("Speed")).toHaveValue(settings.service_tier);
       await page.reload();
       await openSessionRail(page);
       await page.locator(".session-item .session-name", { hasText: "Archive Settings Probe" }).click();
       await page.locator(".btn-model-settings").click();
-      await expect(dialog.getByLabel("Model name")).toHaveValue(settings.model);
+      await expect(dialog.getByLabel("Model", { exact: true })).toHaveValue(settings.model);
       await expect(dialog.getByLabel("Reasoning effort")).toHaveValue(settings.reasoning_effort);
       await expect(dialog.getByLabel("Speed")).toHaveValue(settings.service_tier);
       await request.delete(`${API}/sessions/${fresh.id}`, { headers });
@@ -2725,7 +2786,7 @@ test.describe("/model", () => {
     await expect(dialog.getByLabel("Speed")).toHaveValue("");
     await expect(dialog.getByLabel("Speed").locator("option:checked")).toHaveText("Agent default (Normal)");
     await dialog.getByLabel("Speed").selectOption("fast");
-    await dialog.getByRole("button", { name: "Save settings" }).click();
+    await dialog.getByRole("button", { name: "Apply" }).click();
     await expect(dialog).toBeHidden();
     await page.reload();
     await openSessionRail(page);
@@ -2742,7 +2803,7 @@ test.describe("/model", () => {
     await page.locator(".btn-model-settings").click();
     await expect(dialog.getByLabel("Speed")).toHaveValue("fast");
     await dialog.getByLabel("Speed").selectOption("default");
-    await dialog.getByRole("button", { name: "Save settings" }).click();
+    await dialog.getByRole("button", { name: "Apply" }).click();
     await expect(dialog).toBeHidden();
     await expect(page.locator(".btn-model-settings")).not.toContainText("Fast");
     const normal = await (await request.get(`${API}/sessions/${id}`, {
@@ -2772,11 +2833,11 @@ test.describe("/model", () => {
     const { id } = await imported.json();
     await login(page);
     await page.locator(".session-item .session-name", { hasText: "Reasoning Session" }).click();
-    await page.getByRole("button", { name: "Model, reasoning and speed settings" }).click();
+    await page.getByRole("button", { name: /^Conversation settings:/ }).click();
     const dialog = page.locator(".model-picker-dialog");
     await expect(dialog.getByLabel("Reasoning effort")).toBeEnabled();
     await dialog.getByLabel("Reasoning effort").selectOption("high");
-    await dialog.getByRole("button", { name: "Save settings" }).click();
+    await dialog.getByRole("button", { name: "Apply" }).click();
     await expect(dialog).toBeHidden();
     await page.reload();
     await openSessionRail(page);
@@ -2796,9 +2857,12 @@ test.describe("/model", () => {
     page,
     request,
   }) => {
-    const { id } = await importSessionApi(request, "Model Session", [
-      { role: "user", type: "text", content: "hello" },
-    ]);
+    const headers = { Authorization: `Bearer ${accountToken()}` };
+    const imported = await request.post(`${API}/sessions/import`, { headers, data: {
+      name: "Model Session", backend: "claude-code", messages: [{ role: "user", type: "text", content: "hello" }],
+    } });
+    expect(imported.ok()).toBeTruthy();
+    const { id } = await imported.json();
     await login(page);
     await page
       .locator(".session-item .session-name", { hasText: "Model Session" })
@@ -2808,18 +2872,21 @@ test.describe("/model", () => {
     const box = page.locator(".chat-input-bar textarea");
     await box.click();
 
-    // With an argument there is whitespace, so the slash menu is closed and one
-    // Enter sends.
+    await box.fill("/model opus");
+    await box.press("Enter");
+    const dialog = page.locator(".model-picker-dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Apply" })).toBeDisabled();
+    expect((await (await request.get(`${API}/sessions/${id}`, { headers })).json()).model).toBeNull();
+    const model = dialog.getByLabel("Model", { exact: true });
+    await model.selectOption("opus");
     const changed = page.waitForResponse((response) =>
       response.url().endsWith(`/api/sessions/${id}`) && response.request().method() === "PATCH"
     );
-    await box.fill("/model opus");
-    await box.press("Enter");
+    await dialog.getByRole("button", { name: "Apply" }).click();
     expect((await changed).status()).toBe(200);
-    await expect(
-      page.locator(".msg-notice, .msg", { hasText: "Model for this session: opus" })
-    ).toBeVisible();
-    const saved = await request.get(`${API}/sessions/${id}`, { headers: { Authorization: `Bearer ${accountToken()}` } });
+    await expect(dialog).toBeHidden();
+    const saved = await request.get(`${API}/sessions/${id}`, { headers });
     expect((await saved.json()).model).toBe("opus");
 
     // Bare `/model` opens the picker. Two Enters: the first is captured by the
@@ -2828,16 +2895,13 @@ test.describe("/model", () => {
     await box.fill("/model");
     await box.press("Enter");
     await box.press("Enter");
-    const dialog = page.locator(".model-picker-dialog");
     await expect(dialog).toBeVisible();
-    await expect(dialog.locator(".btn-model-option").first()).toContainText(
-      "Agent default"
-    );
-    await dialog.locator(".btn-model-option", { hasText: "Agent default" }).click();
-    await dialog.getByRole("button", { name: "Save settings" }).click();
+    await expect(model.locator("option").first()).toContainText("Agent default");
+    await model.selectOption("");
+    await dialog.getByRole("button", { name: "Apply" }).click();
     await expect(dialog).toBeHidden();
     await expect(
-      page.locator(".msg-notice, .msg", { hasText: "the agent's default" })
-    ).toBeVisible();
+      page.locator(".msg-notice, .msg", { hasText: "Conversation settings apply from the next turn." })
+    ).toHaveCount(2);
   });
 });

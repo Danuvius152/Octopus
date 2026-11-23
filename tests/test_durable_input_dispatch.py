@@ -15,7 +15,7 @@ async def test_http_reuses_the_same_durable_admission_as_socket_input(runtime):
     manager, db, session, _, starts, _ = runtime
     async with await session_client(manager, session) as client:
         endpoint = f"/api/sessions/{session.id}/submissions"
-        payload = {"client_request_id": "http-original", "content": "One HTTP input", "attachment_ids": []}
+        payload = {"expected_backend": session.backend, "client_request_id": "http-original", "content": "One HTTP input", "attachment_ids": []}
         first = await client.post(endpoint, json=payload)
         assert first.status_code == 200
         assert first.json()["accepted"]

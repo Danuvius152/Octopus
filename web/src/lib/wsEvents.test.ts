@@ -108,7 +108,7 @@ it.each([
 ])("rejects an archive result that contradicts its envelope or contract: %j", (changed) => {
   expect(decodeWsEvent({ type: "session_archived", old_session_id: "old", new_session_id: "new", name: "Successor",
     archive_result: { old_session_id: "old", new_session_id: "new", archived: true,
-      failure_stage: "successor_configuration", message: "Storage unavailable", ...changed } }).kind).toBe("invalid");
+      failure_stage: "schedule_rebinding", message: "Storage unavailable", ...changed } }).kind).toBe("invalid");
 });
 
 it("feeds real producers into their original consumers without inventing missing Research cards", () => {

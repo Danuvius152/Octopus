@@ -312,7 +312,7 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
         await asyncio.wait_for(entered.wait(), 5)
         assert await manager.interrupt(session.id)
         rebound = await http.patch(
-            f"/api/sessions/{session.id}", json={"credential_id": credentials[1]},
+            f"/api/sessions/{session.id}", json={"credential_id": credentials[1], "expected_backend": session.backend},
             headers=http.headers,
         )
         assert rebound.status_code == 200, rebound.text

@@ -197,17 +197,17 @@ def read_model_settings(credential: HarnessCredential | None = None) -> ModelSet
     )
     try:
         cached = json.loads((home / "models_cache.json").read_text())
-        entries = cached.get("models", []) if isinstance(cached, dict) else []
+        entries = cached.get("models") if isinstance(cached, dict) else None
     except (OSError, ValueError):
-        entries = []
-    if not isinstance(entries, list):
-        return result
-    for entry in entries:
+        entries = None
+    readable = isinstance(entries, list) and not entries
+    for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
         slug = entry.get("slug")
         if not isinstance(slug, str) or not slug:
             continue
+        readable = True
         visible = entry.get("visibility") == "list" or slug == result.default_model
         levels = entry.get("supported_reasoning_levels", [])
         efforts = [
@@ -236,6 +236,8 @@ def read_model_settings(credential: HarnessCredential | None = None) -> ModelSet
         for effort in efforts if visible else []:
             if effort not in result.reasoning_efforts:
                 result.reasoning_efforts.append(effort)
+    if not readable:
+        result.catalog_error = "Codex has no readable model catalog for this sign-in. Open Codex with this sign-in, then retry."
     return result
 
 

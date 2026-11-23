@@ -109,6 +109,7 @@ class Submit:
     schedule: OneShotFire | None = None
     handoff: tuple[McpScope, HandoffPointers] | None = None
     return_parent: AdmittedRequest | None = None
+    expected_backend: str | None = None
 
 
 @dataclass(frozen=True)
@@ -441,7 +442,7 @@ def capture_configuration(session: Session) -> Session:
         claude_session_id=session.claude_session_id, credential_id=session.credential_id,
         agent_id=session.agent_id, origin=session.origin, backend=session.backend,
         model=session.model, reasoning_effort=session.reasoning_effort,
-        service_tier=session.service_tier, user_id=session.user_id,
+        service_tier=session.service_tier, defaults_source=session.defaults_source, user_id=session.user_id,
         parent_session_id=session.parent_session_id, app_id=session.app_id,
         forked_from_session_id=session.forked_from_session_id, fork_after_seq=session.fork_after_seq,
         fork_needs_replay=session.fork_needs_replay, fork_metadata=session.fork_metadata,
@@ -722,6 +723,9 @@ class OwnerRuntime:
         if isinstance(command, ReserveFork):
             if command.reserve:
                 from ..delegations import delegation_manager
+                from ..harness import BackendForkNotSupported
+                if not get_harness(session.backend).can_fork:
+                    raise BackendForkNotSupported(session.backend)
                 if (session._admission_closed or session._archive_reservation is not None
                         or manager.sessions.get(session.id) is not session or manager.session_deleting(session.id)):
                     raise ForkError("Parent session admission is closed", reason="fork_blocked_parent_turn_active", status_code=409)
@@ -973,6 +977,10 @@ class OwnerRuntime:
             if request.source == "handoff" and (existing["payload"] or {}).get("source") != "handoff":
                 raise ValueError("This identifier belongs to a different input")
             return self._existing_input(existing, digest, pointers)
+        if command.expected_backend is not None and command.expected_backend != session.backend:
+            from ..submission_models import SubmissionEngineChanged
+
+            raise SubmissionEngineChanged("Refresh the conversation to confirm its engine. Your input was not accepted.")
         new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
         if not new_session and manager.sessions.get(session.id) is not session:
             raise SessionAdmissionClosed(f"Session {session.id} not found")
@@ -1176,6 +1184,7 @@ class OwnerRuntime:
             schedule=command.schedule,
             new_session={key: getattr(session, key) for key in (
                 "id", "name", "working_dir", "created_at", "credential_id", "agent_id", "origin", "backend", "user_id",
+                "defaults_source",
             )} if new_session else None,
             superseded_handoff=superseded_handoff,
         )
@@ -2116,7 +2125,7 @@ class OwnerRuntime:
             credential = await manager._resolve_credential(configured, agent, harness)
         except CredentialBindingError as error:
             source = 'session override' if configured.credential_id else 'Agent default'
-            entry = 'the credential picker in this conversation header'
+            entry = 'Sign-in in the conversation settings'
             if not configured.credential_id:
                 entry = f'Agent settings or {entry}'
             raise ValueError(f'{configured.backend}: credential_id from {source}. {error} Use {entry}.') from error
@@ -2193,7 +2202,7 @@ class OwnerRuntime:
         if execution.turn is None:
             execution.turn = _Turn(
                 prepared.prompt, harness,
-                prepared.configured.credential_id or (prepared.agent or {}).get("credential_id"),
+                effective_settings(prepared.configured, prepared.agent)["credential_id"],
                 execution.settlement,
                 operation=execution.request.operation,
             )

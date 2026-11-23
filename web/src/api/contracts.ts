@@ -564,14 +564,7 @@ export interface paths {
         head?: never;
         /**
          * Update Session
-         * @description Update a session's credential, name, model, reasoning effort or speed.
-         *
-         *     The credential is the point: it used to be fixed at creation, so a lapsed
-         *     or deleted sign-in stranded the conversation with no way back. The
-         *     backend-match rule still applies (a Codex credential can't run a Claude
-         *     session), and an unknown credential id is refused rather than silently
-         *     stored, because a dangling id is exactly the state this route exists to
-         *     get out of.
+         * @description Save settings under the engine the client observed.
          */
         patch: operations["update_session_api_sessions__session_id__patch"];
         trace?: never;
@@ -3962,6 +3955,10 @@ export interface components {
             origin: string;
             /** @default claude-code */
             backend: components["schemas"]["BackendKind"];
+            /** Defaults Source */
+            defaults_source?: ("agent" | "backend") | null;
+            /** Has Inputs */
+            has_inputs?: boolean | null;
             /** Model */
             model?: string | null;
             /** Reasoning Effort */
@@ -4162,6 +4159,7 @@ export interface components {
             recovery_of_client_id?: string | null;
             /** Operation */
             operation?: (components["schemas"]["MessageOperation"] | components["schemas"]["CompactOperation"]) | null;
+            expected_backend?: components["schemas"]["BackendKind"] | null;
         };
         /** ClientSubmissionStatus */
         ClientSubmissionStatus: {
@@ -4593,6 +4591,12 @@ export interface components {
             /** Credential Id */
             credential_id?: string | null;
             backend?: components["schemas"]["BackendKind"] | null;
+            /** Model */
+            model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
         };
         /** CreateCredentialRequest */
         CreateCredentialRequest: {
@@ -4654,6 +4658,12 @@ export interface components {
             /** Credential Id */
             credential_id?: string | null;
             backend?: components["schemas"]["BackendKind"] | null;
+            /** Model */
+            model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
             /** Agent Id */
             agent_id: string;
         };
@@ -5465,6 +5475,10 @@ export interface components {
             service_tiers?: string[];
             /** Default Service Tier */
             default_service_tier?: string | null;
+            /** Catalog Error */
+            catalog_error?: string | null;
+            /** Saved Model Options */
+            saved_model_options?: components["schemas"]["ModelOption"][];
         };
         /**
          * NativeCompactCommand
@@ -6155,7 +6169,7 @@ export interface components {
              * Failure Stage
              * @enum {string}
              */
-            failure_stage: "successor_creation" | "successor_configuration" | "schedule_rebinding";
+            failure_stage: "successor_creation" | "schedule_rebinding";
             /** Message */
             message: string;
         };
@@ -6194,6 +6208,10 @@ export interface components {
             origin: string;
             /** @default claude-code */
             backend: components["schemas"]["BackendKind"];
+            /** Defaults Source */
+            defaults_source?: ("agent" | "backend") | null;
+            /** Has Inputs */
+            has_inputs?: boolean | null;
             /** Model */
             model?: string | null;
             /** Reasoning Effort */
@@ -6321,6 +6339,10 @@ export interface components {
             origin: string;
             /** @default claude-code */
             backend: components["schemas"]["BackendKind"];
+            /** Defaults Source */
+            defaults_source?: ("agent" | "backend") | null;
+            /** Has Inputs */
+            has_inputs?: boolean | null;
             /** Model */
             model?: string | null;
             /** Reasoning Effort */
@@ -6403,14 +6425,11 @@ export interface components {
         SessionStatus: "idle" | "running";
         /**
          * SessionUpdate
-         * @description Fields a live session can be repointed at after creation.
-         *
-         *     `credential_id` is the one that matters: a session's engine credential was
-         *     previously fixed at creation, so swapping a lapsed or deleted sign-in
-         *     meant abandoning the conversation. Pass null to fall back to the agent's
-         *     credential (or the CLI's own login).
+         * @description Change conversation settings under the observed engine.
          */
         SessionUpdate: {
+            expected_backend?: components["schemas"]["BackendKind"] | null;
+            backend?: components["schemas"]["BackendKind"] | null;
             /** Credential Id */
             credential_id?: string | null;
             /** Name */
@@ -13340,6 +13359,7 @@ export interface operations {
         parameters: {
             query?: {
                 credential_id?: string | null;
+                saved_model?: string[] | null;
                 token?: string | null;
             };
             header?: never;

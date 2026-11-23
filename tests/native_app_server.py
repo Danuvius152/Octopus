@@ -37,12 +37,18 @@ async def native_runtime(tmp_path, monkeypatch):
     mode, starts, events = ["normal"], [], []
 
     def argv(context):
-        starts.append(context)
         return [sys.executable, "-u", str(PEER), str(tmp_path), mode[0]], {
             "cwd": context.working_dir, "env": {**os.environ, "CODEX_HOME": str(tmp_path / "codex-home")},
         }
 
+    prepare = codex_app_server.AppServerDriver.prepare
+
+    async def capture_preparation(driver, run, context, args, kwargs):
+        starts.append(context)
+        await prepare(driver, run, context, args, kwargs)
+
     monkeypatch.setattr(codex_app_server, "build_argv", argv)
+    monkeypatch.setattr(codex_app_server.AppServerDriver, "prepare", capture_preparation)
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(codex_app_server.profile(harness.profile),
         build_turn_argv=lambda context: codex_app_server.build_argv(context)))
@@ -52,6 +58,7 @@ async def native_runtime(tmp_path, monkeypatch):
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
+    await database.update_agent(agent["id"], backend="codex")
     session = await manager.create_session(agent["id"], "Native input", str(tmp_path), backend="codex")
 
     async def observe(event):

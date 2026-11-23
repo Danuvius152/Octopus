@@ -82,6 +82,61 @@ afterEach(() => {
 });
 
 describe("AgentFormPage", () => {
+  it("groups model defaults while keeping agent identity, sign-in and tools in the edit form", async () => {
+    fetchMock.mockImplementation(async (url: unknown) => String(url).includes("/models")
+      ? json({ models: [{ id: "sonnet", name: "Claude Sonnet", reasoning_efforts: ["low"], service_tiers: [] }] })
+      : emptyRead(url));
+    mount("ag1", [agent({ model: "saved-claude-model" })]);
+
+    expect(screen.getByLabelText("Default sign-in")).toBeVisible();
+    expect(screen.getByLabelText("System prompt")).toBeVisible();
+    expect(screen.getByLabelText("Allowed tools")).toBeVisible();
+    expect(screen.getByLabelText("Denied tools")).toBeVisible();
+    expect(screen.getByText("Sub-agents", { exact: true })).toBeVisible();
+    const disclosure = screen.getByText("Model defaults", { exact: true }).closest("details");
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Model defaults", { exact: true }));
+    const model = await screen.findByRole("combobox", { name: "Model" });
+    expect(model).toHaveValue("saved-claude-model");
+    expect(await screen.findByRole("option", { name: "Claude Sonnet" })).toHaveValue("sonnet");
+    expect(screen.getByRole("option", { name: "saved-claude-model · outside catalog" })).toBeVisible();
+  });
+
+  it("clears saved Agent model defaults when the catalog fails", async () => {
+    const saved = agent({ backend: "codex", model: "old", reasoning_effort: "high", service_tier: "fast" });
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes("/models")) return json({ models: [], default_model: "cli-model", catalog_error: "Cannot read catalog" });
+      if (init?.method === "PATCH") return json({ ...saved, ...JSON.parse(String(init.body)) });
+      return emptyRead(url);
+    });
+    mount(saved.id, [saved]);
+    expect(await screen.findByRole("button", { name: "Retry catalog" })).toBeEnabled();
+    fireEvent.click(screen.getByText("Model defaults", { exact: true }));
+    expect(screen.getByRole("option", { name: "Engine default (cli-model)" })).toBeEnabled();
+    for (const label of ["Model", "Reasoning effort", "Speed"]) {
+      const control = screen.getByLabelText(label);
+      expect(control).toBeEnabled();
+      fireEvent.change(control, { target: { value: "" } });
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await waitFor(() => expect(patchBody()).toEqual({ model: null, reasoning_effort: null, service_tier: null }));
+  });
+
+  it("opens Model defaults and focuses the control rejected on save", async () => {
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/models")) return json({ models: [], reasoning_efforts: ["low"] });
+      if (init?.method === "PATCH") return json({ detail: { field: "reasoning_effort", message: "Choose an available effort." } }, 400);
+      return emptyRead(url);
+    });
+    mount("ag1", [agent({ reasoning_effort: "high" })]);
+    const disclosure = screen.getByText("Model defaults", { exact: true }).closest("details");
+    expect(disclosure).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    expect(await screen.findByText("Choose an available effort.")).toBeVisible();
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Reasoning effort" })).toHaveFocus());
+    expect(disclosure).toHaveAttribute("open");
+  });
+
   it("freezes every editor and new configuration write during one synchronously admitted save", async () => {
     const existing = agent({ is_system: false, backend: "codex", subagents: [{ name: "reviewer", description: "Review", prompt: "Inspect", model: null, tools: [] }] });
     const reply = deferred<Response>();
@@ -831,12 +886,14 @@ describe("AgentFormPage", () => {
         default_model: "model-a", default_reasoning_effort: "max",
         models: [{ id: "model-a", name: "Model A", reasoning_efforts: ["low", "high", "max"] }],
         reasoning_efforts: ["low", "high", "max"],
-        service_tiers: ["default", "fast"], default_service_tier: "default",
+        service_tiers: backend === "codex" ? ["default", "fast"] : [],
+        default_service_tier: backend === "codex" ? "default" : null,
       });
       return init?.method === "POST" ? json(agent({ name: "Reasoner", backend }), 201) : emptyRead(url);
     });
     mount(null, [], "form", backend);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Reasoner" } });
+    fireEvent.click(screen.getByText("Model defaults", { exact: true }));
     await waitFor(() => expect(screen.getByLabelText("Reasoning effort")).toBeEnabled());
     fireEvent.change(screen.getByLabelText("Model"), { target: { value: "model-a" } });
     fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "high" } });
@@ -867,7 +924,7 @@ describe("AgentFormPage", () => {
 
     await waitFor(() => expect(useSessionStore.getState().mainView).toBe("chat"));
     const call = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
-    expect(JSON.parse(call![1].body)).toMatchObject({ backend: "codex", service_tier: "default" });
+    expect(JSON.parse(call![1].body)).toMatchObject({ backend: "codex", service_tier: null });
   });
 
   it("applies a late default without clearing the draft's name", () => {
@@ -963,12 +1020,22 @@ describe("AgentFormPage", () => {
     await waitFor(() => expect(screen.getByLabelText("Speed")).toBeEnabled());
     fireEvent.change(screen.getByLabelText("One-line role"), { target: { value: "reviewer" } });
     act(() => useSessionStore.getState().upsertAgent({ ...existing, service_tier: "fast" }));
-    expect(screen.getByLabelText("Speed")).toHaveDisplayValue("Normal (default)");
+    expect(screen.getByLabelText("Speed")).toHaveDisplayValue("Normal");
     fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
 
     await waitFor(() => expect(patchBody()).toEqual({ description: "reviewer" }));
     await waitFor(() => expect(useSessionStore.getState().mainView).toBe("chat"));
     expect(useSessionStore.getState().agents[0]).toMatchObject({ description: "reviewer", service_tier: "fast" });
+  });
+
+  it("clears explicit Normal so other engines inheriting this Agent can use their defaults", async () => {
+    const existing = agent({ backend: "codex", service_tier: "default" });
+    mockCodexEdit(existing);
+    mount(existing.id, [existing]);
+    await waitFor(() => expect(screen.getByLabelText("Speed")).toBeEnabled());
+    fireEvent.change(screen.getByLabelText("Speed"), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await waitFor(() => expect(patchBody()).toEqual({ service_tier: null }));
   });
 
   it("keeps unchanged null bindings while displaying Normal", async () => {
@@ -1027,7 +1094,7 @@ describe("AgentFormPage", () => {
 
     await waitFor(() => expect(patchBody()).toEqual({
       backend: "codex", credential_id: null, model: null,
-      reasoning_effort: null, service_tier: "default",
+      reasoning_effort: null, service_tier: null,
     }));
   });
 

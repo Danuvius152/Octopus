@@ -299,9 +299,10 @@ async def _assert_reopened_attachment_input(client, session_url, destination, db
     [stored] = list(destination.iterdir())
     assert stored.name == f"{metadata['id']}__after.txt"
 
+    observed = (await client.get(session_url)).json()
     client_id, content = "ordinary-input-after-app-delete", "Use the new attachment"
     response = await client.post(f"{session_url}/submissions", json={
-        "client_request_id": client_id, "content": content, "attachment_ids": [metadata["id"]],
+        "expected_backend": observed["backend"], "client_request_id": client_id, "content": content, "attachment_ids": [metadata["id"]],
     })
     assert response.status_code == 200 and response.json()["accepted"], response.text
     receipt = await client.get(f"{session_url}/submissions/{client_id}")

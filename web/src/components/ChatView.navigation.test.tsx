@@ -568,17 +568,17 @@ it("keeps a restored session's new archive separate from an old partial HTTP fai
   act(() => handleWsMessage({ type: "session_unarchived", session_id: a.id, session: a }));
   command("/archive");
   await act(async () => old.resolve(Response.json({ old_session_id: a.id, archived: true,
-    new_session_id: child.id, failure_stage: "successor_configuration", message: "Old configuration failure" }, { status: 500 })));
-  expect(screen.queryByText(/Old configuration failure/)).toBeNull();
+    new_session_id: child.id, failure_stage: "schedule_rebinding", message: "Old schedule rebinding failure" }, { status: 500 })));
+  expect(screen.queryByText(/Old schedule rebinding failure/)).toBeNull();
   const newer = { ...child, id: "newer-successor", name: "New successor" };
   api.setRows([b, child, newer, { ...a, archived: true }]);
   await act(async () => next.resolve(Response.json(newer, { status: 201 })));
   await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(newer.id));
   expect(count).toBe(2);
-  expect(screen.queryByText(/Old configuration failure/)).toBeNull();
+  expect(screen.queryByText(/Old schedule rebinding failure/)).toBeNull();
 });
 
-it.each(["successor_creation", "successor_configuration", "schedule_rebinding"])("preserves archive effect and known successor when %s fails", async (failure_stage) => {
+it.each(["successor_creation", "schedule_rebinding"])("preserves archive effect and known successor when %s fails", async (failure_stage) => {
   const api = server();
   mount();
   command("/archive");
@@ -663,7 +663,7 @@ it("confirms the successor known from partial HTTP success after an unrelated li
   api.holdList();
   act(() => sessions.patch(b.id, { status: "running" }));
   await api.complete(Response.json({ old_session_id: a.id, archived: true, new_session_id: child.id,
-    failure_stage: "successor_configuration", message: "Storage refused" }, { status: 500 }));
+    failure_stage: "schedule_rebinding", message: "Storage refused" }, { status: 500 }));
   expect(screen.getByRole("alert")).toHaveTextContent("Storage refused");
   await waitFor(() => expect(api.listPending()).toBe(true));
   await api.confirmList();
@@ -684,7 +684,7 @@ it("retires a late partial archive link when restoration arrives without the fir
   api.setRows([b, child, { ...a, archived: true }]);
   const fresh = sessions.refresh(true);
   await api.complete(Response.json({ old_session_id: a.id, archived: true, new_session_id: child.id,
-    failure_stage: "successor_configuration", message: "Old partial archive" }, { status: 500 }));
+    failure_stage: "schedule_rebinding", message: "Old partial archive" }, { status: 500 }));
   await api.confirmList();
   await fresh;
   await waitFor(() => expect(useSessionStore.getState().sessionRead.stale).toBe(false));
@@ -725,7 +725,7 @@ it("keeps a new queued fork when an older partial archive receipt arrives after 
   act(() => useSessionStore.getState().setPendingFork(a.id, "After restoration"));
   const newFork = useSessionStore.getState().pendingForks[a.id];
   await api.complete(Response.json({ old_session_id: a.id, archived: true, new_session_id: child.id,
-    failure_stage: "successor_configuration", message: "Old partial archive" }, { status: 500 }));
+    failure_stage: "schedule_rebinding", message: "Old partial archive" }, { status: 500 }));
   expect(useSessionStore.getState().pendingForks[a.id]).toBe(newFork);
   expect(useSessionStore.getState().sessions.map((row) => row.id)).toContain(a.id);
   expect(useSessionStore.getState().sessionSuccessors[a.id]).toBeUndefined();
@@ -739,7 +739,7 @@ it.each(["broadcast first", "refusal first"])("settles a second archive's explic
   api.fetcher.mockImplementation(async (url, init) => init?.method === "POST"
     ? posts.shift()!.promise : previous(url, init));
   const archive_result = { old_session_id: a.id, archived: true, new_session_id: child.id,
-    failure_stage: "successor_configuration", message: "First archive setup failed" };
+    failure_stage: "schedule_rebinding", message: "First archive setup failed" };
   const broadcast = () => act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id,
     new_session_id: child.id, name: child.name, archive_result }));
   const refuse = () => act(async () => second.resolve(Response.json({ detail: "Second archive refused" }, { status: 404 })));
@@ -749,7 +749,7 @@ it.each(["broadcast first", "refusal first"])("settles a second archive's explic
   api.setRows([b, child, { ...a, archived: true }]);
   if (order === "broadcast first") {
     broadcast();
-    expect(screen.getByRole("alert")).toHaveTextContent("Session archived. Successor configuration failed: First archive setup failed");
+    expect(screen.getByRole("alert")).toHaveTextContent("Session archived. Schedule rebinding failed: First archive setup failed");
     await refuse();
   } else { await refuse(); broadcast(); }
   await act(async () => first.resolve(Response.json(archive_result, { status: 500 })));
@@ -764,15 +764,15 @@ it("shows shared archive activity while the local HTTP headers are pending", asy
   mount();
   command("/archive");
   const archive_result = { old_session_id: a.id, archived: true, new_session_id: child.id,
-    failure_stage: "successor_configuration", message: "Inherited model could not be saved" };
+    failure_stage: "schedule_rebinding", message: "Schedule links could not be saved" };
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id,
     name: child.name, archive_result }));
   expect(screen.getByRole("alert")).toHaveTextContent("Session archived");
-  expect(screen.getByRole("alert")).toHaveTextContent("Inherited model could not be saved");
+  expect(screen.getByRole("alert")).toHaveTextContent("Schedule links could not be saved");
   expect(screen.getByRole("button", { name: "Check successor" })).toBeVisible();
   await api.loseResponse();
   expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
-  expect(screen.getByRole("alert")).toHaveTextContent("Inherited model could not be saved");
+  expect(screen.getByRole("alert")).toHaveTextContent("Schedule links could not be saved");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });
@@ -833,15 +833,15 @@ it("keeps a concurrent archive broadcast separate from a lost local POST result"
   api.setRows([b, child, { ...a, archived: true }]);
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
     archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
-      failure_stage: "successor_configuration", message: "Other tab's settings failed" } }));
+      failure_stage: "schedule_rebinding", message: "Other tab's schedule rebinding failed" } }));
   api.holdList();
   await api.loseResponse();
   expect(api.listPending()).toBe(true);
   expect(screen.getByText("Checking archive…")).toHaveAttribute("role", "status");
-  expect(screen.getByRole("alert")).toHaveTextContent("Other tab's settings failed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Other tab's schedule rebinding failed");
   await api.confirmList();
   expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
-  expect(screen.getByRole("alert")).toHaveTextContent("Other tab's settings failed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Other tab's schedule rebinding failed");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(screen.getByRole("button", { name: "Open successor" })).toBeVisible();
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
@@ -901,12 +901,12 @@ it("receives partial archive activity on reconnect before a manual confirmation"
   await act(async () => {});
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
     archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
-      failure_stage: "successor_configuration", message: "Settings failure after reconnect" } }, next));
-  expect(screen.getByRole("alert")).toHaveTextContent("Settings failure after reconnect");
+      failure_stage: "schedule_rebinding", message: "Schedule rebinding failure after reconnect" } }, next));
+  expect(screen.getByRole("alert")).toHaveTextContent("Schedule rebinding failure after reconnect");
   expect(manual).toBeEnabled();
   await act(async () => { fireEvent.click(manual); });
   expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
-  expect(screen.getByRole("alert")).toHaveTextContent("Settings failure after reconnect");
+  expect(screen.getByRole("alert")).toHaveTextContent("Schedule rebinding failure after reconnect");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   sessions.disconnect(next);
@@ -923,7 +923,7 @@ it.each([true, false])("continues an in-flight archive confirmation across its f
   api.setRows([b, child, { ...a, archived: true }]);
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
     dispatch_state: dispatch, ...(partial ? { archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
-      failure_stage: "successor_configuration", message: "First generation partial result" } } : {}) }));
+      failure_stage: "schedule_rebinding", message: "First generation partial result" } } : {}) }));
   await api.confirmList();
   if (partial) {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown"));
@@ -969,13 +969,13 @@ it("confirms a lost POST after the first archive frame establishes the service g
   api.setRows([b, child, { ...a, archived: true }]);
   act(() => handleWsMessage({ type: "session_archived", old_session_id: a.id, new_session_id: child.id, name: child.name,
     dispatch_state: dispatch, archive_result: { old_session_id: a.id, archived: true, new_session_id: child.id,
-      failure_stage: "successor_configuration", message: "Original settings failed" } }));
+      failure_stage: "schedule_rebinding", message: "Original schedule rebinding failed" } }));
   api.holdList();
   await api.loseResponse();
   await waitFor(() => expect(api.listPending()).toBe(true));
   await api.confirmList();
   expect(screen.getByRole("alert")).toHaveTextContent("Original command result is unknown");
-  expect(screen.getByRole("alert")).toHaveTextContent("Original settings failed");
+  expect(screen.getByRole("alert")).toHaveTextContent("Original schedule rebinding failed");
   expect(useSessionStore.getState().activeSessionId).toBe(a.id);
   expect(api.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
 });

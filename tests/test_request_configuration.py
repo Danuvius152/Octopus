@@ -86,7 +86,7 @@ async def configuration_host(tmp_path, monkeypatch):
 
 async def test_request_captures_session_and_agent_after_coordinated_updates(configuration_host, monkeypatch):
     client, manager, session, credential_ids, effects = configuration_host
-    response = await client.patch(f"/api/sessions/{session.id}", json={"model": "session-old"})
+    response = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "model": "session-old"})
     assert response.status_code == 200, response.text
     input_recorded = asyncio.Event()
 
@@ -106,7 +106,7 @@ async def test_request_captures_session_and_agent_after_coordinated_updates(conf
     # awaiting the Owner. Configuration writes now use that same Owner.
     async with manager.configuration_lock:
         monkeypatch.setattr(manager.configuration_lock, "acquire", observe_acquire)
-        session_update = asyncio.create_task(client.patch(f"/api/sessions/{session.id}", json={"model": "session-new"}))
+        session_update = asyncio.create_task(client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "model": "session-new"}))
         await asyncio.wait_for(waiting.get(), 1)
         agent_update = asyncio.create_task(client.patch(f"/api/agents/{session.agent_id}", json={
             "reasoning_effort": "high", "service_tier": "fast", "credential_id": credential_ids[1],
@@ -206,7 +206,7 @@ async def test_default_updates_after_capture_apply_to_the_queued_request(configu
     try:
         await asyncio.wait_for(captured.wait(), 3)
         second = await manager.start_message(session.id, "Use the new defaults")
-        updated = await client.patch(f"/api/sessions/{session.id}", json={"model": "session-new"})
+        updated = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "model": "session-new"})
         assert updated.status_code == 200, updated.text
         updated = await client.patch(f"/api/agents/{session.agent_id}", json={
             "model": "agent-new", "reasoning_effort": "high", "service_tier": "fast", "credential_id": credential_ids[1],
@@ -306,7 +306,7 @@ async def test_credential_deleted_after_spawn_cannot_receive_initial_input(confi
 
 async def test_failed_credential_delete_does_not_unbind_session_defaults(configuration_host):
     client, manager, session, credential_ids, _effects = configuration_host
-    patched = await client.patch(f"/api/sessions/{session.id}", json={"credential_id": credential_ids[0]})
+    patched = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "credential_id": credential_ids[0]})
     assert patched.status_code == 200, patched.text
     async with manager.db.transaction(write=True) as tx:
         await tx.execute("CREATE TRIGGER reject_delete BEFORE DELETE ON backend_credentials "
@@ -378,7 +378,7 @@ async def test_backend_default_change_preserves_old_session_and_explains_its_inh
     assert ('credential_id' if setting == 'credential' else 'tool_deny') in failed.outcome.message
     assert 'Agent settings' in failed.outcome.message
     if setting == 'credential':
-        repaired = await client.patch(f'/api/sessions/{session.id}', json={'credential_id': credential_ids[0]})
+        repaired = await client.patch(f'/api/sessions/{session.id}', json={"expected_backend": "codex", 'credential_id': credential_ids[0]})
     else:
         repaired = await client.patch(agent_path, json={'tool_deny': ''})
     assert repaired.status_code == 200, repaired.text
@@ -406,16 +406,16 @@ async def test_old_session_repairs_inherited_credential_and_effort_as_one_atomic
     assert saved.status_code == 200, saved.text
     path = f'/api/sessions/{session.id}'
     before = (await client.get(path)).json()
-    rejected = await client.patch(path, json={'credential_id': credential_ids[0]})
+    rejected = await client.patch(path, json={"expected_backend": "codex", 'credential_id': credential_ids[0]})
     assert rejected.status_code == 400 and 'reasoning_effort' in rejected.json()['detail']
-    rejected = await client.patch(path, json={'reasoning_effort': 'low'})
+    rejected = await client.patch(path, json={"expected_backend": "codex", 'reasoning_effort': 'low'})
     assert rejected.status_code == 400 and 'Credential backend' in rejected.json()['detail']
-    rejected = await client.patch(path, json={'credential_id': credential_ids[0], 'reasoning_effort': 'max'})
+    rejected = await client.patch(path, json={"expected_backend": "codex", 'credential_id': credential_ids[0], 'reasoning_effort': 'max'})
     assert rejected.status_code == 400 and 'reasoning_effort' in rejected.json()['detail']
     unchanged = (await client.get(path)).json()
     for field in ('credential_id', 'reasoning_effort', 'model', 'backend', 'claude_session_id', 'messages'):
         assert unchanged[field] == before[field]
-    corrected = await client.patch(path, json={'credential_id': credential_ids[0], 'reasoning_effort': 'low'})
+    corrected = await client.patch(path, json={"expected_backend": "codex", 'credential_id': credential_ids[0], 'reasoning_effort': 'low'})
     assert corrected.status_code == 200, corrected.text
     receipt = await manager.start_message(session.id, 'Continue the same history after the combined correction')
     completion = await asyncio.wait_for(receipt.wait(), 5)
@@ -424,6 +424,229 @@ async def test_old_session_repairs_inherited_credential_and_effort_as_one_atomic
     assert json.loads(effects.read_text()) == {
         'model': 'new-default-model', 'effort': 'low', 'tier': None, 'credential': credential_ids[0],
     }
+
+
+async def test_empty_session_switches_engine_atomically_and_refuses_an_old_settings_dialog(configuration_host):
+    client, _manager, session, credential_ids, _effects = configuration_host
+    path = f"/api/sessions/{session.id}"
+    incomplete = await client.patch(path, json={"expected_backend": "codex", "backend": "claude-code"})
+    assert incomplete.status_code == 400, incomplete.text
+    rejected = await client.patch(path, json={
+        "expected_backend": "codex", "backend": "claude-code", "credential_id": credential_ids[0],
+        "model": None, "reasoning_effort": None, "service_tier": None,
+    })
+    assert rejected.status_code == 400, rejected.text
+    unchanged = await client.get(path)
+    assert unchanged.json()["backend"] == "codex"
+
+    switched = await client.patch(path, json={
+        "expected_backend": "codex", "backend": "claude-code",
+        "credential_id": None, "model": "sonnet", "reasoning_effort": "low", "service_tier": None,
+    })
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["id"] == session.id
+    assert switched.json()["backend"] == "claude-code"
+    assert switched.json()["defaults_source"] == "backend"
+
+    missing = await client.patch(path, json={"model": "gpt-6.2-sol"})
+    assert missing.status_code == 428, missing.text
+    stale = await client.patch(path, json={"expected_backend": "codex", "model": "gpt-6.2-sol"})
+    assert stale.status_code == 409, stale.text
+    assert (await client.get(path)).json()["model"] == "sonnet"
+
+
+async def test_browser_submission_admits_only_the_observed_engine_and_repeats_existing_receipts(configuration_host):
+    client, manager, original, _credential_ids, _effects = configuration_host
+    created = await client.post("/api/sessions", json={
+        "agent_id": original.agent_id, "backend": "claude-code", "working_dir": original.working_dir,
+    })
+    assert created.status_code == 201, created.text
+    path = f"/api/sessions/{created.json()['id']}"
+    cleared = dict.fromkeys(("model", "reasoning_effort", "service_tier", "credential_id"))
+    changed = await client.patch(path, json={"expected_backend": "claude-code", "backend": "codex", **cleared})
+    assert changed.status_code == 200, changed.text
+    body = {"client_request_id": "first-input", "content": "Run once on the engine shown"}
+    for fields in ({}, {"expected_backend": "claude-code"}):
+        reply = await client.post(f"{path}/submissions", json={**body, **fields})
+        assert reply.json()["accepted"] is False and reply.json()["code"] == "engine_changed"
+    assert (await client.get(path)).json()["has_inputs"] is False
+    admitted = await client.post(f"{path}/submissions", json={**body, "expected_backend": "codex"})
+    assert admitted.json()["accepted"] is True, admitted.text
+    for fields in ({}, {"expected_backend": "claude-code"}):
+        repeated = await client.post(f"{path}/submissions", json={**body, **fields})
+        assert repeated.json()["request_id"] == admitted.json()["request_id"]
+    rejected = await client.patch(path, json={"expected_backend": "codex", "backend": "claude-code", **cleared})
+    assert rejected.status_code == 409 and rejected.json()["detail"]["code"] == "conversation_started"
+    assert (await client.get(path)).json()["has_inputs"] is True
+    await manager.drain_turns()
+
+
+async def test_settings_response_retains_admitted_input_before_any_messages(configuration_host):
+    client, manager, session, _credential_ids, _effects = configuration_host
+    await manager.db.admit_client_submission(
+        session.id, "pending-client", "digest", "pending-request",
+        payload={"content": "Queued input", "attachment_ids": [], "attachments": [], "wiki_mode": None},
+        receipt={"accepted": True, "disposition": "accepted"},
+    )
+    settings = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "reasoning_effort": "high"})
+    assert settings.status_code == 200, settings.text
+    assert settings.json()["has_inputs"] is True and settings.json()["message_count"] == 0
+    detail = await client.get(f"/api/sessions/{session.id}")
+    assert detail.json()["has_inputs"] is True and detail.json()["message_count"] == 0
+    rows = (await client.get("/api/sessions")).json()
+    listed = next(row for row in rows if row["id"] == session.id)
+    assert listed["has_inputs"] is True and listed["message_count"] == 0
+    rows = (await client.get(f"/api/agents/{session.agent_id}/sessions")).json()
+    listed = next(row for row in rows if row["id"] == session.id)
+    assert listed["has_inputs"] is True and listed["message_count"] == 0
+
+
+async def test_restore_broadcast_retains_admitted_input_before_any_messages(configuration_host):
+    _client, manager, session, _credential_ids, _effects = configuration_host
+    await manager.db.admit_client_submission(
+        session.id, "pending-client", "digest", "pending-request",
+        payload={"content": "Queued input", "attachment_ids": [], "attachments": [], "wiki_mode": None},
+        receipt={"accepted": True, "disposition": "accepted"},
+    )
+    await manager.archive_session(session.id, replace=False)
+    archived = await manager.load_archived_session_info(session.id, session.user_id)
+    assert archived is not None and archived.has_inputs and archived.message_count == 0
+    events = []
+
+    async def observe(event):
+        if event["type"] == "session_unarchived":
+            events.append(event["session"])
+
+    manager.on_broadcast("restore-summary", observe)
+    await manager.unarchive_session(session.id, session.user_id)
+    assert len(events) == 1
+    assert events[0]["has_inputs"] is True and events[0]["message_count"] == 0
+
+
+async def test_each_switch_returns_its_own_committed_settings(configuration_host, monkeypatch):
+    client, manager, session, _credential_ids, _effects = configuration_host
+    save = manager.update_session_configuration
+    first_committed, send_first = asyncio.Event(), asyncio.Event()
+
+    async def delay_first_response(sid, fields, user_id):
+        saved = await save(sid, fields, user_id)
+        if fields.get("backend") == "claude-code":
+            first_committed.set()
+            await send_first.wait()
+        return saved
+
+    monkeypatch.setattr(manager, "update_session_configuration", delay_first_response)
+    path = f"/api/sessions/{session.id}"
+    controls = {"reasoning_effort": None, "service_tier": None, "credential_id": None}
+    first = asyncio.create_task(client.patch(path, json={
+        **controls, "expected_backend": "codex", "backend": "claude-code", "model": "sonnet",
+    }))
+    try:
+        await asyncio.wait_for(first_committed.wait(), 2)
+        second = await client.patch(path, json={
+            **controls, "expected_backend": "claude-code", "backend": "codex", "model": "model-two",
+        })
+    finally:
+        send_first.set()
+        original = await asyncio.wait_for(first, 2)
+    assert original.status_code == second.status_code == 200
+    assert (original.json()["backend"], original.json()["model"]) == ("claude-code", "sonnet")
+    assert (second.json()["backend"], second.json()["model"]) == ("codex", "model-two")
+
+
+async def test_cross_engine_settings_keep_unenforceable_agent_policy_from_saving(configuration_host):
+    client, manager, original, _credential_ids, _effects = configuration_host
+    await manager.db.update_agent(original.agent_id, backend="claude-code", tool_deny="Write",
+                                  credential_id=None, reasoning_effort=None, service_tier=None)
+    create_path = f"/api/agents/{original.agent_id}/sessions"
+    created = await client.post(create_path, json={"working_dir": original.working_dir})
+    assert created.status_code == 201, created.text
+    path = f"/api/sessions/{created.json()['id']}"
+    target = {"backend": "codex", "model": None, "reasoning_effort": None, "service_tier": None, "credential_id": None}
+    patch = await client.patch(path, json={"expected_backend": "claude-code", **target})
+    assert patch.status_code == 400 and "tool_deny" in patch.json()["detail"]
+    assert (await client.get(path)).json()["backend"] == "claude-code"
+    posted = await client.post(create_path, json={"working_dir": original.working_dir, **target})
+    assert posted.status_code == 400 and "tool_deny" in posted.json()["detail"]
+    assert (await manager.db.get_agent(original.agent_id))["tool_deny"] == "Write"
+
+
+async def test_alternate_engine_creation_and_credential_deletion_share_a_commit_boundary(configuration_host, monkeypatch):
+    client, manager, original, _credential_ids, _effects = configuration_host
+    credential_id = "alternate-binding"
+    await manager.db.save_credential(
+        credential_id=credential_id, backend="claude-code", label="Alternate credential",
+        auth_type="api_key", secret_encrypted="unused", created_at="2026-11-17T00:00:00+00:00",
+        user_id=original.user_id,
+    )
+    save = manager.db.save_session
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_save(**fields):
+        entered.set()
+        await release.wait()
+        await save(**fields)
+
+    monkeypatch.setattr(manager.db, "save_session", hold_save)
+    path = f"/api/agents/{original.agent_id}/sessions"
+    payload = {"backend": "claude-code", "credential_id": credential_id, "working_dir": original.working_dir}
+    creating = asyncio.create_task(client.post(path, json=payload))
+    deleting = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        deleting = asyncio.create_task(manager.delete_credential_binding(credential_id, original.user_id))
+        completed, _ = await asyncio.wait({deleting}, timeout=0.05)
+        assert not completed
+    finally:
+        release.set()
+        created = await asyncio.wait_for(creating, 2)
+        if deleting is not None:
+            await asyncio.wait_for(deleting, 2)
+    assert created.status_code == 201, created.text
+    sid = created.json()["id"]
+    assert manager.get_session(sid).credential_id is None
+    saved = next(row for row in await manager.db.load_sessions() if row["id"] == sid)
+    assert saved["credential_id"] is None and saved["defaults_source"] == "backend"
+    assert (await client.post(path, json=payload)).status_code == 404
+
+
+async def test_create_with_explicit_defaults_validates_the_complete_candidate(configuration_host):
+    client, manager, original, _credential_ids, _effects = configuration_host
+    # The catalog no longer offers an effort already saved on the Agent.
+    await manager.db.update_agent(original.agent_id, reasoning_effort="xhigh")
+    path = f"/api/agents/{original.agent_id}/sessions"
+    original_rows = await manager.db.load_sessions()
+    rejected = await client.post(path, json={
+        "backend": "codex", "working_dir": original.working_dir,
+        "model": None, "reasoning_effort": None, "service_tier": None, "credential_id": None,
+    })
+    assert rejected.status_code == 400 and "reasoning_effort" in rejected.json()["detail"]
+    assert await manager.db.load_sessions() == original_rows
+
+
+async def test_explicit_alternate_engine_keeps_its_source_when_archived_after_agent_switch(configuration_host):
+    client, manager, original, credential_ids, effects = configuration_host
+    agent_path = f"/api/agents/{original.agent_id}"
+    switched_agent = await client.patch(agent_path, json={
+        "backend": "claude-code", "model": "sonnet", "credential_id": None, "service_tier": None,
+    })
+    assert switched_agent.status_code == 200, switched_agent.text
+    created = await client.post(f"{agent_path}/sessions", json={
+        "backend": "codex", "working_dir": original.working_dir,
+    })
+    assert created.status_code == 201 and created.json()["defaults_source"] == "backend", created.text
+    switched_agent = await client.patch(agent_path, json={
+        "backend": "codex", "model": "agent-model", "reasoning_effort": "high", "credential_id": credential_ids[1],
+    })
+    assert switched_agent.status_code == 200, switched_agent.text
+    child = await client.post(f"/api/sessions/{created.json()['id']}/archive")
+    assert child.status_code == 201 and child.json()["defaults_source"] == "backend", child.text
+    recovered = SessionManager()
+    await recovered.initialize(manager.db)
+    assert recovered.get_session(child.json()["id"]).defaults_source == "backend"
+    receipt = await manager.start_message(child.json()["id"], "Use the host defaults of the selected backend")
+    assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
+    assert json.loads(effects.read_text()) == {"model": None, "effort": None, "tier": None, "credential": None}
 
 
 @pytest.mark.parametrize("delete_previous", [False, True])
@@ -452,7 +675,7 @@ async def test_next_request_uses_the_new_credential_instead_of_a_held_process(co
     before = json.loads(effects.read_text())
     expected = credential_ids if credential_style == "home_dir" else ["test-only", "test-only"]
     assert before["credential"] == expected[0] and Path(f"/proc/{before['pid']}").exists()
-    patched = await client.patch(f"/api/sessions/{session.id}", json={"credential_id": credential_ids[1]})
+    patched = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "credential_id": credential_ids[1]})
     assert patched.status_code == 200, patched.text
     if delete_previous:
         deleted = await client.delete(f"/api/credentials/{credential_ids[0]}")

@@ -64,6 +64,7 @@ export const isSessionInfo: Guard<SessionInfo> = fields({
   id, name: text, working_dir: text, status: oneOf("idle", "running"), created_at: text,
   message_count: integer, transcript_integrity: oneOf("ok", "duplicate_seq"), claude_session_id: maybeText,
   credential_id: maybeText, agent_id: maybeText, origin: text, backend, ...settings,
+  defaults_source: optional(nullable(oneOf("agent", "backend"))), has_inputs: optional(nullable(boolean)),
   parent_session_id: maybeText, delegation_request: maybeText, app_id: maybeText,
   can_steer: boolean, can_observe_context: boolean, can_compact: boolean, compact_unavailable_reason: maybeText,
   can_fork: boolean, forked_from_session_id: maybeText, fork_after_seq: maybeNumber,

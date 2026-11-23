@@ -9,7 +9,7 @@ import { pinnedInOrder } from "../lib/sidebarPins";
 import { knownAgentScope, refreshAgents, withAgentRequest } from "../lib/refreshAgents";
 import { agentRequestIsCurrent } from "../lib/agentUpdates";
 import { backendLabel, useBackendCatalog } from "../hooks/useBackendCatalog";
-import { useModelSettings } from "../hooks/useModelSettings";
+import { modelOption, useModelSettings } from "../hooks/useModelSettings";
 import {
   useSessionStore,
   type Agent,
@@ -19,6 +19,7 @@ import {
 import { BackendCatalogStatus } from "./BackendCatalogStatus";
 import { EmojiPicker } from "./EmojiPicker";
 import { ItemLibrary, type LibraryItem } from "./ItemLibrary";
+import { ModelSelect } from "./ModelSelect";
 import { PageHeader } from "./PageHeader";
 import { ReasoningEffortSelect } from "./ReasoningEffortSelect";
 import { ServiceTierSelect } from "./ServiceTierSelect";
@@ -83,7 +84,7 @@ function agentFields(draft: AgentDraft) {
     credential_id: draft.credentialId || null,
     model: draft.model.trim() || null,
     reasoning_effort: draft.reasoningEffort || null,
-    service_tier: draft.backend === "codex" ? draft.serviceTier : null,
+    service_tier: draft.backend === "codex" ? draft.serviceTier || null : null,
     backend: draft.backend,
     tool_allow: draft.toolAllow,
     tool_deny: draft.toolDeny,
@@ -166,7 +167,7 @@ function AgentFormInstance({
     credentialId: editing?.credential_id ?? "",
     model: editing?.model ?? "",
     reasoningEffort: editing?.reasoning_effort ?? "",
-    serviceTier: editing?.service_tier ?? "default",
+    serviceTier: editing?.service_tier ?? "",
     toolAllow: editing?.tool_allow ?? "",
     toolDeny: editing?.tool_deny ?? "",
     subagents: editing?.subagents ?? [],
@@ -181,7 +182,12 @@ function AgentFormInstance({
   const [model, setModel] = useState(initialDraft.model);
   const [reasoningEffort, setReasoningEffort] = useState(initialDraft.reasoningEffort);
   const [serviceTier, setServiceTier] = useState(initialDraft.serviceTier);
-  const { catalog, error: catalogError } = useModelSettings(backend, credentialId, tab === "form" && !!backend);
+  const modelDefaults = useRef<HTMLDetailsElement>(null);
+  const { catalog: readCatalog, error: catalogError, loading: loadingCatalog, retry: retryCatalog } = useModelSettings(
+    backend, credentialId, tab === "form" && !!backend, [backend === initialDraft.backend ? initialDraft.model : null],
+  );
+  const catalog = catalogError ? null : readCatalog;
+  const allowClear = !!catalogError;
   const [toolAllow, setToolAllow] = useState(initialDraft.toolAllow);
   const [toolDeny, setToolDeny] = useState(initialDraft.toolDeny);
   const toolPolicy = engineCatalog?.tool_policy[backend];
@@ -233,6 +239,12 @@ function AgentFormInstance({
 
   const save = async () => {
     if (!isCurrent() || useSessionStore.getState().pageTab !== "form" || !name.trim() || !backend || saving.current) return;
+    if (model && (model !== initialDraft.model || backend !== initialDraft.backend) &&
+      !catalog?.models?.some((item) => item.id === model)) {
+      focusModelDefault("agent-model");
+      setError(catalog ? "Choose a model from the current catalog." : "Wait for the model catalog or retry its request.");
+      return;
+    }
     for (const [field, value, supported] of [
       ["tool_allow", toolAllow, toolPolicy?.allow],
       ["tool_deny", toolDeny, toolPolicy?.deny],
@@ -263,6 +275,7 @@ function AgentFormInstance({
       ))
       : { ...fields, mcp_servers: [...BUILTIN_MCP] };
     const request = useSessionStore.getState().beginAgentRequest();
+    let repairField: string | undefined;
     try {
       const res = await fetch(editingAgentId ? `${API}/${editingAgentId}` : API, {
         method: editingAgentId ? "PATCH" : "POST",
@@ -270,8 +283,10 @@ function AgentFormInstance({
         body: JSON.stringify(body),
       });
       if (!res.ok) {
-        const detail = await res.json().catch(() => null);
-        throw new Error(detail?.detail || `HTTP ${res.status}`);
+        const { detail } = await res.json().catch(() => ({}));
+        if (detail?.field === "reasoning_effort") repairField = "agent-reasoning-effort";
+        if (detail?.field === "service_tier") repairField = "agent-service-tier";
+        throw new Error(typeof detail === "string" ? detail : detail?.message ?? `HTTP ${res.status}`);
       }
       const saved = (await res.json()) as Agent;
       if (!agentRequestIsCurrent(request, useSessionStore.getState())) return;
@@ -284,12 +299,25 @@ function AgentFormInstance({
       setActiveAgentId(saved.id);
       showChat();
     } catch (e) {
-      if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to save agent");
+      if (isCurrent() && agentRequestIsCurrent(request, useSessionStore.getState())) {
+        setError(e instanceof Error ? e.message : "Failed to save agent");
+        const field = repairField;
+        if (field) requestAnimationFrame(() => {
+          if (isCurrent() && !saving.current) focusModelDefault(field);
+        });
+      }
     } finally {
       useSessionStore.getState().endAgentRequest(request);
       saving.current = false;
       if (isCurrent()) setBusy(false);
     }
+  };
+
+  const focusModelDefault = (id: string) => {
+    if (!modelDefaults.current) return;
+    modelDefaults.current.open = true;
+    (modelDefaults.current.querySelector<HTMLElement>(`#${id}:enabled`) ??
+      modelDefaults.current.querySelector("summary"))?.focus();
   };
 
   // Archive from either tab: the form's header button archives the agent
@@ -457,6 +485,12 @@ function AgentFormInstance({
 
   const backendCreds = credentials.filter((c) => c.backend === backend);
   const engineOptions = engineCatalog?.supported ?? (backend ? [backend] : []);
+  const defaultModel = readCatalog?.default_model;
+  const selectedModel = modelOption(catalog, model);
+  const modelName = selectedModel?.name ?? (model || defaultModel || "Engine default");
+  const engineDefaultModel = modelOption(readCatalog, defaultModel)?.name ?? defaultModel;
+  const modelEfforts = selectedModel?.reasoning_efforts ?? catalog?.reasoning_efforts;
+  const modelTiers = selectedModel?.service_tiers ?? catalog?.service_tiers;
 
   return (
     <div className="agent-form-page agent-settings flex min-h-0 flex-1 flex-col">
@@ -576,12 +610,7 @@ function AgentFormInstance({
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="agent-prompt">
-                  System prompt
-                  <span className="ml-2 font-mono text-[11px] font-normal text-gray-700">
-                    system_prompt
-                  </span>
-                </Label>
+                <Label htmlFor="agent-prompt">System prompt</Label>
                 <textarea
                   id="agent-prompt"
                   className="agent-prompt-input min-h-32 w-full rounded-xl border border-gray-400 bg-card px-4 py-3 text-[13.5px] leading-relaxed text-gray-900 outline-none transition-colors placeholder:text-gray-600 focus:border-primary focus:ring-[3px] focus:ring-primary/10"
@@ -592,14 +621,10 @@ function AgentFormInstance({
               </div>
 
               <div className="grid gap-6 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label>
-                    Engine
-                    <span className="ml-2 font-normal text-gray-700">
-                      overridable per session
-                    </span>
-                  </Label>
-                  <div className="agent-backend-select grid grid-cols-2 gap-3" role="radiogroup">
+                <section className="space-y-3" aria-labelledby="agent-conversation-defaults">
+                  <h2 id="agent-conversation-defaults" className="text-sm font-semibold">Conversation defaults</h2>
+                  <Label id="agent-backend-label">Default engine</Label>
+                  <div className="agent-backend-select grid grid-cols-2 gap-3" role="radiogroup" aria-labelledby="agent-backend-label">
                     {engineOptions.map((b) => {
                       const picked = backend === b;
                       const detected = engineCatalog?.available.includes(b);
@@ -619,7 +644,7 @@ function AgentFormInstance({
                               setCredentialId("");
                               setModel("");
                               setReasoningEffort("");
-                              setServiceTier("default");
+                              setServiceTier("");
                             }
                           }}
                           role="radio"
@@ -645,12 +670,12 @@ function AgentFormInstance({
                     })}
                   </div>
                   <BackendCatalogStatus read={backendRead} />
+                  <Label htmlFor="agent-credential">Default sign-in</Label>
                   <select
                     id="agent-credential"
-                    className="agent-credential-select mt-1 h-9 w-full rounded-lg border border-gray-400 bg-card px-3 text-[13.5px] text-gray-900 outline-none transition-colors focus:border-primary focus:ring-[3px] focus:ring-primary/10"
+                    className="agent-credential-select h-9 w-full rounded-lg border border-border bg-card px-3 text-sm"
                     value={credentialId}
                     onChange={(e) => setCredentialId(e.target.value)}
-                    aria-label="Credential"
                     disabled={!backend}
                   >
                     <option value="">Host default sign-in</option>
@@ -663,34 +688,37 @@ function AgentFormInstance({
                       </option>
                     ))}
                   </select>
-                  <Label htmlFor="agent-model">Model</Label>
-                  <Input
-                    id="agent-model" list="agent-model-options" value={model}
-                    onChange={(e) => setModel(e.target.value)} disabled={busy || !backend}
-                    placeholder={`CLI default${catalog?.default_model ? ` (${catalog.default_model})` : ""}`}
-                  />
-                  <datalist id="agent-model-options">
-                    {catalog?.models?.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-                  </datalist>
-                  {backend === "codex" && (
-                    <ServiceTierSelect
-                      id="agent-service-tier" value={serviceTier} onChange={setServiceTier}
-                      model={model} catalog={catalog} disabled={busy}
-                    />
-                  )}
-                  {(backend === "codex" || backend === "claude-code") && (
-                    <ReasoningEffortSelect
-                      id="agent-reasoning-effort" value={reasoningEffort} onChange={setReasoningEffort}
-                      model={model} catalog={catalog} disabled={busy}
-                      inherited={`CLI default${catalog?.default_reasoning_effort ? ` (${catalog.default_reasoning_effort})` : ""}`}
-                    />
-                  )}
-                  {catalogError && <p className="text-xs text-destructive">{catalogError}</p>}
-                  <p className="font-mono text-[11px] text-gray-700">
-                    from Harness · memory lives on the agent, survives engine
-                    swaps
-                  </p>
-                </div>
+                  <details ref={modelDefaults} className="group border-t border-border pt-3">
+                    <summary className="cursor-pointer text-sm font-medium">
+                      <span>Model defaults</span>
+                      <span className="ml-2 text-xs font-normal text-muted-foreground group-open:hidden">{modelName}</span>
+                    </summary>
+                    <div className="mt-3 space-y-3">
+                      <ModelSelect
+                        id="agent-model" value={model} onChange={setModel} catalog={catalog}
+                        disabled={busy || !backend} allowClear={allowClear}
+                        inherited={engineDefaultModel ? `Engine default (${engineDefaultModel})` : "Engine default"}
+                      />
+                      {(reasoningEffort || modelEfforts?.length) ? (
+                        <ReasoningEffortSelect
+                          id="agent-reasoning-effort" value={reasoningEffort} onChange={setReasoningEffort}
+                          model={model} catalog={catalog} disabled={busy} allowClear={allowClear}
+                          inherited={`Engine default${readCatalog?.default_reasoning_effort ? ` (${readCatalog.default_reasoning_effort})` : ""}`}
+                        />
+                      ) : null}
+                      {(serviceTier || modelTiers?.includes("fast")) && (
+                        <ServiceTierSelect
+                          id="agent-service-tier" value={serviceTier} onChange={setServiceTier}
+                          model={model} catalog={catalog} disabled={busy} allowClear={allowClear} inherited="Normal (default)"
+                        />
+                      )}
+                      {loadingCatalog && <p role="status" className="text-xs text-muted-foreground">Loading model catalog…</p>}
+                    </div>
+                  </details>
+                  {catalogError && <div className="flex flex-wrap items-center gap-2 text-xs text-destructive">
+                    <p>{catalogError}</p><Button type="button" size="sm" variant="outline" onClick={retryCatalog}>Retry catalog</Button>
+                  </div>}
+                </section>
 
                 <div className="space-y-2">
                   <Label>
@@ -760,22 +788,12 @@ function AgentFormInstance({
                       </p>
                     )}
                   </div>
-                  <p className="text-xs text-gray-700">
-                    These switches select Octopus connectors.
-                    {backend === "codex" && " Codex can also load native MCP servers from its own configuration."}
-                    {backend === "claude-code" && " Claude uses the MCP configuration supplied for this invocation."}
-                  </p>
                 </div>
               </div>
 
               <div className="grid gap-6 md:grid-cols-2">
                 <div className="space-y-2">
-                  <Label htmlFor="agent-tool-allow">
-                    Allowed tools
-                    <span className="ml-2 font-mono text-[11px] font-normal text-gray-700">
-                      tool_policy
-                    </span>
-                  </Label>
+                  <Label htmlFor="agent-tool-allow">Allowed tools</Label>
                   <textarea
                     id="agent-tool-allow"
                     className="agent-tool-allow min-h-20 w-full rounded-xl border border-gray-400 bg-card px-4 py-3 font-mono text-[12.5px] text-gray-900 outline-none transition-colors placeholder:text-gray-600 focus:border-primary focus:ring-[3px] focus:ring-primary/10"
@@ -786,9 +804,9 @@ function AgentFormInstance({
                     placeholder="allow (one per line) — empty allows everything"
                   />
                   <p id="agent-tool-allow-help" className="text-xs text-gray-700">
-                    {toolPolicy?.allow ? "Only the listed tools are allowed."
-                      : toolPolicy ? "This engine does not support a tool allow list. Clear any saved value before saving or running."
-                      : "Engine tool policy details are unavailable."}
+                    {toolPolicy?.allow ? "Leave blank to allow all."
+                      : toolPolicy ? (toolAllow ? "Clear the saved value for this engine." : "Unavailable for this engine.")
+                      : "Tool support is unavailable."}
                   </p>
                 </div>
                 <div className="space-y-2">
@@ -801,14 +819,12 @@ function AgentFormInstance({
                     value={toolDeny}
                     onChange={(e) => setToolDeny(e.target.value)}
                     disabled={!toolPolicy?.deny && !toolDeny}
-                    aria-describedby="agent-tool-deny-help"
+                    aria-describedby={toolPolicy?.deny ? undefined : "agent-tool-deny-help"}
                     placeholder="deny (one per line)"
                   />
-                  <p id="agent-tool-deny-help" className="text-xs text-gray-700">
-                    {toolPolicy?.deny ? "Uses the engine's native deny rules, including MCP tool patterns."
-                      : toolPolicy ? "This engine does not support tool deny rules. Clear any saved value before saving or running."
-                      : "Engine tool policy details are unavailable."}
-                  </p>
+                  {!toolPolicy?.deny && <p id="agent-tool-deny-help" className="text-xs text-gray-700">
+                    {toolPolicy ? (toolDeny ? "Clear the saved value for this engine." : "Unavailable for this engine.") : "Tool support is unavailable."}
+                  </p>}
                 </div>
               </div>
 
@@ -842,21 +858,8 @@ function SubagentEditor({
 
   return (
     <div className="agent-subagents space-y-3">
-      <p className="text-xs text-gray-700">
-        {backend === "claude-code"
-          ? "These definitions are available to Claude Code for this agent."
-          : backend === "codex"
-            ? "Definitions are saved, but Codex does not yet use them as native roles or tool restrictions. Switching back to Claude Code keeps them available."
-            : "These definitions are saved with the agent."}
-      </p>
       <div className="flex items-center justify-between">
-        <Label>
-          Sub-agents
-          <span className="ml-2 font-normal text-gray-700">
-            extra helpers this agent can hand work to, on top of the built-in
-            ones
-          </span>
-        </Label>
+        <Label>Sub-agents</Label>
         <button
           type="button"
           className="btn-subagent-add inline-flex items-center gap-1.5 rounded-lg border border-gray-400 px-2.5 py-1 text-[12.5px] text-gray-900 transition-colors hover:border-primary hover:text-primary"
@@ -868,10 +871,13 @@ function SubagentEditor({
           Add
         </button>
       </div>
+      {backend === "codex" && (
+        <p className="text-xs text-gray-700">Custom sub-agents are saved for Claude Code.</p>
+      )}
 
       {value.length === 0 ? (
         <p className="subagent-empty text-[12.5px] text-gray-700">
-          None — this agent uses the harness's built-in sub-agents.
+          Uses the engine’s built-in sub-agents.
         </p>
       ) : (
         <div className="space-y-2.5">

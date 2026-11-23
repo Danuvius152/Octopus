@@ -17,7 +17,7 @@ class SessionStatus(str, Enum):
     running = "running"
 
 
-SessionArchiveFailureStage = Literal["successor_creation", "successor_configuration", "schedule_rebinding"]
+SessionArchiveFailureStage = Literal["successor_creation", "schedule_rebinding"]
 
 
 class SessionArchiveResult(BaseModel):
@@ -46,6 +46,9 @@ class BackendKind(str, Enum):
     codex = "codex"
 
 
+SessionDefaultsSource = Literal["agent", "backend"]
+
+
 class OAuthCancelResponse(BaseModel):
     status: Literal["cancelled", "already_completed"]
 
@@ -57,6 +60,9 @@ class CreateAgentSessionRequest(BaseModel):
     # Which AI backend drives this session (codex-backend.md §4.1). None =
     # inherit the owning agent's default backend (resolved in the route).
     backend: BackendKind | None = None
+    model: str | None = None
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
+    service_tier: Literal["default", "fast"] | None = None
 
 
 class CreateSessionRequest(CreateAgentSessionRequest):
@@ -64,23 +70,16 @@ class CreateSessionRequest(CreateAgentSessionRequest):
 
 
 class SessionUpdate(BaseModel):
-    """Fields a live session can be repointed at after creation.
+    """Change conversation settings under the observed engine."""
 
-    `credential_id` is the one that matters: a session's engine credential was
-    previously fixed at creation, so swapping a lapsed or deleted sign-in
-    meant abandoning the conversation. Pass null to fall back to the agent's
-    credential (or the CLI's own login)."""
-
-    # `...` default distinguishes "not provided" from an explicit null, which
-    # is how you clear the binding.
+    expected_backend: BackendKind | None = None
+    backend: BackendKind | None = None
     credential_id: str | None = Field(default=None)
     name: str | None = None
-    # What `/model` sets. Same shape: null falls back to the agent's model,
-    # whose own null means the backend's default.
+    # Null restores the saved default source for each override.
     model: str | None = Field(default=None)
-    # Independent of the model override; null inherits the agent/CLI setting.
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
-    # null inherits the agent; default means normal speed, fast opts in.
+    # Explicit default means normal speed, fast opts in.
     service_tier: Literal["default", "fast"] | None = None
 
 
@@ -148,9 +147,9 @@ class SessionInfo(BaseModel):
     origin: str = "user"
     # Which AI backend drives this session.
     backend: BackendKind = BackendKind.claude_code
-    # Per-session model override (`/model`); null = the agent's model, whose own
-    # null means the backend's default. Sent so the composer can say which is in
-    # force without a second request.
+    defaults_source: SessionDefaultsSource | None = None
+    has_inputs: bool | None = None
+    # Per-session override; null selects the saved default source.
     model: str | None = None
     reasoning_effort: str | None = None
     service_tier: Literal["default", "fast"] | None = None

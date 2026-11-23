@@ -17,6 +17,7 @@ import {
   hasEmptyTranscript,
   hasTranscriptBaseline,
   useSessionStore,
+  type BackendKind,
   type Message,
   type SessionInfo,
 } from "../stores/sessionStore";
@@ -36,6 +37,7 @@ import { isImeComposing } from "../lib/composerKeys";
 import { useComposerHistory } from "../hooks/useComposerHistory";
 import { OctopusLogo } from "./OctopusLogo";
 import { ChatSessionHeading } from "./ChatSessionHeading";
+import type { RuntimeModelDefault } from "../hooks/useModelSettings";
 import type { AnswerPayload } from "./QuestionPrompt";
 import { QuestionDraftRecovery } from "./QuestionDraftRecovery";
 import { beginQuestionTransmission, finishQuestionTransmission } from "../lib/questionDrafts";
@@ -43,7 +45,7 @@ import { buildRememberPrompt } from "./SlashCommandMenu";
 import { Button } from "./ui/button";
 import { useSessionFork } from "../hooks/useSessionFork";
 import { selectSession, showSession } from "../lib/selectSession";
-import { observeSession } from "../lib/hydrateSession";
+import { loadSessionSnapshots, observeSession } from "../lib/hydrateSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { classifySubmission, newSubmissionId, readSubmission, type QuestionCommandTarget, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
@@ -134,7 +136,8 @@ interface Props {
     attachmentIds?: string[],
     wikiMode?: WikiMessageMode,
     submissionId?: string,
-    recoveryOfClientId?: string
+    recoveryOfClientId?: string,
+    expectedBackend?: BackendKind,
   ) => void | Promise<SubmissionReply>;
   interrupt: (sessionId: string) => void | Promise<SubmissionReply>;
   cancelCompact?: CancelCompact;
@@ -256,6 +259,16 @@ export function ChatView({
     instance: number; sessionId: string; parentName: string; account: number; seq?: number;
   } | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelDefaults, setModelDefaults] = useState<{ account: number; values: RuntimeModelDefault[] }>();
+  const rememberModelDefault = (observed: RuntimeModelDefault) => {
+    setModelDefaults((current) => {
+      const values = current?.account === accountGeneration ? current.values : [];
+      return { account: accountGeneration, values: [
+        ...values.filter((item) => item.backend !== observed.backend || item.credential !== observed.credential),
+        observed,
+      ] };
+    });
+  };
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composerHistory = useComposerHistory(textDraft, textareaRef);
   const resetHistory = composerHistory.reset;
@@ -363,7 +376,6 @@ export function ChatView({
     ?? s.archivedSessions.find(session => session.id === activeSessionId));
   const staged = preparingSuccessor?.account === accountGeneration ? preparingSuccessor : null;
   const stagedSession = useSessionStore((state) => staged ? state.sessions.find((session) => session.id === staged.sessionId) : undefined);
-  const activeAgent = useSessionStore((s) => s.agents.find(agent => agent.id === activeSession?.agent_id));
   const isArchived = !!activeSession?.archived;
   const transcriptDamaged = activeSession?.transcript_integrity === "duplicate_seq";
   useLayoutEffect(() => {
@@ -513,10 +525,16 @@ export function ChatView({
       }
       const key = restoredQuestion.key;
       const submission = Promise.resolve().then<void | SubmissionReply>(() => sendMessage(activeSessionId, content,
-        readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined, undefined, draftId, original.transmission?.recoveryOfClientId));
+        readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined, undefined, draftId,
+        original.transmission?.recoveryOfClientId, activeSession?.backend));
       setInput(""); setRestoredQuestion(null); setRestoredInput(null); resetHistory();
       clearAttachments(); setRequiredAttachmentCount(0); setSubmissionError("");
-      void Promise.resolve(submission).then((reply) => finishQuestionTransmission(key, draftId, reply, retainSubmittedInput))
+      void Promise.resolve(submission).then((reply) => {
+        if (reply?.code === "engine_changed" && useSessionStore.getState().accountGeneration === accountGeneration) {
+          void loadSessionSnapshots(activeSessionId, { fresh: true }).catch(() => {});
+        }
+        return finishQuestionTransmission(key, draftId, reply, retainSubmittedInput);
+      })
         .catch(() => finishQuestionTransmission(key, draftId, { accepted: false, state: "unknown" }));
       return;
     }
@@ -527,14 +545,10 @@ export function ChatView({
       attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"),
       ...(restoredInput?.sessionId === activeSessionId ? { recoveryOfClientId: restoredInput.clientId } : {}),
     };
-    const submission = draft.recoveryOfClientId ? sendMessage(
-      activeSessionId, content, readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
-      undefined, draft.id, draft.recoveryOfClientId,
-    ) : sendMessage(
-      activeSessionId,
-      content,
+    const submission = sendMessage(
+      activeSessionId, content,
       readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
-      undefined, draft.id
+      undefined, draft.id, draft.recoveryOfClientId, activeSession?.backend,
     );
     setInput("");
     setRestoredInput(null);
@@ -547,6 +561,9 @@ export function ChatView({
         if (submittedDrafts.current.get(draft.id) !== draft) return;
         submittedDrafts.current.delete(draft.id);
         const outcome = classifySubmission(reply, "message");
+        if (reply.code === "engine_changed" && useSessionStore.getState().accountGeneration === accountGeneration) {
+          void loadSessionSnapshots(draft.sessionId, { fresh: true }).catch(() => {});
+        }
         if (outcome !== "settled") setRejectedDrafts((drafts) => [...drafts, {
           ...draft, receipt: reply, reason: reply.message || (outcome === "readonly" ? "This input was withdrawn and cannot be restored."
             : outcome === "recoverable" ? "This input was withdrawn before execution. You can restore it and send it again."
@@ -599,7 +616,8 @@ export function ChatView({
       let reply: SubmissionReply;
       try {
         reply = await readSubmission(url, { method: "POST", headers, signal: observer.signal,
-          body: JSON.stringify({ client_request_id: id, operation: { kind: "compact" } }) }, original);
+          body: JSON.stringify({ client_request_id: id, expected_backend: activeSession?.backend,
+            operation: { kind: "compact" } }) }, original);
       } catch {
         if (observer.signal.aborted || !current()) throw new Error("Compaction admission is unconfirmed. Check the original request before sending again.");
         // A lost receipt never authorizes a second native operation.
@@ -614,6 +632,7 @@ export function ChatView({
         reason: reply.message || "Compaction was withdrawn before execution. No recoverable input was created." }]);
       else {
         settleCompactCommand(draft, false);
+        if (reply.code === "engine_changed") void loadSessionSnapshots(draft.sessionId, { fresh: true }).catch(() => {});
         setSubmissionError(reply.message || "Compaction was not accepted.", command);
       }
     } catch (error) {
@@ -746,7 +765,7 @@ export function ChatView({
         (retain || observedFeedback !== undefined || !hasPostResult && sessionList.archiveActivityCurrent(activeSessionId, observation));
       const failureDetail = (result: SessionArchiveResult) =>
         `${result.failure_stage === "successor_creation" ? "Successor creation" :
-          result.failure_stage === "successor_configuration" ? "Successor configuration" : "Schedule rebinding"} failed: ${result.message}`;
+          "Schedule rebinding"} failed: ${result.message}`;
       const getActivity = () => hasPostResult ? null : sessionList.archiveActivity(activeSessionId, observation);
       const activityMessage = (activity: SessionArchiveResult | null) => activity ? `Session archived. ${failureDetail(activity)}` : null;
       const syncActivity = () => {
@@ -968,67 +987,11 @@ export function ChatView({
       return;
     }
 
-    // /model — which model runs THIS session (per-session override; the
-    // agent's own model is untouched). Bare opens the picker; with a name it
-    // applies straight away, because typing the name is faster than a dialog
-    // once you know what you want. Any name is accepted: the CLIs take names
-    // this build cannot know (see RuntimeProfile.models).
-    const lowerModel = trimmed.toLowerCase();
-    if (lowerModel === "/model" || lowerModel.startsWith("/model ")) {
+    if (/^\/model(?:\s|$)/i.test(trimmed)) {
+      if (!activeSession) return;
       setInput("");
       resetHistory();
-      const wanted = trimmed.slice("/model".length).trim();
-      if (!wanted) {
-        setModelPickerOpen(true);
-        return;
-      }
-      const store = useSessionStore.getState();
-      const tracked = sessionList.observe(activeSessionId, store);
-      const { observation } = tracked;
-      const notice = (content: string, isError = false) => {
-        if (!sessionList.current(observation)) return;
-        store.addMessage(activeSessionId, {
-          role: "system",
-          type: "notice",
-          content,
-          is_error: isError,
-        });
-      };
-      try {
-        const res = await fetch(
-          `${window.location.origin}/api/sessions/${activeSessionId}`,
-          {
-            method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${store.token}`,
-            },
-            // "default" / "agent" clears the override rather than storing a
-            // model literally called "default".
-            body: JSON.stringify({
-              model: ["default", "agent"].includes(wanted.toLowerCase())
-                ? null
-                : wanted,
-            }),
-          }
-        );
-        if (!res.ok) {
-          notice(`Could not change the model (HTTP ${res.status}).`, true);
-          return;
-        }
-        const updated = await res.json();
-        sessionList.patch(updated.id, { model: updated.model }, observation);
-        if (!sessionList.current(observation)) return;
-        notice(
-          updated.model
-            ? `Model for this session: ${updated.model} — from the next turn.`
-            : "Model for this session: the agent's default — from the next turn."
-        );
-      } catch {
-        notice("Could not change the model — the server was unreachable.", true);
-      } finally {
-        tracked.finish();
-      }
+      setModelPickerOpen(true);
       return;
     }
 
@@ -1365,6 +1328,7 @@ export function ChatView({
       <div key={`${accountGeneration}:${key}`} data-chat-session={sessionId} inert={preparation ? true : undefined} aria-hidden={preparation ? true : undefined}
         className={`flex flex-col min-h-0 ${preparation ? "absolute inset-0 invisible opacity-0 pointer-events-none" : "relative flex-1"}`}>
         <ChatSessionHeading session={session} connected={connected} onToggleSidebar={onToggleSidebar}
+          runtimeModelDefaults={modelDefaults?.account === accountGeneration ? modelDefaults.values : undefined}
           onOpenModel={preparation ? undefined : () => setModelPickerOpen(true)} />
         <ChatTranscript key={`transcript:${sessionId}`} sessionId={sessionId} session={session} preparation={preparation}
           minimumViewportHeight={archived ? readingFloor : undefined}
@@ -1494,12 +1458,14 @@ export function ChatView({
           session={activeSession}
           open={modelPickerOpen}
           onOpenChange={setModelPickerOpen}
+          onModelDefault={rememberModelDefault}
           onApplied={(updated) =>
             activeSessionId &&
             useSessionStore.getState().addMessage(activeSessionId, {
               role: "system",
               type: "notice",
-              content: `Model for this session: ${updated.model || "the agent's default"}; reasoning effort: ${updated.reasoning_effort || "the agent's default"}${updated.backend === "codex" ? `; speed: ${(updated.service_tier || activeAgent?.service_tier) === "fast" ? "Fast" : "Normal"}` : ""} — from the next turn.`,
+              content: updated.backend === activeSession.backend ? "Conversation settings apply from the next turn."
+                : "Conversation engine updated.",
             })
           }
         />

@@ -72,7 +72,8 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
                 paused.set()
 
         manager.on_broadcast("pause-contract-input", stop_before_execution)
-        response = await submit_client_message(manager, session.id, "Retained original input", [], "submission", wiki_mode=None)
+        response = await submit_client_message(manager, session.id, "Retained original input", [], "submission",
+                                               wiki_mode=None, expected_backend=session.backend)
         await asyncio.wait_for(paused.wait(), 3)
         await manager.await_session_execution(session.id, timeout=3)
         manager.remove_broadcast("pause-contract-input")
@@ -101,7 +102,7 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         await manager.archive_session(session.id, replace=False)
         await manager.unarchive_session(session.id, user["id"])
         session = manager.sessions[session.id]
-        assert samples["session_unarchived"]["session"] == session_info(session).model_dump()
+        assert samples["session_unarchived"]["session"] == session_info(session, has_inputs=True).model_dump()
         class DiagnosticRun(FakeRunBase):
             async def _start(self, *args, **kwargs):
                 self.alive = True

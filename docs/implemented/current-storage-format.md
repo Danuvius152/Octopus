@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 当前格式准入、持久资源、完整记录与离线交接不变量。
 
-The main database uses format **13**, and Wiki uses format **17**. Each database
+The main database uses format **14**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -471,14 +471,15 @@ keeps business closed. Reentry inspects actual committed facts under the same
 candidate and frozen inputs; it must not overwrite newer files/databases or
 replay model/tool effects. Runtime callbacks cannot be restored from JSON.
 
-For the finite main-format 12 to 13 handoff, preflight uses the pinned source
+The finite main-format 13 to 14 handoff requires preflight to use the pinned source
 release's verifier and checks the live process's database identity. After
 writer retirement, the loaded service mask and offline installation lock
-cover the baseline capture, transaction and handle closure. The transaction
-rebuilds `bg_tasks` with its summary fields and advances `user_version`
-together. A fresh read verifies the candidate layout and compares original
+cover the baseline capture, transaction and handle closure. One transaction
+adds the constrained `sessions.defaults_source` column and advances
+`user_version`. Existing rows receive the `agent` source and retain their
+original inheritance. A fresh read verifies the candidate layout and compares original
 values, row IDs, remaining tables and SQLite sequences with the frozen facts.
-Reentry with committed format 13 repeats that comparison read-only before
+Reentry with committed format 14 repeats that comparison read-only before
 first start, including when the release pointer already changed. A readiness
 receipt bound to the original request, candidate process and database identity
 supplies evidence that subsequent normal writes can exist.

@@ -123,20 +123,10 @@ it.each(["HTTP", "network", "no match"])("shows a current legitimate %s failure"
   expect(useSessionStore.getState().messages[a.id]).toContainEqual(expect.objectContaining({ is_error: true, content: outcome === "HTTP" ? "File unavailable" : outcome === "network" ? "Couldn't resolve file reference — network error." : "No matching report" }));
 });
 
-it.each(["HTTP", "network", "body"])("does not publish a retired model %s error into another account", async phase => {
+it("routes the old /model syntax to settings without sending a write", async () => {
   await mount();
   command("/model next-model");
-  let body!: ReadableStreamDefaultController<Uint8Array>;
-  if (phase === "body") await act(async () => reads[0].resolve(new Response(new ReadableStream<Uint8Array>({ start(controller) { body = controller; } }))));
-  act(() => {
-    useSessionStore.getState().setToken("another-account");
-    useSessionStore.setState({ mainView: "chat", sessions: [a, b], activeSessionId: a.id });
-  });
-  await act(async () => {
-    if (phase === "HTTP") reads[0].resolve(Response.json({ detail: "Old model failure" }, { status: 400 }));
-    else if (phase === "network") reads[0].reject(new TypeError("offline"));
-    else { body.enqueue(new TextEncoder().encode(JSON.stringify({ ...a, model: "old-model" }))); body.close(); }
-  });
-  expect(useSessionStore.getState().messages[a.id] ?? []).toEqual([]);
-  expect(useSessionStore.getState().sessions[0].model).not.toBe("old-model");
+  expect(screen.getByRole("dialog", { name: "Conversation settings" })).toBeVisible();
+  expect(reads).toHaveLength(0);
+  expect(useSessionStore.getState().sessions[0].model).toBe(a.model);
 });

@@ -13,6 +13,7 @@ from ..db.native_details import NativeDetailError
 from ..db.sessions import MessageExportError
 from ..deps import ScopeUser, SessionMgr
 from ..harness import BackendForkNotSupported
+from ..harness.model_settings import SESSION_OVERRIDE_FIELDS
 from ..models import (
     BrowserMessagePage,
     BrowserNativeDetailPage,
@@ -69,7 +70,7 @@ async def list_sessions(
     include_archived: bool = Query(False),
     _: str = Depends(verify_token),
 ):
-    live = [session_info(s) for s in session_manager.list_sessions(user_id)]
+    live = await session_manager.list_live_session_infos(user_id)
     if not include_archived:
         return live
     archived = await session_manager.list_archived_sessions(user_id)
@@ -99,23 +100,20 @@ async def update_session(
     session_id: str, req: SessionUpdate, user_id: ScopeUser = None,
     _: str = Depends(verify_token)
 ):
-    """Update a session's credential, name, model, reasoning effort or speed.
-
-    The credential is the point: it used to be fixed at creation, so a lapsed
-    or deleted sign-in stranded the conversation with no way back. The
-    backend-match rule still applies (a Codex credential can't run a Claude
-    session), and an unknown credential id is refused rather than silently
-    stored, because a dangling id is exactly the state this route exists to
-    get out of."""
+    """Save settings under the engine the client observed."""
+    fields = req.model_dump(exclude_unset=True, mode="json")
+    if not req.expected_backend and ({"backend", *SESSION_OVERRIDE_FIELDS} & fields.keys()):
+        _own_session(session_manager, session_id, user_id)
+        raise HTTPException(428, "Reload the conversation before changing its settings.")
     try:
-        session = await session_manager.update_session_configuration(
-            session_id, req.model_dump(exclude_unset=True), user_id,
+        return await session_manager.update_session_configuration(
+            session_id, fields, user_id,
         )
     except SessionConfigurationError as error:
-        raise HTTPException(error.status_code, str(error)) from error
+        detail = {"code": error.code, "message": str(error)} if error.code else str(error)
+        raise HTTPException(error.status_code, detail) from error
     except CredentialBindingError as error:
         raise HTTPException(404 if str(error) == "Credential not found" else 400, str(error)) from error
-    return session_info(session)
 
 
 @router.post("", response_model=SessionInfo, status_code=status.HTTP_201_CREATED)
@@ -141,6 +139,10 @@ async def create_owned_session(
             req.working_dir,
             credential_id=req.credential_id,
             backend=req.backend.value if req.backend is not None else None,
+            model=req.model,
+            reasoning_effort=req.reasoning_effort,
+            service_tier=req.service_tier,
+            validate_models=bool(req.model_fields_set & {"model", "reasoning_effort", "service_tier"}),
         )
     except AgentConfigurationError:
         raise
@@ -356,7 +358,8 @@ async def get_session_info(
     """Resolve navigation metadata without loading the conversation."""
     live = session_manager.get_session(session_id, user_id)
     if live is not None:
-        return session_info(live)
+        assert session_manager.db is not None
+        return session_info(live, has_inputs=await session_manager.db.session_has_inputs(session_id))
     match = await session_manager.load_archived_session_info(session_id, user_id)
     if match is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
@@ -389,8 +392,10 @@ async def get_session(
             messages = []
         oldest = messages[0].seq if messages else None
         context_state, context_pending = await session_manager.context_snapshot(s)
+        has_inputs = bool(message_count or await session_manager.db.session_has_inputs(s.id))
         detail = SessionDetail(
-            **session_info(s, message_count, transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump(),
+            **session_info(s, message_count, transcript_integrity="duplicate_seq" if duplicates else "ok",
+                           has_inputs=has_inputs).model_dump(),
             context_state=context_state,
             context_generation=session_manager._dispatch_generation,
             context_pending=context_pending,

@@ -20,7 +20,8 @@ test("App Server preserves native history and original submissions across reload
     const frame = JSON.parse(String(payload));
     if (frame.type === "send_message") {
       sent.push({ client_request_id: frame.client_request_id, content: frame.content,
-        attachment_ids: frame.attachment_ids ?? [], wiki_mode: frame.wiki_mode ?? null });
+        attachment_ids: frame.attachment_ids ?? [], wiki_mode: frame.wiki_mode ?? null,
+        expected_backend: frame.expected_backend });
     }
   }));
   await page.goto("/");
@@ -37,7 +38,7 @@ test("App Server preserves native history and original submissions across reload
   expect(session.backend).toBe("codex");
   const sessionId = session.id;
   const settings = await request.patch(`${API}/sessions/${sessionId}`, {
-    headers, data: { reasoning_effort: "low" },
+    headers, data: { reasoning_effort: "low", expected_backend: session.backend },
   });
   expect(settings.ok()).toBeTruthy();
   expect((await settings.json()).reasoning_effort).toBe("low");

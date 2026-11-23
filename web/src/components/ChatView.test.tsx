@@ -22,6 +22,8 @@ beforeEach(() => {
     token: "",
     accountGeneration: useSessionStore.getState().accountGeneration + 1,
     identity: null,
+  });
+  useSessionStore.setState({
     activeSessionId: session.id, sessions: [session], agents: [],
     messages: {}, streamingText: {}, dispatchUnavailable: {}, pendingQuestions: {},
     dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [],
@@ -29,6 +31,55 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+it("shows the configured runtime default after clearing a conversation model", async () => {
+  useSessionStore.getState().setToken("model-account");
+  const selected = { ...session, model: "original-model", credential_id: "codex-login", defaults_source: "backend" } as SessionInfo;
+  useSessionStore.setState({ sessions: [selected], activeSessionId: selected.id, mainView: "chat" });
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => init?.method === "PATCH"
+    ? Response.json({ ...selected, model: null })
+    : Response.json({ models: [{ id: "first-candidate", name: "First candidate" }, { id: "cli-model", name: "CLI model" }],
+      default_model: "cli-model" }));
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    renderChat();
+    const heading = screen.getByRole("button", { name: /Conversation settings: Codex · original-model/ });
+    fireEvent.click(heading);
+    await screen.findByRole("option", { name: "Engine default (CLI model)" });
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "" } });
+    expect(heading).toHaveTextContent("original-model");
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    expect(await screen.findByRole("button", { name: /Conversation settings: Codex · CLI model/ })).toBeVisible();
+    expect(fetchMock.mock.calls.filter(([url]) => url.includes("/models"))).toEqual([
+      ["/api/backends/codex/models?credential_id=codex-login&saved_model=original-model", expect.any(Object)],
+    ]);
+  } finally { vi.unstubAllGlobals(); }
+});
+
+it("keeps each login's confirmed CLI default when returning to an earlier conversation", async () => {
+  useSessionStore.getState().setToken("model-account");
+  const first = { ...session, id: "first", credential_id: "login-a", defaults_source: "backend" } as SessionInfo;
+  const second = { ...first, id: "second", credential_id: "login-b" };
+  useSessionStore.setState({ sessions: [first, second], activeSessionId: first.id, mainView: "chat" });
+  const fetchMock = vi.fn(async (url: string) => {
+    const name = String(url).includes("login-a") ? "Model A" : "Model B";
+    return Response.json({ models: [{ id: "cli-model", name }], default_model: "cli-model" });
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    renderChat();
+    for (const [id, name] of [[first.id, "Model A"], [second.id, "Model B"]]) {
+      act(() => useSessionStore.setState({ activeSessionId: id }));
+      fireEvent.click(screen.getByRole("button", { name: "Conversation settings: Codex · Default" }));
+      await screen.findByRole("option", { name: `Engine default (${name})` });
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      expect(screen.getByRole("button", { name: `Conversation settings: Codex · ${name}` })).toBeVisible();
+    }
+    act(() => useSessionStore.setState({ activeSessionId: first.id }));
+    expect(screen.getByRole("button", { name: "Conversation settings: Codex · Model A" })).toBeVisible();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/models"))).toHaveLength(2);
+  } finally { vi.unstubAllGlobals(); }
+});
 
 it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
   "keeps a reopened model draft through real store return (%s, new save already pending: %s)", async (status, newPending) => {
@@ -42,42 +93,46 @@ it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
       saves.push({ body: JSON.parse(String(init.body)), reply });
       return reply.promise;
     }
-    return Response.json({ models: [], reasoning_efforts: ["low", "high"], service_tiers: ["default", "fast"] });
+    return Response.json({ models: [{ id: "old-model", name: "Old Model" }, { id: "new-model", name: "New Model" }], reasoning_efforts: ["low", "high"], service_tiers: ["default", "fast"] });
   }));
   try {
     renderChat();
-    const open = () => fireEvent.click(screen.getByRole("button", { name: "Model, reasoning and speed settings" }));
+    const open = () => fireEvent.click(screen.getByRole("button", { name: /Conversation settings:/ }));
     const settings = () => within(screen.getByRole("dialog"));
     open();
     const initial = settings();
-    fireEvent.change(initial.getByLabelText("Model name"), { target: { value: "old-model" } });
-    fireEvent.click(initial.getByRole("button", { name: "Save settings" }));
+    await waitFor(() => expect(initial.getByLabelText("Model")).toBeEnabled());
+    fireEvent.change(initial.getByLabelText("Model"), { target: { value: "old-model" } });
+    fireEvent.click(initial.getByRole("button", { name: "Apply" }));
     expect(saves).toHaveLength(1);
-    fireEvent.click(initial.getByRole("button", { name: "Close" }));
+    act(() => {
+      useSessionStore.getState().openManage("connectors");
+      useSessionStore.getState().showChat();
+    });
     open();
     const draft = settings();
-    const model = draft.getByLabelText("Model name");
-    expect(model).toBeEnabled();
+    const model = draft.getByLabelText("Model");
+    await waitFor(() => expect(model).toBeEnabled());
     fireEvent.change(model, { target: { value: "new-model" } });
-    if (newPending) fireEvent.click(draft.getByRole("button", { name: "Save settings" }));
+    if (newPending) fireEvent.click(draft.getByRole("button", { name: "Apply" }));
     await act(async () => saves[0].reply.resolve(status === 200
       ? Response.json({ ...selected, model: "old-model", reasoning_effort: "high" })
       : Response.json({ detail: "Old opening refusal" }, { status })));
     expect(useSessionStore.getState().sessions[0]).toMatchObject(status === 200
       ? { model: "old-model", reasoning_effort: "high" } : { model: "original-model", reasoning_effort: null });
     const current = settings();
-    expect(current.getByLabelText("Model name")).toHaveValue("new-model");
+    expect(current.getByLabelText("Model")).toHaveValue("new-model");
     expect(current.getByLabelText("Reasoning effort")).toHaveValue("");
-    const save = current.getByRole("button", { name: "Save settings" });
+    const save = current.getByRole("button", { name: "Apply" });
     if (newPending) expect(save).toBeDisabled();
     else expect(save).toBeEnabled();
     expect(screen.queryByText("Old opening refusal")).toBeNull();
     expect(useSessionStore.getState().messages[session.id] ?? []).toEqual([]);
     if (!newPending) fireEvent.click(save);
-    expect(saves.map((save) => save.body)).toEqual([{ model: "old-model" }, { model: "new-model" }]);
+    expect(saves.map((save) => save.body)).toEqual([{ model: "old-model", expected_backend: "codex" }, { model: "new-model", expected_backend: "codex" }]);
     await act(async () => saves[1].reply.resolve(Response.json({ ...selected, model: "new-model", reasoning_effort: "high" })));
     expect(screen.queryByRole("dialog")).toBeNull();
-    expect(useSessionStore.getState().messages[session.id]).toEqual([expect.objectContaining({ type: "notice", content: expect.stringContaining("new-model") })]);
+    expect(useSessionStore.getState().messages[session.id]).toEqual([expect.objectContaining({ type: "notice", content: "Conversation settings apply from the next turn." })]);
   } finally { vi.unstubAllGlobals(); }
 }, 10_000);
 
@@ -170,7 +225,7 @@ it("keeps correction separate from paused results and resumes only on the explic
   expect(screen.getByText("Background task")).toBeTruthy();
   fireEvent.change(input, { target: { value: "correct the direction" } });
   fireEvent.click(send);
-  expect(sendMessage).toHaveBeenCalledWith(session.id, "correct the direction", undefined, undefined, expect.any(String));
+  expect(sendMessage).toHaveBeenCalledWith(session.id, "correct the direction", undefined, undefined, expect.any(String), undefined, session.backend);
   expect(useSessionStore.getState().dispatchStates[session.id].paused).toBe(true);
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Resume processing" })));
   expect(useSessionStore.getState().dispatchStates[session.id].paused).toBe(false);
@@ -349,6 +404,7 @@ it("retains an unconfirmed draft after a missing receipt and confirms the origin
 
 it("keeps an unknown execution through a failed status read and restores only a confirmed withdrawn input", async () => {
   useSessionStore.setState({ token: "confirmation-account" });
+  useSessionStore.setState({ sessions: [session] });
   let reads = 0;
   const statusUrl = `${window.location.origin}/api/sessions/${session.id}/submissions/uncertain-client`;
   const request = vi.fn(async (url: string) => {
@@ -388,7 +444,7 @@ it("keeps an unknown execution through a failed status read and restores only a 
     expect(sendMessage).toHaveBeenCalledTimes(1);
     fireEvent.change(input, { target: { value: "Reviewed recovery input" } });
     await act(async () => fireEvent.click(send));
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Reviewed recovery input", undefined, undefined, expect.any(String), "uncertain-client");
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Reviewed recovery input", undefined, undefined, expect.any(String), "uncertain-client", session.backend);
   } finally {
     vi.unstubAllGlobals();
   }
@@ -471,7 +527,7 @@ describe("shared Wiki without a composer switch", () => {
     expect(screen.getByText(phase === "running" ? "Compacting native context…" : "Waiting to compact after current work")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Send to running turn" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Queue message" }));
-    expect(sendMessage).toHaveBeenCalledWith(session.id, "Continue later", undefined, undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "Continue later", undefined, undefined, expect.any(String), undefined, session.backend);
   });
 
   it.each(["unchanged", "edited", "switched", "returned", "account"])("submits exact compact and protects the %s draft", async (change) => {
@@ -487,7 +543,8 @@ describe("shared Wiki without a composer switch", () => {
       await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
       const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
       expect(url).toContain(`/api/sessions/${session.id}/submissions`);
-      expect(JSON.parse(init.body as string)).toEqual({ client_request_id: expect.any(String), operation: { kind: "compact" } });
+      expect(JSON.parse(init.body as string)).toEqual({ client_request_id: expect.any(String),
+        expected_backend: session.backend, operation: { kind: "compact" } });
       expect(input).toHaveValue("  /compact  ");
       if (change === "edited") fireEvent.change(input, { target: { value: "My next question" } });
       if (change === "switched" || change === "returned") {
@@ -653,7 +710,7 @@ describe("shared Wiki without a composer switch", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: "What does /compact do?" } });
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledWith(session.id, "What does /compact do?", undefined, undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "What does /compact do?", undefined, undefined, expect.any(String), undefined, session.backend);
   });
 
   it.each(["请结合共享知识解释这个问题", ...commandCases.map(({ message }) => message)])(
@@ -662,7 +719,7 @@ describe("shared Wiki without a composer switch", () => {
       expect(screen.queryByRole("button", { name: "Use local Wiki for this message" })).not.toBeInTheDocument();
       fireEvent.change(input, { target: { value: message } });
       fireEvent.click(send);
-      expect(sendMessage).toHaveBeenLastCalledWith(session.id, message.trim(), undefined, undefined, expect.any(String));
+      expect(sendMessage).toHaveBeenLastCalledWith(session.id, message.trim(), undefined, undefined, expect.any(String), undefined, session.backend);
       expect(input).toHaveValue("");
     },
   );
@@ -677,7 +734,7 @@ describe("shared Wiki without a composer switch", () => {
       }));
       expect(input).toHaveValue(message);
       fireEvent.click(send);
-      expect(sendMessage).toHaveBeenLastCalledWith("other-session", message, undefined, undefined, expect.any(String));
+      expect(sendMessage).toHaveBeenLastCalledWith("other-session", message, undefined, undefined, expect.any(String), undefined, session.backend);
     },
   );
 
@@ -749,7 +806,7 @@ describe("session-owned attachment drafts", () => {
     if (phase === "uploading") await complete(0, "keep-file");
     fireEvent.change(input, { target: { value: "Read preserved file" } });
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledWith(session.id, "Read preserved file", ["keep-file"], undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenCalledWith(session.id, "Read preserved file", ["keep-file"], undefined, expect.any(String), undefined, session.backend);
   });
 
   it("reuploads a ready A file for B and never sends A's id", async () => {
@@ -765,7 +822,7 @@ describe("session-owned attachment drafts", () => {
     expect(sendMessage).not.toHaveBeenCalled();
     await complete(1, "B-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(other.id, "Use the whole input", ["B-file"], undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(other.id, "Use the whole input", ["B-file"], undefined, expect.any(String), undefined, session.backend);
   });
 
   it("ignores late uploads across A to B to A and removal", async () => {
@@ -780,7 +837,7 @@ describe("session-owned attachment drafts", () => {
     expect(send).toBeDisabled();
     await complete(2, "current-A");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "", ["current-A"], undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "", ["current-A"], undefined, expect.any(String), undefined, session.backend);
     pick();
     await waitFor(() => expect(uploads).toHaveLength(4));
     fireEvent.click(screen.getByRole("button", { name: "Remove evidence.txt" }));
@@ -792,7 +849,7 @@ describe("session-owned attachment drafts", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     await complete(4, "replacement-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "", ["replacement-file"], undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "", ["replacement-file"], undefined, expect.any(String), undefined, session.backend);
   });
 
   it("blocks partial sending after upload failure and retries the same file", async () => {
@@ -808,7 +865,7 @@ describe("session-owned attachment drafts", () => {
     expect(uploads[1].file.name).toBe(uploads[0].file.name);
     await complete(1, "retried");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Required file", ["retried"], undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Required file", ["retried"], undefined, expect.any(String), undefined, session.backend);
   });
 
   it("restores a refused draft by reuploading even in its original session", async () => {
@@ -822,6 +879,38 @@ describe("session-owned attachment drafts", () => {
     expect(input).toHaveValue("Retain all input");
     expect(send).toBeDisabled();
     await complete(1, "fresh-file");
+    expect(send).not.toBeDisabled();
+  });
+
+  it("refreshes the engine and preserves text and files rejected by the old engine", async () => {
+    useSessionStore.setState({ token: "other-tab-test" });
+    useSessionStore.setState({ sessions: [session], dispatchGeneration: "other-tab-service" });
+    const upload = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("?view=browser")) {
+        return Response.json({ ...session, backend: "claude-code", messages: [], dispatch_state: {
+          generation: "other-tab-service", revision: 1, paused: false, active_request_id: null, active_operation: null, items: [],
+        } });
+      }
+      if (String(url).endsWith("/attachments")) return upload(url, init);
+      return Response.json({ items: [], next_cursor: null });
+    }));
+    const { input, send, sendMessage } = setup(async () => ({
+      accepted: false, code: "engine_changed", message: "The conversation engine changed.",
+    }));
+    fireEvent.change(input, { target: { value: "Retain this draft" } });
+    pick();
+    await complete(0, "initial-file");
+    await act(async () => fireEvent.click(send));
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Retain this draft", ["initial-file"],
+      undefined, expect.any(String), undefined, "codex");
+    await waitFor(() => expect(useSessionStore.getState().sessions[0]?.backend).toBe("claude-code"));
+    fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
+    expect(input).toHaveValue("Retain this draft");
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    expect(uploads[1].file).toMatchObject({ name: "evidence.txt", size: 17, type: "text/plain" });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    await complete(1, "restored-file");
     expect(send).not.toBeDisabled();
   });
 
@@ -840,6 +929,7 @@ describe("session-owned attachment drafts", () => {
   }));
   const serveFullFailure = (code: string) => {
     useSessionStore.setState({ token: "restore-original-token" });
+    useSessionStore.setState({ sessions: [session, other] });
     const upload = globalThis.fetch;
     vi.stubGlobal("fetch", vi.fn((url: RequestInfo | URL, init?: RequestInit) => {
       const path = new URL(String(url), window.location.origin).pathname;
@@ -856,7 +946,8 @@ describe("session-owned attachment drafts", () => {
     const preview = representation === "live preview";
     if (preview) serveFullFailure(code);
     const { input, send, sendMessage } = setup(async () => ({ accepted: true, requestId: "accepted-files" }));
-    fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
+    const browse = screen.queryByRole("button", { name: "Browse loaded content" });
+    if (browse) fireEvent.click(browse);
     fireEvent.change(input, { target: { value: "Queued complete input" } });
     pick();
     await complete(0, "lost-file");
@@ -869,7 +960,7 @@ describe("session-owned attachment drafts", () => {
     expect(send).toBeDisabled();
     await complete(1, "replacement-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Queued complete input", ["replacement-file"], undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Queued complete input", ["replacement-file"], undefined, expect.any(String), undefined, session.backend);
   });
 
   it.each(
@@ -878,23 +969,25 @@ describe("session-owned attachment drafts", () => {
     if (representation === "expanded") serveFullFailure(code);
     const { input, send, sendMessage } = setup();
     recordQueuedFailure(representation === "expanded", code);
-    fireEvent.click(screen.getByRole("button", { name: "Browse loaded content" }));
+    const browse = screen.queryByRole("button", { name: "Browse loaded content" });
+    if (browse) fireEvent.click(browse);
     if (representation === "expanded") fireEvent.click(await screen.findByRole("button", { name: "View full message" }));
     fireEvent.click(await screen.findByRole("button", { name: "Restore draft and re-upload files" }));
     expect(input).toHaveValue("Queued complete input");
     expect(send).toBeDisabled();
-    expect(screen.getByRole("alert")).toHaveTextContent("Re-attach 1 file");
+    expect(within(input.closest(".chat-input-bar")!).getByRole("alert")).toHaveTextContent("Re-attach 1 file");
     fireEvent.click(send);
     expect(sendMessage).not.toHaveBeenCalled();
     pick();
     await complete(0, "reselected-file");
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Queued complete input", ["reselected-file"], undefined, expect.any(String));
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Queued complete input", ["reselected-file"], undefined, expect.any(String), undefined, session.backend);
   });
 });
 
 it("restores a server-saved input without sending, then explicitly sends a new recovery request", async () => {
   useSessionStore.setState({ token: "recoverable-input-test" });
+  useSessionStore.setState({ sessions: [session] });
   const execution = { state: "withdrawn", state_version: 2, execution_owner_request_id: "old-request", recoverable_input: true };
   vi.stubGlobal("fetch", vi.fn(async (url: string) => {
     if (url.endsWith("/submissions")) return Response.json({ items: [{ client_request_id: "old-client", request_id: "old-request", execution,
@@ -909,7 +1002,7 @@ it("restores a server-saved input without sending, then explicitly sends a new r
   expect(sendMessage).not.toHaveBeenCalled();
   fireEvent.change(input, { target: { value: "Reviewed and edited input" } });
   fireEvent.click(send);
-  expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Reviewed and edited input", undefined, undefined, expect.any(String), "old-client");
+  expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Reviewed and edited input", undefined, undefined, expect.any(String), "old-client", session.backend);
   vi.unstubAllGlobals();
 });
 

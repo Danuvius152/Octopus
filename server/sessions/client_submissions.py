@@ -280,12 +280,16 @@ async def submit_client_operation(manager: SessionManager, session_id: str,
     from ..wiki.tasks import explicit_mode
 
     operation = request.session_operation()
+    # An old browser can still ask for its original receipt. An empty
+    # precondition rejects only a new admission inside the Owner.
+    expected_backend = request.expected_backend.value if request.expected_backend else ""
     if operation.kind == "compact":
-        return await submit_client_compact(manager, session_id, request.client_request_id)
+        return await submit_client_compact(manager, session_id, request.client_request_id, expected_backend=expected_backend)
     return await submit_client_message(
         manager, session_id, operation.content, operation.attachment_ids, request.client_request_id,
         wiki_mode=explicit_mode(operation.content, operation.wiki_mode),
         recovery_of_client_id=request.recovery_of_client_id,
+        expected_backend=expected_backend,
     )
 
 
@@ -335,17 +339,19 @@ async def _submit_client_input(manager: SessionManager, session_id: str, client_
                 "message": "Input saving is unconfirmed. Keep your draft and confirm this submission before sending new work."}
 
 
-async def submit_client_compact(manager: SessionManager, session_id: str, client_id: str) -> dict[str, Any]:
+async def submit_client_compact(
+    manager: SessionManager, session_id: str, client_id: str, *, expected_backend: str | None = None,
+) -> dict[str, Any]:
     return await _submit_client_input(
         manager, session_id, client_id, input_digest({"kind": "compact"}),
-        partial(manager.start_compact, session_id, client_request_id=client_id),
+        partial(manager.start_compact, session_id, client_request_id=client_id, expected_backend=expected_backend),
         closed_message="This conversation is closed to new operations.",
     )
 
 
 async def submit_client_message(manager: SessionManager, session_id: str, content: str, attachment_ids: list[str],
                                 client_id: str, *, wiki_mode: str | None,
-                                recovery_of_client_id: str | None = None) -> dict[str, Any]:
+                                expected_backend: str | None = None, recovery_of_client_id: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"content": content, "attachment_ids": attachment_ids, "wiki_mode": wiki_mode}
     if recovery_of_client_id:
         payload["recovery_of_client_id"] = recovery_of_client_id
@@ -353,7 +359,7 @@ async def submit_client_message(manager: SessionManager, session_id: str, conten
         manager, session_id, client_id, input_digest(payload),
         partial(manager.start_message, session_id, content, attachment_ids=attachment_ids, steerable=True,
             client_request_id=client_id, recovery_of_client_id=recovery_of_client_id,
-            wiki_mode=wiki_mode),
+            wiki_mode=wiki_mode, expected_backend=expected_backend),
         closed_message="This conversation is closed to new messages. Your message was not accepted.",
     )
 

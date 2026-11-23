@@ -409,6 +409,7 @@ class TurnsMixin(SessionManagerBase):
         knowledge_context: KnowledgeContext | None = None,
         client_request_id: str | None = None, recovery_of_client_id: str | None = None,
         schedule: OneShotFire | None = None, return_parent: AdmittedRequest | None = None,
+        expected_backend: str | None = None,
     ) -> SubmissionReceipt:
         database = self.input_database()
         session = self.sessions.get(session_id)
@@ -446,14 +447,16 @@ class TurnsMixin(SessionManagerBase):
         )
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
         return await owner.call_runtime(Submit(queued, steerable, client_request_id, tuple(files), recovery_of_client_id,
-                                              schedule, return_parent=return_parent))
+                                              schedule, return_parent=return_parent, expected_backend=expected_backend))
 
-    async def start_compact(self, session_id: str, *, client_request_id: str) -> SubmissionReceipt:
+    async def start_compact(
+        self, session_id: str, *, client_request_id: str, expected_backend: str | None = None,
+    ) -> SubmissionReceipt:
         session = self.sessions.get(session_id)
         if session is None:
             raise SessionAdmissionClosed(f"Session {session_id} not found")
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
-        return await owner.call_runtime(Submit(CompactRequest(), client_id=client_request_id))
+        return await owner.call_runtime(Submit(CompactRequest(), client_id=client_request_id, expected_backend=expected_backend))
 
     async def source_receipt(self, source: str, delivery_id: str, *, session_id: str | None = None) -> tuple[str, SubmissionReceipt] | None:
         """Confirm the original acceptance even after its target or caller retires."""

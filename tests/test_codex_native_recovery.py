@@ -452,7 +452,6 @@ for line in sys.stdin:
  else: print(json.dumps({'id':frame['id'],'result':{}}),flush=True)
 '''
     def argv(context):
-        starts.append(context)
         return [sys.executable, "-u", "-c", peer, json.dumps(error)], {
             "cwd": context.working_dir, "env": {**os.environ, "CODEX_HOME": str(tmp_path / "codex-home")}}
     monkeypatch.setattr(codex_app_server, "build_argv", argv)

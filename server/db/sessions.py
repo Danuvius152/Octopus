@@ -70,7 +70,7 @@ _MESSAGE_COLUMNS = (
 _SESSION_COLUMNS = (
     "id name working_dir created_at claude_session_id credential_id archived agent_id origin backend "
     "parent_session_id delegation_request forked_from_session_id fork_after_seq fork_needs_replay fork_metadata "
-    "fork_revert_record fork_status app_id model user_id reasoning_effort service_tier context_state"
+    "fork_revert_record fork_status app_id model user_id reasoning_effort service_tier context_state defaults_source"
 ).split()
 
 _SESSION_PROJECTION = ",".join(f"s.{column}" for column in _SESSION_COLUMNS) + (
@@ -193,10 +193,11 @@ async def delegation_consumption(
 async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
     """Insert a prepared session within its owning admission transaction."""
     columns = ("id", "name", "working_dir", "created_at", "claude_session_id", "credential_id",
-               "agent_id", "origin", "backend", "parent_session_id", "delegation_request", "app_id", "user_id")
+               "agent_id", "origin", "backend", "parent_session_id", "delegation_request", "app_id", "user_id",
+               "defaults_source", "model", "reasoning_effort", "service_tier")
     await tx.execute(
         f"INSERT INTO sessions ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
-        tuple(record.get(column) for column in columns),
+        tuple(record.get(column, "agent") if column == "defaults_source" else record.get(column) for column in columns),
     )
 
 
@@ -246,12 +247,26 @@ class SessionsMixin(DatabaseBase):
 
     async def session_has_inputs(self, session_id: str) -> bool:
         """An empty builder has neither retained messages nor admitted inputs."""
+        return bool(await self.sessions_with_inputs(session_id=session_id))
+
+    async def sessions_with_inputs(
+        self, user_id: str | None = None, *, session_id: str | None = None,
+    ) -> set[str]:
+        """Read admission and message presence together for a list or one conversation."""
+        clauses = ["(EXISTS(SELECT 1 FROM messages WHERE session_id=s.id) "
+                   "OR EXISTS(SELECT 1 FROM client_submissions WHERE session_id=s.id))"]
+        params = []
+        if session_id is not None:
+            clauses.append("s.id = ?")
+            params.append(session_id)
+        else:
+            clauses.append("s.archived = 0")
+        if user_id is not None:
+            clauses.append("s.user_id = ?")
+            params.append(user_id)
         async with self.transaction(write=False) as tx:
-            row = await tx.fetch_one(
-                "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?) "
-                "OR EXISTS(SELECT 1 FROM client_submissions WHERE session_id=?)", (session_id, session_id),
-            )
-            return bool(row and row[0])
+            rows = await tx.fetch_all("SELECT s.id FROM sessions s WHERE " + " AND ".join(clauses), params)
+            return {row[0] for row in rows}
 
     async def read_native_details(
         self, session_id: str, user_id: str | None, anchor_seq: int,
@@ -404,6 +419,11 @@ class SessionsMixin(DatabaseBase):
         delegation_request: str | None = None,
         user_id: str | None = None,
         app_id: str | None = None,
+        *,
+        defaults_source: str = "agent",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        service_tier: str | None = None,
     ) -> None:
         async with self.transaction(write=True) as tx:
             if app_id is not None:
@@ -415,6 +435,8 @@ class SessionsMixin(DatabaseBase):
                 claude_session_id=claude_session_id, credential_id=credential_id, agent_id=agent_id,
                 origin=origin, backend=backend, parent_session_id=parent_session_id,
                 delegation_request=delegation_request, app_id=app_id, user_id=user_id,
+                defaults_source=defaults_source, model=model,
+                reasoning_effort=reasoning_effort, service_tier=service_tier,
             ))
 
     def add_session_delete_hook(self, hook: Callable[[str], None]) -> None:
@@ -468,6 +490,7 @@ class SessionsMixin(DatabaseBase):
         model: str | None = None,
         reasoning_effort: str | None = None,
         service_tier: str | None = None,
+        defaults_source: str = "agent",
         user_id: str | None = None,
         agent_id: str | None,
         credential_id: str | None,
@@ -506,14 +529,14 @@ class SessionsMixin(DatabaseBase):
                 "(id, name, working_dir, created_at, claude_session_id, "
                 " credential_id, agent_id, origin, backend, model, user_id, "
                 " forked_from_session_id, fork_after_seq, fork_needs_replay, "
-                " fork_status, fork_metadata, reasoning_effort, service_tier, app_id) "
+                " fork_status, fork_metadata, reasoning_effort, service_tier, app_id, defaults_source) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'fork', ?, ?, ?, ?, ?, 0, "
-                " 'initializing', ?, ?, ?, ?)",
+                " 'initializing', ?, ?, ?, ?, ?)",
                 (
                     fork_id, name, working_dir, created_at, resume_id,
                     credential_id, agent_id, backend, model, user_id, parent_id,
                     fork_after_seq, fork_metadata, reasoning_effort,
-                    service_tier, app_id,
+                    service_tier, app_id, defaults_source,
                 ),
             )
             await tx.execute_many(
@@ -567,12 +590,24 @@ class SessionsMixin(DatabaseBase):
         async with self.transaction(write=False) as tx:
             rows = await tx.fetch_all(
                 f"SELECT {_SESSION_PROJECTION}, COUNT(m.id), COALESCE(MAX(m.seq) + 1, 0), "
-                "COUNT(m.id) - COUNT(DISTINCT m.seq) FROM sessions s "
+                "COUNT(m.id) - COUNT(DISTINCT m.seq), "
+                "EXISTS(SELECT 1 FROM client_submissions WHERE session_id=s.id) FROM sessions s "
                 "LEFT JOIN messages m ON m.session_id = s.id WHERE " + " AND ".join(clauses) +
                 " GROUP BY s.rowid ORDER BY s.rowid", params,
             )
-        return [{**_decode_session(row[:-3]), "message_count": row[-3],
-                 "next_message_seq": row[-2], "duplicate_seqs": row[-1]} for row in rows]
+        return [{**_decode_session(row[:-4]), "message_count": row[-4],
+                 "next_message_seq": row[-3], "duplicate_seqs": row[-2], "has_inputs": bool(row[-1])} for row in rows]
+
+    async def get_archived_credential_id(self, session_id: str, user_id: str | None) -> str | None:
+        """Read the exact owned archive's binding after any preceding deletion."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                "SELECT credential_id FROM sessions WHERE id = ? AND user_id IS ? AND archived = 1",
+                (session_id, user_id),
+            )
+            if row is None:
+                raise ValueError("Archived conversation is no longer available")
+            return row[0]
 
     async def get_archived_working_dir(self, session_id: str, user_id: str | None) -> str | None:
         """File reads need only the exact owned archive's directory binding."""
@@ -1054,7 +1089,7 @@ class SessionsMixin(DatabaseBase):
             cursor = await tx.execute(
                 "SELECT id, forked_from_session_id, working_dir, backend, "
                 "claude_session_id, fork_status, fork_revert_record, credential_id, "
-                "agent_id, fork_metadata, user_id, fork_after_seq "
+                "agent_id, fork_metadata, user_id, fork_after_seq, defaults_source "
                 "FROM sessions WHERE origin = 'fork' AND fork_status IN "
                 "('initializing', 'reverting')"
             )
@@ -1073,6 +1108,7 @@ class SessionsMixin(DatabaseBase):
                     "fork_metadata": r[9],
                     "user_id": r[10],
                     "fork_after_seq": r[11],
+                    "defaults_source": r[12],
                 }
                 for r in rows
             ]
@@ -1088,6 +1124,7 @@ class SessionsMixin(DatabaseBase):
                 "agent_id",
                 "origin",
                 "backend",
+                "defaults_source",
                 "model",
                 "reasoning_effort",
                 "service_tier",

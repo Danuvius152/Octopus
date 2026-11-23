@@ -47,6 +47,10 @@ def _validate_runtime_configuration(backend: str, fields: dict[str, Any]) -> Non
 class AgentError(Exception):
     """Agent business-rule violation. Routes map this to a 400/409."""
 
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
 
 def _memory_mutation(operation):
     """Own create, restore and deletion through their database and file effects."""
@@ -82,7 +86,7 @@ class AgentManager:
         try:
             model_settings.validate_controls(catalog, fields.get("model"), fields.get("reasoning_effort"), fields.get("service_tier"))
         except model_settings.ModelControlError as error:
-            raise AgentError(error.describe(backend, inherited=True)) from error
+            raise AgentError(error.describe(backend, inherited=True), field=error.field) from error
 
 
     async def list_agents(

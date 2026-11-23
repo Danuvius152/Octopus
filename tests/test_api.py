@@ -97,7 +97,7 @@ async def test_http_submission_is_explicitly_refused_while_recovery_is_incomplet
     try:
         await asyncio.wait_for(entered.wait(), 2)
         reply = await client.post(f"/api/sessions/{session.id}/submissions", json={
-            "client_request_id": "not-yet", "content": "Keep this draft",
+            "expected_backend": session.backend, "client_request_id": "not-yet", "content": "Keep this draft",
         })
         assert reply.status_code == 200
         assert reply.json()["accepted"] is False and reply.json()["code"] == "service_not_ready"

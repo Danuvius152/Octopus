@@ -225,7 +225,7 @@ it.each(["getItem", "setItem"] as const)("reports storage %s denial while preser
   edit("Still sendable");
   if (method === "setItem") expect(screen.getByText(/Text draft could not be saved/)).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-  expect(view.sendMessage).toHaveBeenCalledExactlyOnceWith(a.id, "Still sendable", undefined, undefined, expect.any(String));
+  expect(view.sendMessage).toHaveBeenCalledExactlyOnceWith(a.id, "Still sendable", undefined, undefined, expect.any(String), undefined, a.backend);
   expect(box()).toHaveValue("");
 });
 

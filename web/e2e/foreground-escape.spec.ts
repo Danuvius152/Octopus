@@ -45,11 +45,13 @@ test("Escape closes foreground controls without stopping the chat until an uncon
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(commands).toEqual([]);
 
-  // A Radix menu and the inline slash menu also consume their closing Escape.
-  await page.getByRole("button", { name: "Change this session's credential" }).click();
-  await expect(page.getByRole("menu")).toBeVisible();
+  // The settings dialog and the inline slash menu consume their closing Escape.
+  const settings = page.getByRole("button", { name: /Conversation settings:/ });
+  await settings.click();
+  await expect(page.getByRole("dialog", { name: "Conversation settings" })).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(settings).toBeFocused();
   expect(commands).toEqual([]);
   await input.fill("/mo");
   await expect(page.locator(".slash-menu")).toBeVisible();

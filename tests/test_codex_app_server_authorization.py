@@ -37,7 +37,6 @@ async def test_native_tool_scope_closes_before_settlement_and_resource_retiremen
     )
 
     def argv(context):
-        starts.append(context)
         return [sys.executable, "-u", str(wrapper), str(tmp_path), mode[0]], {"cwd": context.working_dir}
 
     monkeypatch.setattr(codex_app_server, "build_argv", argv)

@@ -246,10 +246,11 @@ an execution target belonging to that agent. MCP schedules take their owner
 from the authenticated current session. CLI handoff/import keeps its account
 scoped selection of the protected agent.
 
-The chat header and `/model` offer independent session overrides for model and
-reasoning effort. Both inherit agent defaults when cleared, apply on the next
-logical turn, and retain the conversation's resume id. Model metadata comes
-from the selected runtime, with credential ownership checked before reading.
+The chat header and `/model` open conversation settings. Clearing overrides
+uses the conversation's saved defaults source for its next logical turn.
+Only an empty conversation with no native binding can switch engines in place.
+Model metadata comes from the selected runtime after credential ownership is
+checked.
 See [model and reasoning settings](implemented/model-reasoning.md).
 
 - A **Session** is one conversation thread (an instance of talking to an agent).

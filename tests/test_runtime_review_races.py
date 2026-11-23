@@ -594,7 +594,7 @@ async def test_outbound_retirement_during_incoming_request_is_normal_disconnect(
     try:
         await incoming.put({"type": "websocket.receive", "text": json.dumps({
             "type": "send_message", "session_id": session.id, "content": "A request crossing bearer revocation",
-            "client_request_id": "revoke-during-request",
+            "expected_backend": session.backend, "client_request_id": "revoke-during-request",
         })})
         frame = await asyncio.wait_for(outgoing.get(), 5)
         assert frame["type"] == "websocket.close" and frame["code"] == 4001

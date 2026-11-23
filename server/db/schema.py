@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 13
+CURRENT_VERSION = 14
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -390,8 +390,7 @@ CREATE TABLE sessions (
     agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,  -- owner; nullable in SQLite, required by API
     origin TEXT NOT NULL DEFAULT 'user',   -- 'user' | 'schedule' | 'wiki' | 'delegation' | 'fork' | 'application' | 'app'
     backend TEXT NOT NULL DEFAULT 'claude-code',  -- 'claude-code' | 'codex' (codex-backend.md §4.1)
-    model TEXT,                            -- per-session override (`/model`); NULL = use
-                                           -- the agent's, whose NULL means backend default
+    model TEXT,                            -- per-session override; NULL uses defaults_source
     -- Agent-to-agent: a delegation child session points at the parent
     -- session it was spawned from. SET NULL on parent delete (orphan beats
     -- mass-delete; sessions are precious). NULL on every non-delegation
@@ -430,7 +429,8 @@ CREATE TABLE sessions (
     fork_status TEXT                       -- 'initializing'|'reverting'|'ready'
                                            -- crash-recovery marker; NULL on
                                            -- non-fork rows
-, credential_id TEXT, reasoning_effort TEXT, service_tier TEXT, context_state TEXT);
+, credential_id TEXT, reasoning_effort TEXT, service_tier TEXT, context_state TEXT,
+  defaults_source TEXT NOT NULL DEFAULT 'agent' CHECK (defaults_source IN ('agent', 'backend')));
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,

@@ -95,7 +95,8 @@ def context_target(session: Any, agent: dict[str, Any] | None) -> ContextTarget:
 
     effective = effective_settings(session, agent)
     key = json.dumps([session.backend, effective["model"] or None, effective["credential_id"] or None], separators=(",", ":"))
-    inherits = agent is not None and (not session.model or not session.credential_id)
+    inherits = (getattr(session, "defaults_source", "agent") == "agent"
+                and agent is not None and (not session.model or not session.credential_id))
     return ContextTarget(native_session_id=session.claude_session_id,
         effective_config_key=hashlib.sha256(key.encode()).hexdigest(),
         agent_settings_revision=agent["context_settings_revision"] if inherits and agent is not None else None)

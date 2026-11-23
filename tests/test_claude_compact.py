@@ -21,7 +21,8 @@ from tests.session_runtime import wait_dispatch_idle
 
 
 def compact_request(client_id="compact-original"):
-    return ClientSubmissionRequest.model_validate({"client_request_id": client_id, "operation": {"kind": "compact"}})
+    return ClientSubmissionRequest.model_validate({"client_request_id": client_id, "expected_backend": "claude-code",
+                                                    "operation": {"kind": "compact"}})
 
 
 @pytest.mark.parametrize("held", [False, True])

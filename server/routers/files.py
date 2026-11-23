@@ -35,8 +35,10 @@ from ..file_viewer import (
     resolve_safe_path,
 )
 from ..harness import HarnessOneshotError, get_harness
+from ..harness.model_settings import effective_settings
 from ..models import ShowMeResolveRequest, ShowMeResolveResponse
 from ..sessions import SessionManager
+from ..sessions.configuration import SessionConfigurationError
 from ..showme_ai import resolve_local_path, resolve_showme_reference
 
 logger = logging.getLogger(__name__)
@@ -122,15 +124,15 @@ async def resolve_showme(
     if direct is not None:
         return ShowMeResolveResponse(path=direct)
 
-    agent = await session_manager.db.get_agent(session.agent_id, user_id)
+    try:
+        session, agent = await session_manager.capture_request_configuration(session)
+    except SessionConfigurationError as error:
+        raise HTTPException(error.status_code, str(error)) from error
     if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     harness = get_harness(session.backend)
-    # Resolve through the same path the turn engine uses so the harness gets a
-    # proper HarnessCredential (decrypted, OAuth-refreshed for Claude, or
-    # `home_dir` for Codex), not a raw DB row. Effective id: session override
-    # wins over the agent's default (agent-refactor.md §5.2 / decision #2).
-    cred_id = session.credential_id or agent.get("credential_id")
+    effective = effective_settings(session, agent)
+    cred_id = effective["credential_id"]
     backend, db = session.backend, session_manager.db
 
     async def run_resolver(ctx):
@@ -147,9 +149,9 @@ async def resolve_showme(
         result = await resolve_showme_reference(
             req.text,
             harness=harness,
-            model=session.model or agent.get("model"),
-            reasoning_effort=session.reasoning_effort or agent.get("reasoning_effort"),
-            service_tier=session.service_tier or agent.get("service_tier"),
+            model=effective["model"],
+            reasoning_effort=effective["reasoning_effort"],
+            service_tier=effective["service_tier"],
             credential=None,
             runner=run_resolver,
             working_dir=session.working_dir,

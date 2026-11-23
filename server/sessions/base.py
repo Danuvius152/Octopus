@@ -27,6 +27,7 @@ from ..harness import (
 )
 from ..models import (
     MessageContent,
+    SessionDefaultsSource,
     SessionStatus,
 )
 from ..session_operations import OperationKind
@@ -147,6 +148,7 @@ def _session_from_row(row: dict[str, Any]) -> Session:
         agent_id=row.get("agent_id"),
         origin=row.get("origin") or "user",
         backend=row.get("backend") or "claude-code",
+        defaults_source=row.get("defaults_source", "agent"),
         model=row.get("model") or None,
         reasoning_effort=row.get("reasoning_effort") or None,
         service_tier=row.get("service_tier") or None,
@@ -388,8 +390,8 @@ class Session:
     origin: str = "user"
     # Which AI backend drives this session ('claude-code' | 'codex').
     backend: str = "claude-code"
-    # Per-session model (`/model`). None = inherit the agent's, whose None
-    # means the backend's own default. Same shape as `backend` above.
+    defaults_source: SessionDefaultsSource = "agent"
+    # Each missing override follows the saved default source.
     model: str | None = None
     reasoning_effort: str | None = None
     service_tier: str | None = None

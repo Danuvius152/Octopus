@@ -37,6 +37,12 @@ requires an existing agent and validates credential ownership and backend
 compatibility. The session's account is derived from that agent; the caller
 does not supply an unrelated owner.
 
+Double-clicking an Agent opens its existing form. The form groups engine and
+sign-in under Conversation defaults, with Model defaults available on expansion.
+Connectors, Allowed tools, Denied tools and Sub-agents retain their Agent-level
+editing and validation. Session overrides and alternate engines follow the
+[model and conversation settings contract](model-reasoning.md).
+
 Archiving preserves configuration, files and history while removing the agent
 from ordinary use. SessionManager coordinates owned sessions and scheduler
 operations with agent lifecycle changes. Restoring checks for a live-name

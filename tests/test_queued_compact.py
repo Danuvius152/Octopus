@@ -118,7 +118,7 @@ async def test_busy_compact_precedes_ordinary_queue_without_reordering_it(queued
     record = await runtime.input(2)
     before = await manager.start_message(session.id, "B: ordinary return", source="bg", wiki_mode=None)
     compact = await submit_input(manager, session.id, ClientSubmissionRequest.model_validate({
-        "client_request_id": "queued-compact", "operation": {"kind": "compact"},
+        "client_request_id": "queued-compact", "expected_backend": session.backend, "operation": {"kind": "compact"},
     }), user_id=session.user_id)
     assert compact["accepted"]
     after = await manager.start_message(session.id, "D: later human", steerable=True, wiki_mode=None)
@@ -159,7 +159,7 @@ async def test_busy_compact_sample_result_and_original_history_survive_restart(q
             await asyncio.sleep(0)
     original = (await get_session(manager, session.id, user_id=session.user_id)).context_state
     request = ClientSubmissionRequest.model_validate({
-        "client_request_id": "complete-chain", "operation": {"kind": "compact"}})
+        "client_request_id": "complete-chain", "expected_backend": session.backend, "operation": {"kind": "compact"}})
     accepted = await submit_input(manager, session.id, request, user_id=session.user_id)
     assert accepted["accepted"] and active.completion is None
     runtime.ready()

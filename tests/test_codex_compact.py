@@ -26,7 +26,7 @@ async def test_idle_compact_resumes_original_history_once_and_continues(native_r
     await wait_dispatch_idle(manager, session.id)
     mode[0] = "compact_lost_ack" if ack_order == "lost" else "compact_ack_" + ack_order
     request = ClientSubmissionRequest.model_validate({
-        "client_request_id": "compact-original", "operation": {"kind": "compact"},
+        "expected_backend": session.backend, "client_request_id": "compact-original", "operation": {"kind": "compact"},
     })
     accepted = await submit_input(manager, session.id, request, user_id=session.user_id)
     assert accepted["accepted"] and accepted["operation"] == "compact"
@@ -61,7 +61,7 @@ async def test_ack_is_not_completion_and_second_identity_is_not_accepted(native_
     await submit_client_message(manager, session.id, "Create native history", [], "before", wiki_mode=None)
     await wait_dispatch_idle(manager, session.id)
     mode[0] = "compact_ack_only"
-    request = ClientSubmissionRequest.model_validate({"client_request_id": "original", "operation": {"kind": "compact"}})
+    request = ClientSubmissionRequest.model_validate({"expected_backend": session.backend, "client_request_id": "original", "operation": {"kind": "compact"}})
     accepted = await submit_input(manager, session.id, request, user_id=session.user_id)
     await until(lambda: (tmp_path / "native-compacts.jsonl").exists())
     async with asyncio.timeout(3):
@@ -75,7 +75,7 @@ async def test_ack_is_not_completion_and_second_identity_is_not_accepted(native_
     duplicate = await submit_input(manager, session.id, request, user_id=session.user_id)
     assert duplicate["request_id"] == accepted["request_id"] and duplicate["accepted"]
     refused = await submit_input(manager, session.id, ClientSubmissionRequest.model_validate({
-        "client_request_id": "second", "operation": {"kind": "compact"},
+        "expected_backend": session.backend, "client_request_id": "second", "operation": {"kind": "compact"},
     }), user_id=session.user_id)
     assert refused["accepted"] is False and refused["code"] == "compact_in_progress"
     assert refused["canonical_request_id"] == accepted["request_id"]
@@ -95,7 +95,7 @@ async def test_archive_after_compact_ack_preserves_original_unknown_effect(nativ
     await wait_dispatch_idle(manager, session.id)
     mode[0] = "compact_ack_only"
     accepted = await submit_input(manager, session.id, ClientSubmissionRequest.model_validate({
-        "client_request_id": "archive-compact", "operation": {"kind": "compact"},
+        "expected_backend": session.backend, "client_request_id": "archive-compact", "operation": {"kind": "compact"},
     }), user_id=session.user_id)
     async with asyncio.timeout(3):
         while True:
@@ -122,7 +122,7 @@ async def test_native_compact_failure_never_replays_or_claims_noop(native_runtim
     await wait_dispatch_idle(manager, session.id)
     mode[0] = "compact_" + failure
     await submit_input(manager, session.id, ClientSubmissionRequest.model_validate({
-        "client_request_id": "original", "operation": {"kind": "compact"},
+        "expected_backend": session.backend, "client_request_id": "original", "operation": {"kind": "compact"},
     }), user_id=session.user_id)
     await wait_dispatch_idle(manager, session.id)
     status = await get_submission_status(manager, session.id, "original", user_id=session.user_id)
@@ -139,13 +139,13 @@ async def test_http_and_ws_share_typed_durable_compact_without_alias_or_recovery
     manager, database, session, mode, starts, _ = native_runtime
     async with session_client(manager, session) as client:
         endpoint = f"/api/sessions/{session.id}/submissions"
-        unavailable = await client.post(endpoint, json={"client_request_id": "empty", "operation": {"kind": "compact"}})
+        unavailable = await client.post(endpoint, json={"expected_backend": session.backend, "client_request_id": "empty", "operation": {"kind": "compact"}})
         assert unavailable.json()["code"] == "compact_unavailable" and not unavailable.json()["accepted"]
         assert not starts
-        await client.post(endpoint, json={"client_request_id": "before", "content": "Keep this input"})
+        await client.post(endpoint, json={"expected_backend": session.backend, "client_request_id": "before", "content": "Keep this input"})
         await wait_dispatch_idle(manager, session.id)
         mode[0] = "compact_ack_last"
-        operation = {"client_request_id": "compact-ws", "operation": {"kind": "compact"}}
+        operation = {"expected_backend": session.backend, "client_request_id": "compact-ws", "operation": {"kind": "compact"}}
         async with session_socket(manager, session) as submit:
             accepted = await submit({"session_id": session.id, **operation})
             assert accepted["accepted"] and accepted["operation"] == "compact"
@@ -164,7 +164,7 @@ async def test_http_and_ws_share_typed_durable_compact_without_alias_or_recovery
         assert conflict["code"] == "submission_conflict" and not conflict["accepted"]
         mixed = await client.post(endpoint, json={"client_request_id": "mixed", "operation": {"kind": "compact"}, "attachment_ids": ["unwanted"]})
         assert mixed.status_code == 422
-        recovery = (await client.post(endpoint, json={"client_request_id": "recover-compact", "content": "Continue",
+        recovery = (await client.post(endpoint, json={"expected_backend": session.backend, "client_request_id": "recover-compact", "content": "Continue",
             "recovery_of_client_id": "compact-ws"})).json()
         assert recovery["code"] == "recovery_unavailable" and not recovery["accepted"]
     with sqlite3.connect(tmp_path / "product.db") as reader:
@@ -189,7 +189,7 @@ async def test_compact_cannot_execute_before_durable_commit(native_runtime, tmp_
 
     monkeypatch.setattr(database, {"admission": "admit_client_submission", "claim": "claim_client_submission", "possible_send": "record_native_input"}[point], blocked)
     submitting = asyncio.create_task(submit_input(manager, session.id, ClientSubmissionRequest.model_validate({
-        "client_request_id": "commit-gated", "operation": {"kind": "compact"},
+        "expected_backend": session.backend, "client_request_id": "commit-gated", "operation": {"kind": "compact"},
     }), user_id=session.user_id))
     try:
         await asyncio.wait_for(entered.wait(), 2)

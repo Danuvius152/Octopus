@@ -11,13 +11,14 @@ from .base import Session, fork_info_fields
 
 def session_info(
     source: Session | dict[str, Any], message_count: int | None = None,
-    archived: bool = False, *, transcript_integrity: str | None = None,
+    archived: bool = False, *, transcript_integrity: str | None = None, has_inputs: bool | None = None,
 ) -> SessionInfo:
     """Assemble fields only. Detail counts and integrity take precedence over
     cached live summaries. This never queries storage or mutates a session.
     """
     get = source.get if isinstance(source, dict) else lambda name, default=None: getattr(source, name, default)
     backend = get("backend") or "claude-code"
+    count = message_count if message_count is not None else get("_message_count", 0)
     try:
         config = RunConfig()
         profile = get_harness(backend).runtime_profile(config)
@@ -33,10 +34,12 @@ def session_info(
     return SessionInfo.model_validate({
         "id": get("id"), "name": get("name"), "working_dir": get("working_dir"),
         "status": SessionStatus.idle if archived else get("status"), "created_at": get("created_at"),
-        "message_count": message_count if message_count is not None else get("_message_count", 0),
+        "message_count": count,
         "transcript_integrity": transcript_integrity if transcript_integrity is not None else get("_transcript_integrity", "ok"),
         "claude_session_id": get("claude_session_id"), "credential_id": get("credential_id"),
         "agent_id": get("agent_id"), "origin": get("origin") or "user", "backend": backend,
+        "defaults_source": get("defaults_source", "agent"),
+        "has_inputs": bool(count or get("claude_session_id") or get("has_inputs") or has_inputs),
         "model": get("model"), "reasoning_effort": get("reasoning_effort"), "service_tier": get("service_tier"),
         "parent_session_id": get("parent_session_id"), "delegation_request": get("delegation_request"),
         "app_id": get("app_id"), "archived": archived, "can_steer": can_steer,

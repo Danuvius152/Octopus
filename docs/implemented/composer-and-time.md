@@ -53,15 +53,11 @@ transcript stays bounded and no full-history cache or per-session draft is added
 
 ## Model selection
 
-`/model` and the header open the same settings dialog; `/model <name>` applies a
-session override for later turns. Independent inheritance, native model metadata,
-effort and speed are maintained in [model settings](model-reasoning.md).
-Command feedback and its partial list update retain the original account and
-session observation, so an old `/model` response cannot write a notice into a
-later account or a confirmed-deleted conversation.
-The dialog displays effective values and their sources. The header displays
-short Model/effort/Fast state; captured request settings and next-request
-inherited settings have separate timing.
+`/model` and the header open the same settings dialog. The dialog displays
+effective values and their sources. A save belongs to the original account
+and conversation. The header summarizes the engine, model and visible controls.
+See [model settings](model-reasoning.md) for how captured and inherited settings
+apply to each request.
 
 ## Verification
 

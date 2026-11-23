@@ -67,14 +67,14 @@ it("rejects a partial catalog, then lets an Agent use a supported engine with no
   render(<><SidebarAgents /><AgentFormPage onToggleSidebar={() => {}} /></>);
 
   expect(screen.getByText("Loading engine catalog…")).toBeVisible();
-  expect(screen.getByText("These switches select Octopus connectors.")).toBeVisible();
-  expect(screen.getByText("These definitions are saved with the agent.")).toBeVisible();
+  expect(screen.getByText("No connectors installed yet.")).toBeVisible();
+  expect(screen.getByText("Sub-agents", { exact: true })).toBeVisible();
   fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Prepared Agent" } });
   expect(screen.getByRole("button", { name: "Create Agent" })).toBeDisabled();
   await act(async () => first.resolve(Response.json({ available: ["codex"], default: "codex" })));
   expect(screen.getByText("Could not load engine catalog.")).toBeVisible();
-  expect(screen.getByText("These switches select Octopus connectors.")).toBeVisible();
-  expect(screen.getByText("These definitions are saved with the agent.")).toBeVisible();
+  expect(screen.getByText("No connectors installed yet.")).toBeVisible();
+  expect(screen.getByText("Sub-agents", { exact: true })).toBeVisible();
   expect(screen.getByRole("button", { name: "Create Agent" })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Retry engine catalog" }));
   expect(read).toHaveBeenCalledTimes(2);
@@ -105,11 +105,11 @@ it("keeps the saved backend and model when an Agent opens before discovery finis
 
   expect(screen.getByRole("radio", { name: /Codex/ })).toBeChecked();
   expect(screen.getByLabelText("Model")).toHaveValue("saved-model");
-  expect(screen.getByLabelText("Credential")).toHaveValue("saved-sign-in");
+  expect(screen.getByLabelText("Default sign-in")).toHaveValue("saved-sign-in");
   await act(async () => pending.resolve(catalog(["claude-code"])));
   expect(screen.getByRole("radio", { name: /Codex.*CLI not detected/ })).toBeChecked();
   expect(screen.getByLabelText("Model")).toHaveValue("saved-model");
-  expect(screen.getByLabelText("Credential")).toHaveValue("saved-sign-in");
+  expect(screen.getByLabelText("Default sign-in")).toHaveValue("saved-sign-in");
 });
 
 it("keeps inheritance available during failure and sends only a discovered explicit override", async () => {
@@ -158,25 +158,23 @@ it("ignores a late catalog body from a different account in the new session form
   expect(second.getByLabelText("Engine")).toHaveValue("codex");
 });
 
-it("requires a compatible credential when the discovered engine cannot use the Agent credential", async () => {
+it.each([false, true])("creates on another engine with either host sign-in or a compatible saved credential (%s)", async (chooseCredential) => {
   const fetch = mockApi(async () => catalog(["claude-code"]), { ...agent, credential_id: "codex-sign-in" });
-  useSessionStore.setState({ credentials: [claudeCredential] });
+  useSessionStore.setState({ credentials: chooseCredential ? [claudeCredential] : [] });
   render(<SidebarAgents />);
   const form = await openSessionSettings();
   const create = form.getByRole("button", { name: "Create session" });
   expect(create).toBeEnabled();
   await form.findByRole("option", { name: "Claude Code" });
   fireEvent.change(form.getByLabelText("Engine"), { target: { value: "claude-code" } });
-  expect(form.getByRole("option", { name: /Agent credential.*requires Codex/ })).toBeDisabled();
-  expect(create).toBeDisabled();
-  fireEvent.keyDown(form.getByPlaceholderText("Session name"), { key: "Enter" });
-  expect(fetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
-
-  fireEvent.change(form.getByLabelText("Credential"), { target: { value: "claude-sign-in" } });
+  expect(form.getByRole("option", { name: "Host default sign-in" })).toBeEnabled();
   expect(create).toBeEnabled();
-  fireEvent.click(create);
+  if (chooseCredential) {
+    fireEvent.change(form.getByLabelText("Credential"), { target: { value: "claude-sign-in" } });
+    fireEvent.click(create);
+  } else fireEvent.keyDown(form.getByPlaceholderText("Session name"), { key: "Enter" });
   const post = fetch.mock.calls.find(([, init]) => init?.method === "POST");
-  expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({ backend: "claude-code", credential_id: "claude-sign-in" });
+  expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({ backend: "claude-code", credential_id: chooseCredential ? "claude-sign-in" : null });
   await waitFor(() => expect(create).toBeEnabled());
 });
 

@@ -13,6 +13,7 @@ from ..credential_bindings import CredentialBindingError, validate_credential_bi
 from ..credential_use import CredentialUse
 from ..crypto import decrypt, encrypt
 from ..harness import HarnessCredential, get_harness
+from ..harness.model_settings import effective_settings
 from ..models import CredentialStatus
 from ..oauth_errors import OAuthRefreshError, RefreshErrorCode
 from ..oauth_providers import OAuthTokenSet, get_provider
@@ -65,15 +66,13 @@ class CredentialsMixin(SessionManagerBase):
     ) -> HarnessCredential | None:
         """Look up the effective credential and resolve it for `harness`.
 
-        Effective id is `session.credential_id` if set, else the agent's
-        (agent-refactor.md §5.2 / decision #2). The harness's profile
+        The stored default source decides whether to inherit the Agent binding.
+        The harness's profile
         `credential_style` picks the shape: `env_secret` decrypts the secret
         (refreshing an OAuth bundle if near expiry); `home_dir` resolves the
         CODEX_HOME directory. Returns None when nothing's attached / resolvable.
         """
-        cred_id = session.credential_id or (
-            agent.get("credential_id") if agent else None
-        )
+        cred_id = effective_settings(session, agent)["credential_id"]
         return await self.resolve_credential_by_id(
             cred_id, backend=harness.profile.backend, context=f"session {session.id}", user_id=session.user_id,
         )

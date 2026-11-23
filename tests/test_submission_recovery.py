@@ -263,8 +263,8 @@ async def test_manual_resubmission_has_new_identity_and_one_recovery_owner(tmp_p
         content = "Edited by user"
         async with session_client(manager, session) as http, session_socket(manager, session) as send:
             http_reply, typed_reply = await asyncio.gather(
-                http.post(endpoint, json={"client_request_id": "recovered-a", "content": content, **recovery}),
-                send({"session_id": session.id, "client_request_id": "recovered-b", **recovery,
+                http.post(endpoint, json={"expected_backend": "codex", "client_request_id": "recovered-a", "content": content, **recovery}),
+                send({"session_id": session.id, "expected_backend": "codex", "client_request_id": "recovered-b", **recovery,
                       "operation": {"kind": "message", "content": content, "attachment_ids": []}}),
             )
             assert http_reply.status_code == 200

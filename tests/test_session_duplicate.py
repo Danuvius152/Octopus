@@ -868,6 +868,8 @@ async def test_duplicate_refused_queued_message(manager, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_duplicate_backend_not_supported(manager, tmp_path, monkeypatch):
+    from server.sessions import owner_runtime
+
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
@@ -876,7 +878,7 @@ async def test_duplicate_backend_not_supported(manager, tmp_path, monkeypatch):
         can_fork = False
         backend_kind = "claude_code"
 
-    monkeypatch.setattr(sm_forking, "get_harness", lambda b: _NoFork())
+    monkeypatch.setattr(owner_runtime, "get_harness", lambda b: _NoFork())
     from server.harness import BackendForkNotSupported
 
     with pytest.raises(BackendForkNotSupported):

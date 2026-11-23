@@ -92,23 +92,25 @@ async def test_one_shot_waits_for_archive_rebinding_and_can_admit_before_notific
             await release_restored.wait()
         await update_session(session_id, **fields)
 
-    async def refuse_successor_configuration(session_id, **fields):
-        if session_id != old.id and "model" in fields:
+    save_session = db.save_session
+
+    async def refuse_successor_configuration(**fields):
+        if not rebinding.is_set():
             rebinding.set()
             await release_rebind.wait()
             raise ValueError("Inherited configuration refused")
-        await update_session(session_id, **fields)
+        await save_session(**fields)
 
     async def hold_notification(event):
         if (event["type"] == "session_archived" and event["old_session_id"] == old.id
-                and (effect == "plain" or event["new_session_id"] is not None)):
+                and (effect in {"plain", "configuration"} or event["new_session_id"] is not None)):
             notifying.set()
             await release_notice.wait()
 
     if effect == "plain":
         monkeypatch.setattr(db, "update_session_field", hold_archive_write)
     elif effect == "configuration":
-        monkeypatch.setattr(db, "update_session_field", refuse_successor_configuration)
+        monkeypatch.setattr(db, "save_session", refuse_successor_configuration)
     else:
         monkeypatch.setattr(db, "repoint_schedules_origin", hold_rebinding)
         if effect == "restored_reverse":
@@ -122,7 +124,7 @@ async def test_one_shot_waits_for_archive_rebinding_and_can_admit_before_notific
         await asyncio.wait_for(rebinding.wait(), 3)
         assert (await db.get_session_binding(old.id))["archived"]
         successor_id = None
-        if effect != "plain":
+        if effect not in {"plain", "configuration"}:
             assert manager.get_session(old.id) is None
             successor, = await db.load_sessions()
             successor_id = successor["id"]
@@ -173,7 +175,7 @@ async def test_one_shot_waits_for_archive_rebinding_and_can_admit_before_notific
         if effect in {"rollback", "configuration"}:
             with pytest.raises(SessionArchiveFailed) as failure:
                 await asyncio.wait_for(archive, 3)
-            assert failure.value.result.failure_stage == ("schedule_rebinding" if effect == "rollback" else "successor_configuration")
+            assert failure.value.result.failure_stage == ("schedule_rebinding" if effect == "rollback" else "successor_creation")
         else:
             await asyncio.wait_for(archive, 3)
     finally:

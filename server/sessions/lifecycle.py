@@ -21,12 +21,13 @@ from ..config import settings
 from ..credential_bindings import validate_credential_binding
 from ..db.applications import ApplicationDeleting, application_deletion_blocks_session
 from ..db.users import owner_is_available as owner_is_available_in_transaction
-from ..harness import get_harness
+from ..harness import get_harness, model_settings
 from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
 from ..models import (
     MessageContent,
     SessionArchiveFailureStage,
     SessionArchiveResult,
+    SessionDefaultsSource,
     SessionDetail,
     SessionInfo,
     SessionRestoreRequest,
@@ -42,6 +43,7 @@ from .base import (
     _session_from_row,
     resolve_working_dir,
 )
+from .configuration import validate_session_settings, validate_session_tool_policy
 from .handoff import TICKET_BATCH_RETURN_STATES
 from .owner import SessionOwner, SessionOwnerUnavailable
 from .owner_runtime import (
@@ -357,14 +359,21 @@ class LifecycleMixin(SessionManagerBase):
         origin: str = "user", backend: str | None = None,
         parent_session_id: str | None = None, delegation_request: str | None = None,
         app_id: str | None = None,
+        *, model: str | None = None, reasoning_effort: str | None = None, service_tier: str | None = None,
+        validate_models: bool = False,
     ) -> Session:
-        self.input_database()
-        return await self._run_agent_operation(
-            agent_id, lambda: self._create_session(
-                agent_id, name, working_dir, credential_id, origin, backend,
-                parent_session_id, delegation_request, app_id,
-            ),
-        )
+        db = self.input_database()
+
+        async def create() -> Session:
+            async with db.configuration_lock:
+                return await self._create_session(
+                    agent_id, name, working_dir, credential_id, origin, backend,
+                    parent_session_id, delegation_request, app_id,
+                    model=model, reasoning_effort=reasoning_effort, service_tier=service_tier,
+                    validate_models=validate_models or any(value is not None for value in (model, reasoning_effort, service_tier)),
+                )
+
+        return await self._run_agent_operation(agent_id, create)
 
     async def _create_session(
         self,
@@ -377,7 +386,9 @@ class LifecycleMixin(SessionManagerBase):
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
-        *, persist: bool = True, register: bool = True,
+        *, persist: bool = True, defaults_source: SessionDefaultsSource | None = None,
+        model: str | None = None, reasoning_effort: str | None = None, service_tier: str | None = None,
+        validate_models: bool = False,
     ) -> Session:
         """Create a conversation thread owned by `agent_id`.
 
@@ -396,13 +407,11 @@ class LifecycleMixin(SessionManagerBase):
         agent = await self.db.get_agent(agent_id) if self.db else None
         if self.db and agent is None:
             raise ValueError(f"Agent {agent_id} not found")
-        backend = backend or (agent or {}).get("backend") or settings.default_backend
+        agent_backend = (agent or {}).get("backend") or settings.default_backend
+        backend = backend or agent_backend
         get_harness(backend)  # Reject unknown kinds rather than a silent fallback.
-        if self.db:
-            await validate_credential_binding(
-                self.db, credential_id or (agent or {}).get("credential_id"),
-                backend, (agent or {}).get("user_id"),
-            )
+        if defaults_source is None and backend != agent_backend:
+            validate_session_tool_policy(backend, agent)
 
         if not name:
             label = (agent or {}).get("name", "Agent")
@@ -421,10 +430,14 @@ class LifecycleMixin(SessionManagerBase):
             working_dir=resolve_working_dir(
                 confine(working_dir, user_id=owner_id, extra_roots=extra_roots)
             ),
-            credential_id=credential_id,
+            credential_id=credential_id or None,
             agent_id=agent_id,
             origin=origin,
             backend=backend,
+            defaults_source=defaults_source or ("agent" if backend == agent_backend else "backend"),
+            model=(model.strip() or None) if model is not None else None,
+            reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
             parent_session_id=parent_session_id,
             delegation_request=delegation_request,
             app_id=app_id,
@@ -436,6 +449,14 @@ class LifecycleMixin(SessionManagerBase):
             # requires that agent's current account.
             user_id=owner_id,
         )
+        if self.db:
+            if validate_models:
+                await validate_session_settings(self.db, session, agent)
+            else:
+                # Archive carries forward saved values, which may predate the
+                # current catalog. The next turn validates controls as usual.
+                credential = model_settings.effective_settings(session, agent)["credential_id"]
+                await validate_credential_binding(self.db, credential, backend, owner_id)
         if self.db and persist:
             await self.db.save_session(
                 session_id=session.id,
@@ -451,8 +472,10 @@ class LifecycleMixin(SessionManagerBase):
                 delegation_request=session.delegation_request,
                 app_id=session.app_id,
                 user_id=session.user_id,
+                defaults_source=session.defaults_source,
+                model=session.model, reasoning_effort=session.reasoning_effort, service_tier=session.service_tier,
             )
-        if persist and register:
+        if persist:
             self.sessions[sid] = session
         return session
 
@@ -704,22 +727,15 @@ class LifecycleMixin(SessionManagerBase):
                 # Credential deletion propagates through the live registry.
                 # Keep private creation, initialization and registration inside
                 # its existing configuration boundary so it cannot miss us.
-                async with self.input_database().configuration_lock:
+                db = self.input_database()
+                async with db.configuration_lock:
+                    credential_id = await db.get_archived_credential_id(old.id, old.user_id)
                     new = await self._create_session(
                         agent_id=old.agent_id, name=old.name, working_dir=old.working_dir,
-                        credential_id=old.credential_id, origin=old.origin, backend=old.backend, app_id=old.app_id,
-                        register=False,
+                        credential_id=credential_id, origin=old.origin, backend=old.backend, app_id=old.app_id,
+                        defaults_source=old.defaults_source, model=old.model,
+                        reasoning_effort=old.reasoning_effort, service_tier=old.service_tier,
                     )
-                    stage = "successor_configuration"
-                    try:
-                        if self.db:
-                            await self.db.update_session_field(new.id, model=old.model,
-                                reasoning_effort=old.reasoning_effort, service_tier=old.service_tier)
-                        new.model, new.reasoning_effort, new.service_tier = old.model, old.reasoning_effort, old.service_tier
-                    finally:
-                        # Creation already committed. A failed configuration write
-                        # retains that real successor with its actual saved defaults.
-                        self.sessions[new.id] = new
 
             # Rebinding changes only the origin; keep the schedule's cadence
             # and the registered Runner's ownership unchanged.
@@ -806,6 +822,13 @@ class LifecycleMixin(SessionManagerBase):
                     owner = self._session_owners.get(id(session))
                     if owner is not None:
                         await self._release_session_reservation(owner, ReleaseArchive(reservations[session.id]))
+
+    async def list_live_session_infos(
+        self, user_id: str | None = None, *, agent_id: str | None = None,
+    ) -> list[SessionInfo]:
+        input_sessions = await self.input_database().sessions_with_inputs(user_id)
+        return [session_info(session, has_inputs=session.id in input_sessions)
+                for session in self.list_sessions(user_id) if agent_id is None or session.agent_id == agent_id]
 
     async def list_archived_sessions(
         self, user_id: str | None = None
@@ -1013,17 +1036,18 @@ class LifecycleMixin(SessionManagerBase):
                 if current.user_id != user_id or current._admission_closed or self.session_owner_failed(session_id):
                     raise SessionAdmissionClosed("Original session admission is unavailable")
                 return current
-            session = await self._restore_archived_session(session_id, user_id, returning=returning)
+            session, has_inputs = await self._restore_archived_session(session_id, user_id, returning=returning)
         await self._publish_lifecycle({
             "type": "session_unarchived", "session_id": session.id, "name": session.name,
-            "session": session_info(session).model_dump(mode="json"), "dispatch_state": self._session_dispatch_snapshot(session),
+            "session": session_info(session, has_inputs=has_inputs).model_dump(mode="json"),
+            "dispatch_state": self._session_dispatch_snapshot(session),
         }, user_id=session.user_id, returning=returning is not None, release_notice=release_notice)
         return session
 
     async def _restore_archived_session(
         self, session_id: str, user_id: str | None = None, *, returning: OwnedTaskContext | None = None,
-    ) -> Session:
-        """Flip archived=0 in the DB and reload the row into memory.
+    ) -> tuple[Session, bool]:
+        """Restore the live session and keep the archived row's input-presence fact.
 
         Refuses unknown / non-archived ids with ValueError — and an id that
         belongs to another account is one of those, indistinguishably, which is
@@ -1064,7 +1088,7 @@ class LifecycleMixin(SessionManagerBase):
         from .owner_runtime import ReadContext
 
         await self._session_owner(session).call_runtime(ReadContext())
-        return session
+        return session, match["has_inputs"]
 
     def _require_task_return(self, owned: OwnedTaskContext, session_id: str, user_id: str | None) -> None:
         if (self._admission_closed or self.session_deleting(session_id) or self.session_owner_failed(session_id)

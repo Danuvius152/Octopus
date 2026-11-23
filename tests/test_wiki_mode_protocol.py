@@ -21,7 +21,7 @@ async def test_compact_without_native_history_is_refused_without_message_or_wiki
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "No native history", str(tmp_path), backend="codex")
     response = await client.post(f"/api/sessions/{session.id}/submissions", json={
-        "client_request_id": "unsupported-compact", "operation": {"kind": "compact"},
+        "expected_backend": "codex", "client_request_id": "unsupported-compact", "operation": {"kind": "compact"},
     })
     assert response.status_code == 200
     assert response.json()["accepted"] is False and response.json()["code"] == "compact_unavailable"
@@ -106,7 +106,7 @@ async def test_restoring_current_read_input_keeps_its_ceiling_and_original_ident
         })
         assert conflict.json()["code"] == "submission_conflict"
         assert manager.dispatch_snapshot(session.id) == before and observed == []
-        request = {"client_request_id": "restored-client", "content": content,
+        request = {"expected_backend": "codex", "client_request_id": "restored-client", "content": content,
                    "recovery_of_client_id": "old-client"}
         if selected is not None:
             request["wiki_mode"] = selected
@@ -150,7 +150,7 @@ async def test_unverifiable_original_context_cannot_be_recovered(client, tmp_pat
     monkeypatch.setattr(get_harness("codex"), "create_run", lambda config: launches.append(config))
     before = manager.dispatch_snapshot(session.id)
     response = await client.post(f"/api/sessions/{session.id}/submissions", json={
-        "client_request_id": "unverifiable-recovery", "content": "/wiki maintain New work",
+        "expected_backend": "codex", "client_request_id": "unverifiable-recovery", "content": "/wiki maintain New work",
         "recovery_of_client_id": "old-client",
     })
     assert response.status_code == 200, response.text
@@ -190,7 +190,7 @@ async def test_concurrent_recovery_of_read_only_input_has_one_new_owner(client, 
     monkeypatch.setattr(get_harness("codex"), "create_run", lambda config: Run())
     try:
         responses = await asyncio.gather(*(client.post(f"/api/sessions/{session.id}/submissions", json={
-            "client_request_id": client_id, "content": "/wiki maintain New request",
+            "expected_backend": "codex", "client_request_id": client_id, "content": "/wiki maintain New request",
             "wiki_mode": "maintain", "recovery_of_client_id": "old-client",
         }) for client_id in ("restore-a", "restore-b")))
         accepted = [response.json() for response in responses if response.json()["accepted"]]
@@ -233,7 +233,7 @@ async def test_new_http_off_input_is_refused_without_admission_or_execution(clie
     before = manager.dispatch_snapshot(session.id)
     try:
         response = await client.post(f"/api/sessions/{session.id}/submissions", json={
-            "client_request_id": "new-off-refused", "content": "Answer from our sources", "wiki_mode": "off"})
+            "expected_backend": "codex", "client_request_id": "new-off-refused", "content": "Answer from our sources", "wiki_mode": "off"})
         assert response.status_code == 422, response.text
         assert await manager.db.get_client_submission(session.id, "new-off-refused") is None
         assert manager.dispatch_snapshot(session.id) == before
@@ -276,7 +276,7 @@ async def test_websocket_restoration_keeps_the_original_read_ceiling(
     starts = hold_model_runs(manager, monkeypatch)
     async with connection(manager, bearer) as browser:
         payload = {"type": "send_message", "session_id": session.id,
-                   "content": content, "client_request_id": "ws-recovery", "recovery_of_client_id": "old-client"}
+                   "content": content, "expected_backend": "codex", "client_request_id": "ws-recovery", "recovery_of_client_id": "old-client"}
         if selected is not None:
             payload["wiki_mode"] = selected
         await browser[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
@@ -309,7 +309,7 @@ async def test_explicit_auto_preserves_public_command_interpretation_and_retry_i
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "Keep auto interpretation", str(tmp_path), backend="codex")
     starts = hold_model_runs(manager, monkeypatch)
-    body = {"client_request_id": "same-auto", "content": content, "wiki_mode": "auto"}
+    body = {"expected_backend": "codex", "client_request_id": "same-auto", "content": content, "wiki_mode": "auto"}
     try:
         submitted = await client.post(f"/api/sessions/{session.id}/submissions", json=body)
         assert submitted.status_code == 200 and submitted.json()["accepted"], submitted.text

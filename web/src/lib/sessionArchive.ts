@@ -41,17 +41,14 @@ export async function postArchive(id: string, token: string, replace: boolean, d
   }
 }
 
-/** HTTP and WS carry the same known post-effect facts. Neither implies that
- * a missing successor was never created, or that inherited settings succeeded.
- */
+/** HTTP and WS carry the same known archive and successor facts. */
 export function readArchiveResult(value: unknown): SessionArchiveResult | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const result = value as Record<string, unknown>;
   if (typeof result.old_session_id !== "string" || !result.old_session_id || result.archived !== true ||
     result.new_session_id !== null && (typeof result.new_session_id !== "string" || !result.new_session_id) ||
     result.new_session_id === result.old_session_id || typeof result.message !== "string") return null;
-  if (typeof result.failure_stage !== "string" ||
-    !["successor_creation", "successor_configuration", "schedule_rebinding"].includes(result.failure_stage)) return null;
-  if (result.failure_stage !== "successor_creation" && result.new_session_id === null) return null;
+  if (result.failure_stage === "successor_creation" ? result.new_session_id !== null
+    : result.failure_stage !== "schedule_rebinding" || result.new_session_id === null) return null;
   return value as SessionArchiveResult;
 }

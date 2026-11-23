@@ -59,7 +59,8 @@ async def test_current_submission_identity_replays_conflicts_and_keeps_new_ids_d
     starts = hold_model_runs(manager, monkeypatch)
     await start_held_request(manager, session.id, 'Unsteerable original', wiki_mode='read')
     await asyncio.wait_for(starts.get(), 2)
-    payload = {'type': 'send_message', 'session_id': session.id, 'content': 'Identical text', 'client_request_id': 'x' * 128}
+    payload = {'type': 'send_message', 'session_id': session.id, 'content': 'Identical text',
+               'client_request_id': 'x' * 128, 'expected_backend': session.backend}
     try:
         async with connection(manager, bearer) as browser:
             async def send(data):

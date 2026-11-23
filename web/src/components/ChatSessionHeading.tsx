@@ -2,16 +2,29 @@ import { IconCpu } from "@tabler/icons-react";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { selectSession } from "../lib/selectSession";
 import { Button } from "./ui/button";
-import { CredentialPicker } from "./CredentialPicker";
+import { backendLabel } from "../hooks/useBackendCatalog";
+import type { RuntimeModelDefault } from "../hooks/useModelSettings";
 import { PageHeader } from "./PageHeader";
 
-export function ChatSessionHeading({ session: activeSession, connected, onOpenModel, onToggleSidebar }: {
+export function ChatSessionHeading({ session: activeSession, connected, runtimeModelDefaults, onOpenModel, onToggleSidebar }: {
   session?: SessionInfo;
   connected: boolean;
+  runtimeModelDefaults?: RuntimeModelDefault[];
   onOpenModel?: () => void;
   onToggleSidebar: () => void;
 }) {
   const activeAgent = useSessionStore((state) => state.agents.find((agent) => agent.id === activeSession?.agent_id));
+  const defaults = activeSession?.defaults_source !== "backend" ? activeAgent : undefined;
+  const credential = activeSession?.credential_id || defaults?.credential_id || null;
+  const backend = activeSession?.backend ?? "claude-code";
+  const defaultsKnown = activeSession?.defaults_source === "backend" || !activeSession?.agent_id || !!activeAgent;
+  const observedDefault = defaultsKnown && runtimeModelDefaults
+    ?.find((entry) => entry.backend === backend && entry.credential === credential)?.name;
+  const model = activeSession?.model || defaults?.model || observedDefault || "Default";
+  const effort = activeSession?.reasoning_effort || defaults?.reasoning_effort;
+  const speed = activeSession?.service_tier || defaults?.service_tier;
+  const engine = backendLabel(backend);
+  const settingsLabel = [engine, model, effort, speed === "fast" && "Fast"].filter(Boolean).join(" · ");
   const renderStatusBadge = (status: string | undefined) => {
     const base = "status-badge font-mono text-[11px]";
     if (status === "running") {
@@ -58,18 +71,19 @@ export function ChatSessionHeading({ session: activeSession, connected, onOpenMo
       meta={activeSession ? renderStatusBadge(activeSession.status) : undefined}
       actions={
         <>
-          {activeSession && (
+          {activeSession && onOpenModel && !activeSession.archived && (
             <Button
               className="btn-model-settings" variant="ghost" size="sm"
-              title="Model, reasoning and speed settings" aria-label="Model, reasoning and speed settings"
+              title={settingsLabel} aria-label={`Conversation settings: ${settingsLabel}`}
               onClick={onOpenModel}
             >
-              <IconCpu size={16} />
-              <span className="chat-model-label">Model{activeSession.reasoning_effort || activeAgent?.reasoning_effort ? ` · ${activeSession.reasoning_effort || activeAgent?.reasoning_effort}` : " & reasoning"}</span>
-              {activeSession.backend === "codex" && (activeSession.service_tier || activeAgent?.service_tier) === "fast" && <span className="font-mono text-xs">Fast</span>}
+              <IconCpu size={16} className="shrink-0" />
+              <span className="whitespace-nowrap">{engine}</span>
+              <span className="chat-model-label truncate">· {model}</span>
+              {effort && <span className="chat-model-detail whitespace-nowrap">· {effort}</span>}
+              {speed === "fast" && <span className="chat-model-detail whitespace-nowrap">· Fast</span>}
             </Button>
           )}
-          {activeSession && <CredentialPicker session={activeSession} />}
           <span
             className={`conn-status ${connected ? "on" : "off"} pill ${
               connected ? "pill-success" : "pill-warn"

@@ -2,11 +2,11 @@
 
 > **Status:** implemented — 独立模型、推理强度和 Normal/Fast 控制，保留继承、运行时发现与会话历史。
 
-The chat header opens the same dialog as `/model`. A model override and a
-reasoning-effort override are independent: editing only effort sends only
-`reasoning_effort`, so the model binding stays intact. The agent form sets
-durable defaults. Clearing either session field restores inheritance for that
-field alone.
+The conversation settings button and `/model` open the same dialog. The
+conversation has independent model, reasoning effort, speed and sign-in
+overrides. Clearing one restores the saved default source for that field. The
+Agent form exposes the default engine and sign-in. Its Model defaults section
+groups model, effort and speed.
 
 Codex also offers a separate Speed selector: Normal and Fast. Agent speed
 defaults to Normal; sessions inherit the agent's choice and can override it
@@ -15,20 +15,24 @@ independently. Fast increases usage. Octopus does not offer Ultrafast.
 `POST /api/agents`, `PATCH /api/agents/{id}` and
 `PATCH /api/sessions/{id}` accept `service_tier: "fast"` to opt in or
 `service_tier: "default"` for Normal. Omitting the field from a PATCH keeps its
-binding; passing `null` clears it. A cleared session inherits its agent,
-and a cleared agent uses Normal. Speed never changes the model or effort.
+binding. Passing `null` restores the saved default source for the session.
+Normal applies when neither the session nor its applicable Agent default sets
+Fast. Speed and reasoning effort stay independent.
 
 ## Persistence and precedence
 
-`agents.reasoning_effort` and `sessions.reasoning_effort` are nullable TEXT
-columns. NULL means no override. Each field resolves independently as
-session override → agent default → CLI configuration. Session model, effort
-and credential bindings can be cleared to NULL and survive a restart.
-`service_tier` is a separate nullable TEXT column on agents and sessions;
-its precedence is session override → agent default → Normal, regardless of
-Fast preferences saved in the CLI. NULL at both levels resolves to Normal.
-Archived detail, restore, archive replacement, rewind and full-copy forks
-preserve the settings along with their existing ownership and resume state.
+Each session stores `defaults_source` with its engine and overrides. An
+explicit choice of a different engine from the owning Agent starts with
+`backend` defaults. Choosing the Agent's engine starts with `agent` defaults.
+For the `agent` source, an empty override uses the Agent value if present and
+the runtime default otherwise. For the `backend` source, an empty override
+uses the runtime default. Codex resolves an empty speed under either source
+to Normal when no applicable Agent speed is set.
+
+Changing the Agent's defaults keeps each existing conversation's engine and
+source. Restore, archive replacement, rewind and full-copy forks preserve the
+source with the saved overrides. Archive replacement inserts the entire
+successor configuration in one write before rebinding schedules.
 
 Preparation captures the session overrides and Agent defaults together under
 the configuration lock. The read runs in the original request's preparation
@@ -46,20 +50,31 @@ session's inherited settings temporarily incompatible; that does not veto the
 save. The session keeps its original backend, history and native resume identity.
 Overrides are not automatically added or converted to preserve compatibility.
 
-The chat header and `/model` open the same dialog, which shows the selected
-session's effective settings and each field's source. The header uses a short
-Model/effort/Fast label. The dialog can change credential and model controls in one
-atomic PATCH, including when both an inherited credential and effort are
-incompatible. Clearing a credential restores inheritance. Its draft catalog
-describes the draft credential; it does not replace the current effective-value
-display. Rejections preserve existing bindings and explain what to correct.
-Responses remain associated with their original session, so switching sessions
-cannot move an error or close the new session's dialog.
+The header shows the saved engine, model and available effort or speed summary.
+For a conversation using the runtime model default, it uses the configured
+default once settings have read it for the saved engine and effective sign-in.
+The dialog uses a catalog dropdown for Model and shows the source in each
+default option. Sign-in is folded during normal use. A credential and model
+controls can be repaired in one PATCH. The dialog refreshes the catalog on
+opening, engine changes and effective sign-in changes. A failed save keeps the
+draft and displays the reason in the original dialog. A rejected Agent model
+control opens Model defaults and points to the field that needs repair.
+
+An empty conversation can switch engines in place. The Owner checks admitted
+input, history and the native binding before committing a complete target
+configuration and captures the success response before the next commit. The
+session list and details report admitted input even before its first message.
+The request includes all four overrides, using explicit nulls to select their
+defaults. A busy lifecycle operation is a separate conflict. For a
+conversation with history or admitted input, the dialog offers to start a
+new conversation for the same Agent and working directory. The original
+conversation keeps its history and engine. Settings PATCH requests include
+`expected_backend`, the engine observed by the client.
 
 | Boundary | Validation and timing |
 | --- | --- |
 | Agent save | Serialize candidate read, complete validation and write; validate the new defaults themselves. |
-| Session save | Validate the complete proposed effective combination using the session's retained backend; reject atomically. |
+| Session save | Validate the complete proposed combination under the retained or selected engine before saving it atomically. |
 | Logical request capture | Capture the effective configuration under the configuration lock; retries keep that capture. |
 | Process launch | Recheck supported controls and current credential authorization before invoking the captured backend. |
 
@@ -110,9 +125,8 @@ discovery is pending or has failed. Switching between inheritance and an overrid
 for the same engine keeps the selected credential. If an Agent update changes
 the inherited engine, an incompatible selection stays visible and blocks
 submission. The user can choose a compatible credential or switch to the engine
-that matches the existing selection and keep that credential. An override to a
-different engine requires a compatible credential when the Agent has a credential
-of its own.
+that matches the existing selection and keep that credential. A different
+engine offers that engine's host sign-in and its compatible stored credentials.
 
 `GET /api/backends/{backend}/models` requires authentication and account scope.
 An optional `credential_id` must belong to the caller and match the backend.
@@ -121,11 +135,18 @@ home, using the same fallback to the host login as an actual invocation.
 
 Codex reads its own `models_cache.json` and the model/effort defaults from
 `config.toml`; the response exposes no file paths, tokens or arbitrary config
-values. Missing or damaged caches leave free-form model selection and basic
-reasoning levels available. The advertised levels for a known model constrain
-the picker and explicit effort updates. Model names remain free-form so a new
-model does not require an Octopus release. Claude Code advertises the request
-levels low, medium, high, xhigh and max for its aliases and free-form models.
+values. The next catalog read reflects cache updates. Missing or damaged caches
+return a catalog error with a retry action. Existing overrides can be cleared
+while the catalog is unreadable. The save endpoint validates the resulting
+configuration. Editors keep saved values visible while waiting for metadata and
+distinguish an unsupported value from an unreadable catalog. The dropdown shows
+the saved model outside the catalog so changes to other settings can preserve it.
+The optional `saved_model` entries look up IDs within the same authorized
+runtime home. The browser supplies the saved session and Agent model IDs. These
+capabilities constrain the controls without adding models to the dropdown.
+Existing model IDs remain supported by the API. Chat's
+`/model` command opens the same settings dialog as the header. Claude Code
+advertises low, medium, high, xhigh and max for its aliases and free-form models.
 These are CLI request levels, not a guarantee of distinct model capabilities.
 Claude defaults remain unspecified so clearing both overrides follows the CLI.
 

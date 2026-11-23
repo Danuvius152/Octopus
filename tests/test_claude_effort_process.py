@@ -49,7 +49,7 @@ async def test_effort_changes_replace_process_and_resume_history(question_host, 
         for effort in ("low", "high", None):
             if effort != "low":
                 changed = await client.patch(f"/api/sessions/{session.id}", headers=client.headers,
-                                             json={"reasoning_effort": effort})
+                                             json={"expected_backend": "claude-code", "reasoning_effort": effort})
                 assert changed.status_code == 200, changed.text
             receipt = await manager.start_message(session.id, "Keep this history")
             result = await asyncio.wait_for(receipt.wait(), 5)

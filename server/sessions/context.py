@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 async def read_session_context_target(db: Database, session: Session) -> ContextTarget | None:
     """Align saved observations using only binding facts that the session inherits."""
     agent_id = session.agent_id
-    inherited = [field for field in ("model", "credential_id") if not getattr(session, field)]
+    inherited = ([field for field in ("model", "credential_id") if not getattr(session, field)]
+                 if session.defaults_source == "agent" else [])
     if agent_id is None or not inherited:
         return context_target(session, None)
     agent = await db.get_agent_context_fields(agent_id, session.user_id)

@@ -440,11 +440,10 @@ export function SidebarAgents() {
     const isExpanded = expanded.has(a.id);
     const isSessionForm = formAgentId === a.id;
     const effectiveEngine = formBackend || a.backend;
-    const inheritedCredentialConflict = !!a.credential_id && effectiveEngine !== a.backend;
+    const agentCredentialId = effectiveEngine === a.backend ? a.credential_id : null;
     const selectedCredential = isSessionForm && formCredentialId
       ? credentials.find((credential) => credential.id === formCredentialId) : undefined;
     const invalidCredential = !!formCredentialId && selectedCredential?.backend !== effectiveEngine;
-    const needsCredential = formCredentialId ? invalidCredential : inheritedCredentialConflict;
     const credentialOptions = isSessionForm && showAdvanced
       ? credentials.filter((credential) => credential.backend === effectiveEngine) : [];
     // Conversations an application is holding with this agent are its
@@ -559,7 +558,7 @@ export function SidebarAgents() {
                       if (isImeComposing(e.nativeEvent)) return;
                       if (e.key === "Enter") {
                         e.preventDefault();
-                        if (!needsCredential) void createSession(a.id);
+                        if (!invalidCredential) void createSession(a.id);
                       }
                       if (e.key === "Escape") closeCreateRow();
                     }}
@@ -568,7 +567,7 @@ export function SidebarAgents() {
                     type="button"
                     className="btn-create inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-white transition-colors hover:bg-primary-700 disabled:opacity-50"
                     onClick={() => createSession(a.id)}
-                    disabled={needsCredential || creationLocked}
+                    disabled={invalidCredential || creationLocked}
                     title="Create session"
                     aria-label="Create session"
                   >
@@ -586,9 +585,8 @@ export function SidebarAgents() {
                 </div>
 
                 {creating && <p role="status" className="mt-1 text-xs text-muted-foreground">Creating session…</p>}
-                {needsCredential && <p className="mt-1 text-xs text-muted-foreground">
-                  Choose a credential for {backendLabel(effectiveEngine)}{inheritedCredentialConflict
-                    ? " or use the agent default engine." : " or restore the default sign-in."}
+                {invalidCredential && <p className="mt-1 text-xs text-muted-foreground">
+                  Choose a credential for {backendLabel(effectiveEngine)} or restore the default sign-in.
                 </p>}
                 {/* Overrides stay one click away: a session normally
                   * inherits the agent's engine, credential and the
@@ -634,7 +632,7 @@ export function SidebarAgents() {
                       ))}
                     </select>
                     <BackendCatalogStatus read={backendRead} />
-                    {(a.credential_id || formCredentialId || credentialOptions.length > 0) && (
+                    {(agentCredentialId || effectiveEngine !== a.backend || formCredentialId || credentialOptions.length > 0) && (
                       <select
                         className="session-credential-select rounded-md border border-gray-400 bg-card px-2 py-1 text-[11.5px] text-gray-900 outline-none focus:border-primary"
                         value={formCredentialId}
@@ -642,8 +640,8 @@ export function SidebarAgents() {
                         onChange={(e) => setFormCredentialId(e.target.value)}
                         aria-label="Credential"
                       >
-                        <option value="" disabled={inheritedCredentialConflict}>{a.credential_id
-                          ? `Agent credential (${credentials.find((c) => c.id === a.credential_id)?.label ?? "saved credential"}${inheritedCredentialConflict ? `, requires ${backendLabel(a.backend)}` : ""})`
+                        <option value="">{agentCredentialId
+                          ? `Agent credential (${credentials.find((c) => c.id === agentCredentialId)?.label ?? "saved credential"})`
                           : "Host default sign-in"}</option>
                         {invalidCredential && (
                           <option value={formCredentialId} disabled>

@@ -217,7 +217,7 @@ async def test_unready_ws_input_is_unaccepted_and_same_identity_can_be_retried_a
         await release.wait()
         return rows
     monkeypatch.setattr(db, "load_sessions", held_load)
-    payload = {"type": "send_message", "session_id": session.id, "content": "Retain my identity", "client_request_id": "retry-after-recovery"}
+    payload = {"type": "send_message", "session_id": session.id, "content": "Retain my identity", "expected_backend": session.backend, "client_request_id": "retry-after-recovery"}
     async with connection(manager, bearer) as browser:
         initializing = asyncio.create_task(manager.initialize(db))
         try:
@@ -247,7 +247,7 @@ async def test_submission_identity_survives_ack_loss_reconnect_and_manager_resta
     # A separate read-scoped request cannot take this browser input as a steer.
     blocker, _scope = await start_held_request(manager, session.id, "The original running task", wiki_mode="read")
     original_run = await asyncio.wait_for(starts.get(), 2)
-    payload = {"type": "send_message", "session_id": session.id, "content": "execute once", "client_request_id": "same-input"}
+    payload = {"type": "send_message", "session_id": session.id, "content": "execute once", "expected_backend": session.backend, "client_request_id": "same-input"}
     async def submit(owner, data):
         async with connection(owner, bearer) as client:
             await client[0].put({"type": "websocket.receive", "text": json.dumps(data)})
@@ -379,7 +379,7 @@ async def test_closed_submission_is_rejected_with_client_identity(runtime, tmp_p
     async with connection(manager, bearer) as client:
         await client[0].put({"type": "websocket.receive", "text": json.dumps({
             "type": "send_message", "session_id": session.id, "content": "keep my draft",
-            "client_request_id": "draft-1",
+            "expected_backend": session.backend, "client_request_id": "draft-1",
         })})
         rejected = await receipt_frame(client[1], "submission")
         assert rejected["type"] == "submission"

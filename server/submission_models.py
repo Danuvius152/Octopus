@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .models import AttachmentMetadata, TurnOutcome
+from .models import AttachmentMetadata, BackendKind, TurnOutcome
 from .session_operations import (
     CompactOperation,
     MessageOperation,
@@ -16,6 +16,10 @@ from .session_operations import (
 
 class SubmissionConflict(ValueError):
     code = "submission_conflict"
+
+
+class SubmissionEngineChanged(ValueError):
+    code = "engine_changed"
 
 
 class InputRecoveryUnavailable(ValueError):
@@ -50,6 +54,7 @@ class ClientSubmissionRequest(BaseModel):
     wiki_mode: Literal["auto", "read", "maintain"] | None = None
     recovery_of_client_id: Utf8Text | None = Field(default=None, min_length=1, max_length=128)
     operation: SessionOperation | None = None
+    expected_backend: BackendKind | None = None
 
     @model_validator(mode="after")
     def validate_operation(self) -> "ClientSubmissionRequest":

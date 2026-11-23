@@ -597,7 +597,8 @@ export function useWebSocket() {
   }, []);
 
   const sendMessage = useCallback(
-    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: WikiMessageMode, submissionId?: string, recoveryOfClientId?: string): Promise<SubmissionReply> => {
+    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: WikiMessageMode, submissionId?: string,
+      recoveryOfClientId?: string, expectedBackend?: string): Promise<SubmissionReply> => {
       // Don't optimistically add to chat — the backend broadcasts a
       // user_message event whether the prompt fires immediately or after
       // dequeue, so a single broadcast handler keeps state consistent.
@@ -605,6 +606,7 @@ export function useWebSocket() {
         type: "send_message",
         session_id: sessionId,
         content,
+        expected_backend: expectedBackend,
       };
       if (attachmentIds && attachmentIds.length > 0) {
         payload.attachment_ids = attachmentIds;

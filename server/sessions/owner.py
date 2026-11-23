@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from ..config import settings
 from ..diagnostics import exception_diagnostic
-from ..harness import HarnessRun
+from ..harness import BackendForkNotSupported, HarnessRun
 from ..models import MessageContent, MessageRole
 from .base import BackendRetirement, ForkError, Session, SessionManagerBase, logger
 from .commands import CorrelatedControl, command_digest
@@ -371,7 +371,7 @@ class SessionOwner:
                         if isinstance(current, _RuntimeCommand):
                             try:
                                 result = await self.runtime.handle(current.command)
-                            except (ValueError, ForkError, QuotaExceeded) as error:
+                            except (ValueError, BackendForkNotSupported, ForkError, QuotaExceeded) as error:
                                 if not current.reply.done():
                                     current.reply.set_exception(error)
                             else:

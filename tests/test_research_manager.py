@@ -1652,6 +1652,8 @@ async def test_queued_research_passes_original_choices_to_every_leaf(
     from server.users import UserManager
     from tests.harness_profiles import process_profile
 
+    agent = await db.get_system_agent()
+    await db.update_agent(agent["id"], backend=backend)
     session = await _session(mgr, db, backend=backend)
     native = get_harness(session.backend).profile
     web_native = get_harness(backend).runtime_profile(RunConfig(transport="exec")) if backend == "codex" else native

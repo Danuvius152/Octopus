@@ -53,8 +53,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "/model",
-    hint: "[name]",
-    description: "Switch the model for this session — bare opens the picker",
+    description: "Open conversation settings",
     Icon: IconCpu,
   },
   {

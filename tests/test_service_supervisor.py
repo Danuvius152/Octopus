@@ -153,9 +153,10 @@ def test_systemd_retires_detached_forked_writers_before_the_next_server(tmp_path
 def submit_message(config, session_id, content, client_id, *, bearer):
     from websockets.sync.client import connect
 
+    session = request(config, f"/api/sessions/{session_id}/info", bearer=bearer)
     with connect(f"ws://127.0.0.1:{config.port}/ws?token={bearer}", open_timeout=3) as connection:
         connection.send(json.dumps({"type": "send_message", "session_id": session_id,
-                                   "content": content, "client_request_id": client_id}))
+                                   "content": content, "expected_backend": session["backend"], "client_request_id": client_id}))
         while True:
             event = json.loads(connection.recv(timeout=5))
             if event.get("type") == "submission" and event.get("client_request_id") == client_id:

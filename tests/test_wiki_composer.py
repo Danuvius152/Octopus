@@ -34,7 +34,7 @@ async def submit_composer(runtime, monkeypatch, tmp_path, message, selection):
     session = await manager.create_session(agent['id'], 'Wiki composer', str(tmp_path), backend='codex')
     hold_model_runs(manager, monkeypatch)
     payload = {'type': 'send_message', 'session_id': session.id, 'content': message,
-               'client_request_id': 'wiki-composer-input'}
+               "expected_backend": "codex", 'client_request_id': 'wiki-composer-input'}
     if selection is not None:
         payload['wiki_mode'] = selection
     try:
@@ -71,7 +71,7 @@ async def test_source_only_input_preserves_raw_semantics_and_explicit_read_contr
         app = FastAPI()
         app.include_router(router)
         app.dependency_overrides[get_session_manager] = lambda: manager
-        payload = {"content": message, "client_request_id": "wiki-http-input"}
+        payload = {"content": message, "expected_backend": "codex", "client_request_id": "wiki-http-input"}
         if selection is not None:
             payload["wiki_mode"] = selection
         try:

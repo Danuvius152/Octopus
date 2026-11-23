@@ -90,7 +90,7 @@ class OrdinaryChatProbe:
             async with asyncio.timeout(240):
                 async with connect(f"ws://127.0.0.1:{self.port}/ws?token={self.token}", max_size=16 * 1024 * 1024) as socket:
                     await socket.send(json.dumps({"type": "send_message", "session_id": session.id,
-                                                  "content": question, "client_request_id": client_id}))
+                                                  "content": question, "expected_backend": session.backend, "client_request_id": client_id}))
                     while receipt is None or outcome is None:
                         event = json.loads(await socket.recv())
                         if event.get("session_id") != session.id:
