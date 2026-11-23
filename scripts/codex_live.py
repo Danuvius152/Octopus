@@ -67,6 +67,9 @@ def isolated_config(source: Path, *, model: str | None = None, service_tier: str
     # Rewrite only the isolated copy. Quoted keys, multiline instructions and
     # tables are values of the parsed document, never candidates for line edits.
     config.update(overrides)
+    # These suites exercise Octopus and the Codex protocol, without downloading
+    # the selected account's plugins into each fresh CLI home.
+    config.setdefault("features", {})["plugins"] = False
     return "".join(f"{_toml_value(key)} = {_toml_value(value)}\n" for key, value in config.items())
 
 

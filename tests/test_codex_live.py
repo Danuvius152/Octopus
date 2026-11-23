@@ -92,10 +92,11 @@ def test_file_store_configuration_preserves_tables_and_host_configuration(tmp_pa
 @pytest.mark.parametrize("model,service_tier", [(None, None), ("test-model", "fast")])
 def test_configuration_overrides_preserve_all_other_toml_values(tmp_path, original, model, service_tier):
     source = tmp_path / "config.toml"
-    original += 'model = "selected-model"\n[features]\nexample = true\n'
+    original += 'model = "selected-model"\n[features]\nexample = true\nplugins = true\n'
     source.write_text(original)
     expected = tomllib.loads(original)
     expected.update(cli_auth_credentials_store="file", model_reasoning_effort="low")
+    expected["features"]["plugins"] = False
     if model:
         expected["model"] = model
     if service_tier:
@@ -132,6 +133,7 @@ name = "second"
     source.write_text(original)
     expected = tomllib.loads(original)
     expected.update(cli_auth_credentials_store="file", model_reasoning_effort="low")
+    expected["features"] = {"plugins": False}
     result = tomllib.loads(codex_live.isolated_config(source))
     assert math.isnan(result.pop("unknown")) and math.isnan(expected.pop("unknown"))
     assert result == expected

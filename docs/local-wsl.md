@@ -260,6 +260,8 @@ Codex 发布验收统一使用 `scripts/codex_live.py`，默认串行运行完�
 选择与 Codex 浏览器用例。入口创建并清理隔离 home、凭据目录和临时目录，链接
 所选 auth，生成显式 file-store 配置，并在转发前阻断认证域。file-store 的语义
 见 [OpenAI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+验收临时配置设置 `features.plugins = false`，避免每个新 Codex home 重复下载插件。
+常规验收覆盖 Octopus 与 Codex 的协议及模型交互，账户插件安装与市场同步在此范围之外。
 网络审计仅记录 method/host/port/转发结果，不解密 TLS；它证明经过本轮代理的
 请求，不是操作系统级网络隔离。
 
@@ -294,8 +296,8 @@ pytest 在首个用例失败后停止。pytest 失败或审计已记录首错时
 也不通过重试或延长等待消除这个事实。指定 `--pytest-target` 是局部验证，
 不能替代完整发布选择。按需使用 `--suite pytest` 或 `--suite browser` 复验
 受影响一侧；`--model`、`--service-tier` 只改本轮隔离配置。
-隔离配置按 TOML 解析后的根值覆盖，其他配置值保持不变；引用键、多行指令、
-嵌套表及数组不按文本行改写。隔离副本可以改变排版，宿主原文件保持原样。
+隔离副本解析 TOML 后，只覆盖本节指定的配置项，保留其他值。
+引用键、多行指令、嵌套表及数组按 TOML 值处理。宿主原文件保持原样。
 
 ```bash
 cd ~/Octopus
