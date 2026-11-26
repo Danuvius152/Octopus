@@ -256,8 +256,10 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
 默认值。实机可用性以实际模型执行、网络审计和测试通过数为准，pytest 全部
 skip 的零退出码不能计为验收通过。
 
-Codex 发布验收统一使用 `scripts/codex_live.py`，默认串行运行完整 Codex pytest
-选择与 Codex 浏览器用例。入口创建并清理隔离 home、凭据目录和临时目录，链接
+发布入口按[发布矩阵](testing.md#release-and-documentation-checks)选择 Codex
+实机范围。常规发布执行两轮浏览器主路径，按影响加入相关能力或完整矩阵。
+直接调用 `scripts/codex_live.py` 默认串行运行完整 Codex pytest 与浏览器主路径。
+入口创建并清理隔离 home、凭据目录和临时目录，链接
 所选 auth，生成显式 file-store 配置，并在转发前阻断认证域。file-store 的语义
 见 [OpenAI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 验收临时配置设置 `features.plugins = false`，避免每个新 Codex home 重复下载插件。
@@ -293,9 +295,9 @@ pytest 在首个用例失败后停止。pytest 失败或审计已记录首错时
 
 套件结束后先停止接入，再冻结已启动处理器的未结算数并关闭其持有的连接，
 最后统一判定网络结果。未结算数非零就保留失败，后续退出不会将该轮改判成功，
-也不通过重试或延长等待消除这个事实。指定 `--pytest-target` 是局部验证，
-不能替代完整发布选择。按需使用 `--suite pytest` 或 `--suite browser` 复验
-受影响一侧；`--model`、`--service-tier` 只改本轮隔离配置。
+也不通过重试或延长等待消除这个事实。指定 `--pytest-target` 时，报告记录各目标
+及原生 pytest 实际选中的用例。按需使用 `--suite pytest` 或 `--suite browser`
+复验受影响一侧。`--model`、`--service-tier` 只改本轮隔离配置。
 隔离副本解析 TOML 后，只覆盖本节指定的配置项，保留其他值。
 引用键、多行指令、嵌套表及数组按 TOML 值处理。宿主原文件保持原样。
 

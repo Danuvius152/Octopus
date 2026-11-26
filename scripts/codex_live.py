@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if not __package__:
     sys.path.insert(0, str(ROOT))
 
-from scripts.check_runner import PYTEST_SELECTION_ENVIRONMENT  # noqa: E402
+from scripts.check_runner import PYTEST_SELECTION_ENVIRONMENT, codex_pytest_target  # noqa: E402
 
 SELECTION = "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval and not wiki_perf"
 PROGRESS_INTERVAL_SECONDS = 15
@@ -442,7 +442,14 @@ def run(args, *, max_bytes: int | None = None) -> int:
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     cache = Path.home() / ".cache" / "octopus-tests"
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
-    result = {"passed": False, "selected_home": str(source), "suites": {}, "execution": {}, "errors": []}
+    targets = list(dict.fromkeys(args.pytest_target or ()))
+    selection = {}
+    if args.suite in ("pytest", "all"):
+        selection["pytest"] = {"scope": "targets" if targets else "full", "targets": targets}
+    if args.suite in ("browser", "all"):
+        selection["browser"] = {"scope": "smoke"}
+    result = {"passed": False, "selected_home": str(source), "selection": selection,
+              "suites": {}, "execution": {}, "errors": []}
 
     def run_suite(name: str, argv: list[str], environment: dict[str, str], cwd: Path, report: Path,
                   proxy: AuditProxy) -> int | None:
@@ -500,16 +507,30 @@ def run(args, *, max_bytes: int | None = None) -> int:
                 environment["NO_PROXY"] = environment["no_proxy"] = "127.0.0.1,localhost,::1"
                 if args.suite in ("pytest", "all"):
                     report = output / "pytest.xml"
+                    selection_report = output / "pytest-selection.json"
+                    selection_args = [
+                        "-p", "scripts.codex_live_selection", f"--codex-selection-output={selection_report}",
+                        *(f"--codex-expect-target={target}" for target in targets),
+                    ] if targets else []
                     code = run_suite("pytest", [str(ROOT / ".venv/bin/python"), "-m", "pytest", "-c", "pyproject.toml", "-n", "0",
-                                    *(args.pytest_target or ["tests/"]), "--run-real",
+                                    *(targets or ["tests/"]), *selection_args, "--run-real",
                                     "--ignore=tests/test_codex_login_real.py", "-m", SELECTION, "-x",
                                     "-v", f"--junitxml={report}"],
                                      environment, ROOT, report, proxy)
                     if code is None:
                         raise RuntimeError("Codex pytest was stopped before launch")
+                    selected = None
+                    if targets:
+                        result["execution"]["pytest"]["selection_report"] = str(selection_report)
+                        if selection_report.exists():
+                            observed = json.loads(selection_report.read_text())
+                            selected = observed["selected"]
+                            if observed["unmatched_targets"]:
+                                raise RuntimeError("Codex live targets matched no eligible cases: "
+                                                   + ", ".join(observed["unmatched_targets"]))
                     summary = pytest_summary(report)
                     result["suites"]["pytest"] = {**summary, "exit_code": code}
-                    if code or not accepted(summary):
+                    if code or not accepted(summary) or (targets and (selected is None or len(selected) != summary["passed"])):
                         raise RuntimeError("Codex pytest did not pass every selected case; inspect pytest.log")
                 if args.suite in ("browser", "all"):
                     report = output / "browser.json"
@@ -564,7 +585,9 @@ def main() -> int:
     parser.add_argument("--codex-home", default=os.environ.get("CODEX_HOME"), required=not os.environ.get("CODEX_HOME"))
     parser.add_argument("--output", required=True, help="New evidence directory; an existing directory is refused")
     parser.add_argument("--suite", choices=("pytest", "browser", "all"), default="all")
-    parser.add_argument("--pytest-target", action="append", help="Optional focused test path/node id; default is the full live selection")
+    parser.add_argument("--pytest-target", action="append", metavar="FILE_OR_NODE_ID",
+                        type=lambda target: codex_pytest_target(ROOT, target),
+                        help="Optional focused test file/node id; default is the full live selection")
     parser.add_argument("--model")
     parser.add_argument("--service-tier")
     parser.add_argument("--upstream-proxy", default=os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"))
@@ -572,6 +595,8 @@ def main() -> int:
                         default=os.environ.get("OCTOPUS_CODEX_LIVE_MAX_MIB"),
                         help="Stop forwarding after this many observed tunnel MiB")
     args = parser.parse_args()
+    if args.pytest_target and args.suite == "browser":
+        parser.error("--pytest-target requires a suite with pytest")
     return run(args, max_bytes=args.max_bytes)
 
 

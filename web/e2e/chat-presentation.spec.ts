@@ -1,8 +1,9 @@
 import { backendCatalogFixture } from "../src/test-support/backendCatalog";
 import { expect, test, type WebSocketRoute } from "./test";
-import { accountToken, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials, openAsCurrentAccount } from "./current-account";
+import { isEmptyChatCollection, mockChatHttp, mockChatTest, mockChatSocket } from "./mock-chat";
 import type { Message } from "../src/stores/sessionStore";
-import { capturePaint } from "./paint-capture";
+import { capturePaint, type PaintFrame } from "./paint-capture";
 import { writeFile } from "node:fs/promises";
 
 test("cold presentation keeps the paused transcript tail still from first reveal", async ({ page, request }) => {
@@ -27,8 +28,7 @@ test("cold presentation keeps the paused transcript tail still from first reveal
     await route.fulfill({ response, json: { ...detail, dispatch_state: { ...detail.dispatch_state, paused: true } } });
   });
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto("/");
-  await enterAccountCredentials(page);
+  await openAsCurrentAccount(page);
   await expect(page.locator(".conn-status.on")).toBeVisible();
   await page.locator(".agent-item", { hasText: "Octo" }).click();
   await page.addStyleTag({ content: ".chat-messages { zoom: 1.1; } .msg-content { font: 14.5px/1.47 Arial, sans-serif; }" });
@@ -81,20 +81,21 @@ test("cold presentation keeps the paused transcript tail still from first reveal
   await expect(page.getByRole("button", { name: "Jump to latest" })).toBeVisible();
 });
 
-// The same fixture is run against the source revision before preparation is
-// implemented. Compositor frames are paint evidence; rAF describes geometry.
+const performanceRun = process.env.OCTOPUS_E2E_CHAT_PERFORMANCE === "1";
+const warmRounds = performanceRun ? 10 : 1;
+
 for (const target of ["Other parent", "Vera child"]) {
   for (const streaming of [false, true]) {
-    test(`warm presentation to ${target} with ${streaming ? "continuous" : "paused"} output`, async ({ page }, info) => {
-      test.setTimeout(120_000);
-      await capturePaint(page, info, async (paintFrames, onCleanup) => {
+    mockChatTest(`warm presentation to ${target} with ${streaming ? "continuous" : "paused"} output`, async ({ page }, info) => {
+      if (performanceRun) mockChatTest.setTimeout(120_000);
+      const checkWarmPresentation = async (paintFrames: PaintFrame[]) => {
         let outputTimer: ReturnType<typeof setInterval> | undefined;
-        onCleanup(() => clearInterval(outputTimer));
         await page.setViewportSize({ width: 1280, height: 900 });
         const names = ["Original parent", "Other parent", "Vera child"];
         const sessions = names.map((name, index) => ({ id: `presentation-${index}`, name, agent_id: "presentation-agent",
           backend: "codex", status: "running", archived: false, working_dir: "/tmp", created_at: "2026-11-12T00:00:00Z",
           ...(index === 2 ? { origin: "delegation", parent_session_id: "presentation-0" } : {}) }));
+        const sessionIds = sessions.map(({ id }) => id);
         const messages = (name: string): Message[] => Array.from({ length: 240 }, (_, index) => ({
           role: "assistant", type: "text", seq: index + 1,
           content: `${name} row ${index + 1}\n\n` +
@@ -102,17 +103,19 @@ for (const target of ["Other parent", "Vera child"]) {
             (index === 239 ? "### Latest saved output" : "Another saved paragraph."),
         }));
         let socket!: WebSocketRoute;
-        await page.route("**/api/**", async (route) => {
-          const path = new URL(route.request().url()).pathname;
-          if (!path.startsWith("/api/")) { await route.continue(); return; }
-          let data: unknown = [];
-          if (path === "/api/auth/state") data = { accounts_exist: true };
-          else if (path === "/api/auth/login") data = { token: "presentation-token" };
+        await mockChatHttp(page, (url) => url.pathname.startsWith("/api/"), async (route) => {
+          const request = route.request();
+          const path = new URL(request.url()).pathname;
+          let data: unknown;
+          if (request.method() === "POST" && path === "/api/auth/login") data = { token: "presentation-token" };
+          else if (request.method() !== "GET") return route.fallback();
+          else if (path === "/api/auth/state") data = { accounts_exist: true };
           else if (path === "/api/auth/identity") data = { user_id: "presentation-user", label: "Reader", is_admin: false };
           else if (path === "/api/agents") data = [{ id: "presentation-agent", name: "Octo", backend: "codex", pinned: true, is_system: true }];
           else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
           else if (path === "/api/sessions") data = sessions;
-          else if (path.endsWith("/submissions")) data = { items: [], next_cursor: null };
+          else if (isEmptyChatCollection(path, sessionIds)) data = [];
+          else if (sessions.some(({ id }) => path === `/api/sessions/${id}/submissions`)) data = { items: [], next_cursor: null };
           else {
             const session = sessions.find((session) => path === `/api/sessions/${session.id}`);
             if (session) data = { ...session, messages: messages(session.name), next_message_seq: 241,
@@ -121,11 +124,11 @@ for (const target of ["Other parent", "Vera child"]) {
               dispatch_state: { generation: "presentation-service", revision: 1, paused: false,
                 active_request_id: "request", active_operation: "message", items: [] } };
           }
-          await route.fulfill({ json: data });
+          return data === undefined ? route.fallback() : route.fulfill({ json: data });
         });
-        await page.routeWebSocket("**/ws?*", (ws) => { socket = ws; });
+        await mockChatSocket(page, "presentation-token", (ws) => { socket = ws; });
         await page.goto("/");
-        await enterAccountCredentials(page);
+        await enterAccountCredentials(page, { username: "reader", password: "mock-password" });
         await page.locator(".agent-item", { hasText: "Octo" }).click();
         await page.getByTitle("Show delegation sessions").click();
         const scroller = page.locator(".chat-messages");
@@ -135,15 +138,16 @@ for (const target of ["Other parent", "Vera child"]) {
             for (let index = 0; index < 12; index++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
           });
         };
-        for (const name of names) {
+        for (const name of ["Other parent", "Vera child", "Original parent"]) {
           await page.locator(".session-item", { hasText: name }).click();
           await expect(scroller.getByRole("heading", { name: "Latest saved output" })).toBeInViewport();
           await settle();
         }
         await page.evaluate(() => document.fonts.ready);
+        await expect(page.locator(".chat-header")).toContainText("Original parent");
         const recorder = await page.evaluateHandle(() => {
           type Sample = { at: number; owner: string; visible: boolean; gap: number; preparing: boolean; rows: string[];
-            extent: number; height: number; footerHeight: number; footerLength: number; footerHash: number;
+            extent: number; height: number; footerHeight: number; footerLength: number; footerHash: number; liveLength: number;
             rowPositions: Record<string, number>; latestOffset: number | null; tailInView: boolean };
           const samples: Sample[] = [];
           const reveals: Sample[] = [];
@@ -160,7 +164,8 @@ for (const target of ["Other parent", "Vera child"]) {
             const marker = latest?.getBoundingClientRect();
             const footer = element?.querySelector("[data-chat-footer]");
             const footerText = footer?.parentElement?.textContent ?? "";
-            const liveText = footer?.querySelector(".msg-streaming-text")?.lastChild;
+            const streamingText = footer?.querySelector(".msg-streaming-text");
+            const liveText = streamingText?.lastChild;
             let tail = marker;
             if (liveText instanceof Text && liveText.data.trimEnd()) {
               const end = liveText.data.trimEnd().length;
@@ -181,6 +186,7 @@ for (const target of ["Other parent", "Vera child"]) {
               extent: element?.scrollHeight ?? 0, height: element?.clientHeight ?? 0,
               footerHeight: element?.querySelector("[data-chat-footer]")?.parentElement?.getBoundingClientRect().height ?? 0,
               footerLength: footerText.length, footerHash: Array.from(footerText).reduce((hash, char) => Math.imul(hash ^ char.charCodeAt(0), 16777619), 2166136261),
+              liveLength: streamingText?.textContent?.length ?? 0,
               rowPositions: Object.fromEntries(Array.from(element?.querySelectorAll<HTMLElement>("[data-message-key]") ?? [])
                 .map((row) => [row.dataset.messageKey!, row.getBoundingClientRect().top - (bounds?.top ?? 0) + (element?.scrollTop ?? 0)])),
               preparing: !!document.querySelector("[data-chat-preparation]"), rows,
@@ -189,7 +195,7 @@ for (const target of ["Other parent", "Vera child"]) {
                 ? marker.top - bounds.top : null };
           };
           // Separate the DOM reveal from later frame sampling: output or another
-          // layout commit may arrive between them. Paint evidence stays in trace.
+          // layout commit may arrive between them.
           let observed: Element | null = null;
           let visible = false;
           const observer = new MutationObserver(() => {
@@ -213,84 +219,93 @@ for (const target of ["Other parent", "Vera child"]) {
             read: () => ({ clickAt, samples: [...samples], reveals: [...reveals] }),
             stop: () => { observer.disconnect(); cancelAnimationFrame(frame); document.removeEventListener("click", clicked, true); } };
         });
-        onCleanup(() => recorder.evaluate((record) => record.stop()));
-        onCleanup(() => recorder.dispose());
-        const results: { destination: string; latency: number; preparationFrames: number; firstGap: number; samples: unknown;
-          revealLatency: number | null; revealGap: number | null; footerGrowth: number; viewportLoss: number;
-          historyExtentChange: number | null; latestMovement: number | null;
-          firstTailInView: boolean; revealTailInView: boolean }[] = [];
-        const historyChanges: { destination: string; at: number; extent: number; movedRows: string[] }[] = [];
-        if (streaming) outputTimer = setInterval(() => {
-          for (const session of sessions) socket.send(JSON.stringify({ type: "assistant_delta", session_id: session.id,
-            content: "Continuing output while switching.\n" }));
-        }, 40);
-        for (let round = 0; round < 10; round++) for (const destination of ["Original parent", target]) {
-          await recorder.evaluate((record) => record.begin());
-          await page.locator(".session-item", { hasText: destination }).click();
-          await expect.poll(async () => {
-            const record = await recorder.evaluate((record) => record.read());
-            return record.samples.some((sample) => sample.at >= record.clickAt && sample.owner.includes(destination) && sample.visible);
-          }, { message: "the selected warm transcript becomes visible" }).toBe(true);
-          await settle(streaming);
-          const record = await recorder.evaluate((record) => record.read());
-          const owned = record.samples.filter((sample) => sample.at >= record.clickAt && sample.owner.includes(destination));
-          const first = owned.find((sample) => sample.visible);
-          expect(first, "the selected warm transcript becomes visible").toBeDefined();
-          const reveal = record.reveals.find((sample) => sample.at >= record.clickAt && sample.owner.includes(destination) && sample.visible);
-          if (reveal) for (const sample of owned.filter((sample) => sample.at >= reveal.at && sample.visible)) {
-            const extent = sample.extent - sample.footerHeight - (reveal.extent - reveal.footerHeight);
-            const movedRows = Object.entries(sample.rowPositions).filter(([key, top]) => key in reveal.rowPositions &&
-              Math.abs(top - reveal.rowPositions[key]) > 1).map(([key]) => key);
-            if (Math.abs(extent) > 1 || movedRows.length) historyChanges.push({ destination, at: sample.at, extent, movedRows });
-          }
-          results.push({ destination, latency: first!.at - record.clickAt,
-            revealLatency: reveal ? reveal.at - record.clickAt : null, revealGap: reveal?.gap ?? null,
-            firstTailInView: first!.tailInView, revealTailInView: reveal?.tailInView ?? false,
-            footerGrowth: reveal ? Math.max(0, first!.footerHeight - reveal.footerHeight) : 0,
-            viewportLoss: reveal ? Math.max(0, reveal.height - first!.height) : 0,
-            historyExtentChange: reveal ? first!.extent - first!.footerHeight - (reveal.extent - reveal.footerHeight) : null,
-            latestMovement: first?.latestOffset == null ? null : Math.max(...owned.filter((sample) => sample.visible)
-              .map((sample) => sample.latestOffset === null ? Infinity : Math.abs(sample.latestOffset - first.latestOffset!))),
-            preparationFrames: owned.filter((sample) => sample.preparing).length, firstGap: first!.gap, samples: record });
-        }
-        const latencies = results.map((result) => result.latency).sort((a, b) => a - b);
-        const report = { baseline: process.env.OCTOPUS_CHAT_BASELINE === "1", target, streaming,
-          viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1,
-          timeOrigin: await page.evaluate(() => performance.timeOrigin), paintFrames, historyChanges,
-          median: latencies[Math.ceil(latencies.length * 0.5) - 1], p95: latencies[Math.ceil(latencies.length * 0.95) - 1], results };
-        clearInterval(outputTimer);
-        await page.locator(".session-item", { hasText: "Original parent" }).click();
-        await expect(page.locator(".chat-header")).toContainText("Original parent");
-        await page.locator(".session-item", { hasText: target }).click();
-        const viewport = (await scroller.boundingBox())!;
-        await page.mouse.move(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
-        await expect(scroller).toBeVisible();
-        const gap = () => scroller.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
-        const beforeWheel = await gap();
-        await page.mouse.wheel(0, -420);
         try {
-          // Rows measured above the reader can change scrollTop even when the
-          // reader moves through the expected amount of visible content.
-          await expect.poll(gap, { message: "the first upward wheel leaves the tail" }).toBeGreaterThan(beforeWheel + 120);
-        } finally {
-          const path = info.outputPath("warm-presentation.json");
-          await writeFile(path, JSON.stringify({ ...report, wheel: { before: beforeWheel, after: await gap() } }));
-          await info.attach("warm-presentation.json", { path, contentType: "application/json" });
-        }
-        if (!report.baseline) {
+          const results: { destination: string; latency: number; preparationFrames: number; firstGap: number; samples: unknown;
+            revealLatency: number | null; revealGap: number | null; footerGrowth: number; viewportLoss: number;
+            historyExtentChange: number | null; latestMovement: number | null;
+            firstTailInView: boolean; revealTailInView: boolean; liveAdvanced: boolean }[] = [];
+          const historyChanges: { destination: string; at: number; extent: number; movedRows: string[] }[] = [];
+          if (streaming) {
+            outputTimer = setInterval(() => {
+              for (const session of sessions) socket.send(JSON.stringify({ type: "assistant_delta", session_id: session.id,
+                content: "Continuing output while switching.\n" }));
+            }, 40);
+            await expect(scroller.getByTestId("streaming-text")).toContainText("Continuing output while switching.");
+          }
+          for (let round = 0; round < warmRounds; round++) for (const destination of [target, "Original parent"]) {
+            await recorder.evaluate((record) => record.begin());
+            await page.locator(".session-item", { hasText: destination }).click();
+            await expect.poll(async () => {
+              const record = await recorder.evaluate((record) => record.read());
+              return record.samples.some((sample) => sample.at >= record.clickAt && sample.owner.includes(destination) && sample.visible);
+            }, { message: "the selected warm transcript becomes visible" }).toBe(true);
+            await settle(streaming);
+            const record = await recorder.evaluate((record) => record.read());
+            const owned = record.samples.filter((sample) => sample.at >= record.clickAt && sample.owner.includes(destination));
+            const first = owned.find((sample) => sample.visible);
+            expect(first, "the selected warm transcript becomes visible").toBeDefined();
+            const reveal = record.reveals.find((sample) => sample.at >= record.clickAt && sample.owner.includes(destination) && sample.visible);
+            if (reveal) for (const sample of owned.filter((sample) => sample.at >= reveal.at && sample.visible)) {
+              const extent = sample.extent - sample.footerHeight - (reveal.extent - reveal.footerHeight);
+              const movedRows = Object.entries(sample.rowPositions).filter(([key, top]) => key in reveal.rowPositions &&
+                Math.abs(top - reveal.rowPositions[key]) > 1).map(([key]) => key);
+              if (Math.abs(extent) > 1 || movedRows.length) historyChanges.push({ destination, at: sample.at, extent, movedRows });
+            }
+            results.push({ destination, latency: first!.at - record.clickAt,
+              revealLatency: reveal ? reveal.at - record.clickAt : null, revealGap: reveal?.gap ?? null,
+              firstTailInView: first!.tailInView, revealTailInView: reveal?.tailInView ?? false,
+              liveAdvanced: owned.some((sample) => sample.visible && sample.liveLength > first!.liveLength),
+              footerGrowth: reveal ? Math.max(0, first!.footerHeight - reveal.footerHeight) : 0,
+              viewportLoss: reveal ? Math.max(0, reveal.height - first!.height) : 0,
+              historyExtentChange: reveal ? first!.extent - first!.footerHeight - (reveal.extent - reveal.footerHeight) : null,
+              latestMovement: first?.latestOffset == null ? null : Math.max(...owned.filter((sample) => sample.visible)
+                .map((sample) => sample.latestOffset === null ? Infinity : Math.abs(sample.latestOffset - first.latestOffset!))),
+              preparationFrames: owned.filter((sample) => sample.preparing).length, firstGap: first!.gap, samples: record });
+          }
+          const latencies = results.map((result) => result.latency).sort((a, b) => a - b);
+          const report = { rounds: warmRounds, target, streaming,
+            viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1,
+            timeOrigin: await page.evaluate(() => performance.timeOrigin), paintFrames, historyChanges,
+            ...(performanceRun && { median: latencies[Math.ceil(latencies.length * 0.5) - 1],
+              p95: latencies[Math.ceil(latencies.length * 0.95) - 1] }), results };
+          clearInterval(outputTimer);
+          await page.locator(".session-item", { hasText: target }).click();
+          const viewport = (await scroller.boundingBox())!;
+          await page.mouse.move(viewport.x + viewport.width / 2, viewport.y + viewport.height / 2);
+          await expect(scroller).toBeVisible();
+          const gap = () => scroller.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+          const beforeWheel = await gap();
+          await page.mouse.wheel(0, -420);
+          try {
+            // Rows measured above the reader can change scrollTop even when the
+            // reader moves through the expected amount of visible content.
+            await expect.poll(gap, { message: "the first upward wheel leaves the tail" }).toBeGreaterThan(beforeWheel + 120);
+          } finally {
+            const path = info.outputPath("warm-presentation.json");
+            await writeFile(path, JSON.stringify({ ...report, wheel: { before: beforeWheel, after: await gap() } }));
+            await info.attach("warm-presentation.json", { path, contentType: "application/json" });
+          }
           expect(results.map((result) => result.preparationFrames), "warm views show no preparation notice").toEqual(results.map(() => 0));
           expect(results.filter((result) => result.revealGap === null || result.revealGap > 1)
             .map(({ destination, revealGap }) => ({ destination, revealGap })), "DOM reveal is already positioned").toEqual([]);
           expect(results.filter((result) => !result.firstTailInView || !result.revealTailInView)
             .map(({ destination, firstGap, revealGap }) => ({ destination, firstGap, revealGap })),
           "the current last line fits in the first visible viewport").toEqual([]);
+          if (streaming) expect(results.filter((result) => !result.liveAdvanced).map(({ destination }) => destination),
+            "the visible transcript receives more live text on each switch").toEqual([]);
           // Estimates above the reader may still change. Measure the readable
           // text itself in the viewport so those changes are only diagnostic.
           expect(results.filter((result) => !streaming && (result.firstGap > 1 || (result.latestMovement ?? Infinity) > 2))
             .map(({ destination, firstGap, latestMovement }) =>
               ({ destination, firstGap, latestMovement })), "the same paused tail text remains in place").toEqual([]);
+        } finally {
+          clearInterval(outputTimer);
+          try { await recorder.evaluate((record) => record.stop()); }
+          finally { await recorder.dispose(); }
         }
-      });
+      };
+      if (performanceRun) await capturePaint(page, info, checkWarmPresentation);
+      else await checkWarmPresentation([]);
     });
   }
 }

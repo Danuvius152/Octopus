@@ -1,4 +1,4 @@
-import { enterAccountCredentials, accountToken } from "./current-account";
+import { openAsCurrentAccount, accountToken } from "./current-account";
 import { systemAgentId } from "./system-agent";
 import { expect, test } from "./test";
 
@@ -39,8 +39,7 @@ test("mobile creation acknowledges one submission and shows history before auxil
       next_message_seq: 1, oldest_loaded_seq: 0, has_more_messages: false } });
   });
   try {
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     await page.getByRole("button", { name: "Toggle sidebar", exact: true }).click();
     await page.locator(".agent-item", { has: page.locator(`[aria-label="New session for Octo"]`) }).click();
     await page.getByRole("button", { name: "New session for Octo", exact: true }).tap();
@@ -120,8 +119,7 @@ test("folded background cards wait for the list and keep the reading position th
     await route.fulfill({ json: data });
   });
   try {
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     await page.getByRole("button", { name: "Toggle sidebar", exact: true }).click();
     await page.locator(".agent-item", { has: page.locator('[aria-label="New session for Octo"]') }).click();
     await page.locator(`.session-item[data-session-id="${sessionId}"]`).click();

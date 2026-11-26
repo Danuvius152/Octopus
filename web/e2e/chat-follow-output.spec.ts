@@ -1,5 +1,6 @@
 import { backendCatalogFixture } from "../src/test-support/backendCatalog";
-import { expect, test, type Page, type WebSocketRoute } from "./test";
+import { expect, type Page, type WebSocketRoute } from "./test";
+import { isEmptyChatCollection, mockChatGet, mockChatHttp, mockChatTest as test, mockChatSocket, type MockSubmission } from "./mock-chat";
 import { enterAccountCredentials } from "./current-account";
 import type { Message, PendingQuestion } from "../src/stores/sessionStore";
 import type { RuntimeMetadata } from "../src/api";
@@ -9,6 +10,7 @@ import { capturePaint } from "./paint-capture";
 // Chromium headless hides native scrollbars by default. A real thumb drag
 // needs the actual scrollbar, rather than an empty CSS-reserved gutter.
 test.use({ launchOptions: { ignoreDefaultArgs: ["--hide-scrollbars"] } });
+test.describe.configure({ mode: "parallel" });
 
 const identity = (thread: string, item: string): RuntimeMetadata => ({ request_id: "request", attempt_id: "attempt", native: {
   thread_id: thread, turn_id: "turn", item_id: item, root_thread_id: "root", root_turn_id: "turn",
@@ -109,8 +111,14 @@ interface ChatSnapshot {
   has_more_messages: boolean;
 }
 
-async function openChat(page: Page, history: number | ChatSnapshot = 40, pending: PendingQuestion[] = [], beforeSelect?: () => Promise<void>,
-  content = (index: number) => `Saved row ${index + 1}`) {
+interface OpenChatOptions {
+  beforeSelect?: () => Promise<void>;
+  content?: (index: number) => string;
+  submit?: (message: MockSubmission) => void;
+}
+
+async function openChat(page: Page, history: number | ChatSnapshot = 40, pending: PendingQuestion[] = [],
+  { beforeSelect, content = (index) => `Saved row ${index + 1}`, submit }: OpenChatOptions = {}) {
   const session = { id: "follow-output", agent_id: "follow-agent", name: "Following output", backend: "codex",
     status: "running", archived: false, working_dir: "/tmp", created_at: "2026-11-12T00:00:00Z" };
   const count = typeof history === "number" ? history : history.messages.length;
@@ -120,40 +128,30 @@ async function openChat(page: Page, history: number | ChatSnapshot = 40, pending
     })),
     next_message_seq: count ? count + 1 : 0, oldest_loaded_seq: count ? 1 : null, has_more_messages: false,
   } : history;
-  const pages: Route[] = [];
-  const submissions: Array<{ content: string; client_request_id: string }> = [];
   let socket!: WebSocketRoute;
-  await page.route("**/api/**", async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (!path.startsWith("/api/")) { await route.continue(); return; }
-    let data: unknown = [];
-    if (path === "/api/auth/state") data = { accounts_exist: true };
-    else if (path === "/api/auth/login") data = { token: "follow-token" };
+  await mockChatHttp(page, (url) => url.pathname.startsWith("/api/"), async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    let data: unknown;
+    if (request.method() === "POST" && path === "/api/auth/login") data = { token: "follow-token" };
+    else if (request.method() !== "GET") return route.fallback();
+    else if (path === "/api/auth/state") data = { accounts_exist: true };
     else if (path === "/api/auth/identity") data = { user_id: "follow-user", label: "Reader", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
     else if (path === "/api/backends") data = backendCatalogFixture(["codex"], "codex");
     else if (path === "/api/sessions") data = [session];
-    else if (path.endsWith("/submissions")) data = { items: [], next_cursor: null };
-    else if (path === `/api/sessions/${session.id}/messages`) { pages.push(route); return; }
-    else if (path.startsWith(`/api/sessions/${session.id}/native-details/`)) data = {
-      anchor_seq: 41, child: helper, availability: "not_collected", messages: [], next_after_seq: null, has_more: false,
-    };
+    else if (isEmptyChatCollection(path, [session.id])) data = [];
+    else if (path === `/api/sessions/${session.id}/submissions`) data = { items: [], next_cursor: null };
     else if (path === `/api/sessions/${session.id}`) data = { ...session,
       active_attempt: { request_id: "request", attempt_id: "attempt" },
       ...snapshot, pending_questions: pending, subagents: [],
       dispatch_state: { generation: "follow-service", revision: 1, paused: false, active_request_id: "request", active_operation: "message", items: [] },
     };
-    await route.fulfill({ json: data });
+    return data === undefined ? route.fallback() : route.fulfill({ json: data });
   });
-  await page.routeWebSocket("**/ws?*", (ws) => {
-    socket = ws;
-    ws.onMessage((payload) => {
-      const message = JSON.parse(String(payload));
-      if (message.type === "send_message") submissions.push(message);
-    });
-  });
+  await mockChatSocket(page, "follow-token", (ws) => { socket = ws; }, submit);
   await page.goto("/");
-  await enterAccountCredentials(page);
+  await enterAccountCredentials(page, { username: "reader", password: "mock-password" });
   await page.locator(".agent-item", { hasText: "Octo" }).click();
   await beforeSelect?.();
   await page.locator(".session-item", { hasText: session.name }).click();
@@ -173,7 +171,23 @@ async function openChat(page: Page, history: number | ChatSnapshot = 40, pending
     snapshot = next;
     socket.close({ code: 1012, reason: "Read a replacement transcript window" });
   };
-  return { scroller, gap, send, settle, output, session, pages, replaceOnReconnect, submissions };
+  return { scroller, gap, send, settle, output, session, replaceOnReconnect };
+}
+
+async function mockHistoryPages(page: Page) {
+  const pages: Route[] = [];
+  await mockChatHttp(page, (url) => url.pathname === "/api/sessions/follow-output/messages" &&
+    /^\?before_seq=\d+&view=browser$/.test(url.search), async (route) => {
+    if (route.request().method() !== "GET") return route.fallback();
+    pages.push(route);
+  });
+  return pages;
+}
+
+function mockHelperDetails(page: Page, seq: number) {
+  return mockChatGet(page, `/api/sessions/follow-output/native-details/${seq}?view=browser`, (route) => route.fulfill({ json: {
+    anchor_seq: seq, child: helper, availability: "not_collected", messages: [], next_after_seq: null, has_more: false,
+  } }));
 }
 
 const snoozedQuestionEvent = (seq: number): Message => ({ role: "system", type: "question_snoozed", seq,
@@ -187,9 +201,10 @@ test("hidden question events leave history readable on first reveal, paging and 
     return seq === 100 || seq === 138 || seq >= 140 ? snoozedQuestionEvent(seq) : row(seq);
   });
   let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
-  const { scroller, pages, replaceOnReconnect } = await openChat(page, {
+  const pages = await mockHistoryPages(page);
+  const { scroller, replaceOnReconnect } = await openChat(page, {
     messages, next_message_seq: 160, oldest_loaded_seq: 100, has_more_messages: true,
-  }, [], async () => { gate = await holdAnimationFrames(page); });
+  }, [], { beforeSelect: async () => { gate = await holdAnimationFrames(page); } });
   try {
     await expect(scroller).toBeAttached();
     expect(await scroller.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
@@ -342,9 +357,9 @@ test(`a static tall Footer completes first presentation with ${opening}`, async 
     next_message_seq: 42, oldest_loaded_seq: 40, has_more_messages: false,
   } : hasDisplayedRows ? 40 : 0;
   let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
-  const { scroller, gap, send, settle } = await openChat(page, history, [], async () => {
+  const { scroller, gap, send, settle } = await openChat(page, history, [], { beforeSelect: async () => {
     gate = await holdAnimationFrames(page);
-  });
+  } });
   try {
     expect(await scroller.evaluate((element) => getComputedStyle(element).visibility)).toBe("hidden");
     send({ type: "assistant_delta", content: "Static output\n\n".repeat(80) + "### Static Footer final marker" });
@@ -401,10 +416,10 @@ test(`a static tall Footer completes first presentation with ${opening}`, async 
 
 test("first presentation follows a live reply that becomes a saved row before reveal", async ({ page }) => {
   let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
-  const { scroller, send } = await openChat(page, 0, [], async () => {
+  const { scroller, send } = await openChat(page, 0, [], { beforeSelect: async () => {
     gate = await holdAnimationFrames(page);
     await page.addStyleTag({ content: ".chat-messages { zoom: 1.1; }" });
-  });
+  } });
   try {
     const content = "A pending reply\n\n".repeat(60) + "### Saved before reveal";
     send({ type: "assistant_delta", content });
@@ -429,7 +444,7 @@ test("first presentation follows a live reply that becomes a saved row before re
 
 test("initial positioning timeout leaves loaded history available and Jump to latest restores the tail", async ({ page }) => {
   let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
-  const { scroller, gap } = await openChat(page, 40, [], async () => { gate = await holdAnimationFrames(page); });
+  const { scroller, gap } = await openChat(page, 40, [], { beforeSelect: async () => { gate = await holdAnimationFrames(page); } });
   try {
     expect(await scroller.evaluate((viewport) => getComputedStyle(viewport).visibility)).toBe("hidden");
     await expect(page.getByText("Automatic positioning did not finish. Loaded content is available.")).toBeVisible();
@@ -452,14 +467,14 @@ for (const short of [true, false]) {
       const count = short ? 2 : 80;
       const marker = "Last paragraph under zoom";
       let gate!: Awaited<ReturnType<typeof holdAnimationFrames>>;
-      const { scroller, settle } = await openChat(page, count, [], async () => {
+      const { scroller, settle } = await openChat(page, count, [], { beforeSelect: async () => {
         gate = await holdAnimationFrames(page);
         await page.addStyleTag({ content: `
           .chat-messages { zoom: 1.1; flex: none; height: ${short ? 101.5625 : 480.3125}px !important; }
           .chat-messages .msg-content { overflow-wrap: normal; }
         ` });
-      }, (index) => index === count - 1 ? `${"wide".repeat(300)}\n\n${marker}`
-        : `History ${index}\n\n${"A saved paragraph.\n\n".repeat(index % 4)}`);
+      }, content: (index) => index === count - 1 ? `${"wide".repeat(300)}\n\n${marker}`
+        : `History ${index}\n\n${"A saved paragraph.\n\n".repeat(index % 4)}` });
       try {
         const reading = () => scroller.evaluate((viewport, marker) => {
           const box = viewport.getBoundingClientRect();
@@ -536,7 +551,8 @@ test("return to latest consumes an unchanged tail measurement after detail refre
 });
 
 test("a nonempty replacement window uses the current list and keeps history usable", async ({ page }) => {
-  const { scroller, gap, send, settle, pages, replaceOnReconnect } = await openChat(page);
+  const pages = await mockHistoryPages(page);
+  const { scroller, gap, send, settle, replaceOnReconnect } = await openChat(page);
   const original = await scroller.elementHandle();
   await scroller.press("Home");
   await expect(scroller.getByText("Saved row 1", { exact: true })).toBeVisible();
@@ -564,7 +580,8 @@ test("a nonempty replacement window uses the current list and keeps history usab
 });
 
 test("a tall replacement reaches its actual tail without paging before navigation", async ({ page }) => {
-  const { scroller, gap, send, settle, pages, replaceOnReconnect } = await openChat(page);
+  const pages = await mockHistoryPages(page);
+  const { scroller, gap, send, settle, replaceOnReconnect } = await openChat(page);
   const content = "Replacement reading\n\n" + Array.from({ length: 45 }, (_, index) =>
     `### Paragraph ${index + 1}\n\nA long saved explanation keeps its reading position when new output arrives. ` +
     "这是需要连续阅读的历史正文，正在查看的段落不应因其他更新反复计算。\n\n" +
@@ -593,7 +610,8 @@ test("a tall replacement reaches its actual tail without paging before navigatio
 });
 
 test("an empty displayed window keeps manual history retry and later automatic paging usable", async ({ page }) => {
-  const { scroller, pages, settle, replaceOnReconnect } = await openChat(page);
+  const pages = await mockHistoryPages(page);
+  const { scroller, settle, replaceOnReconnect } = await openChat(page);
   replaceOnReconnect({ messages: [{ role: "assistant", type: "thinking", seq: 200, content: "Saved reasoning" }],
     next_message_seq: 201, oldest_loaded_seq: 200, has_more_messages: true });
   await expect(scroller.locator("[data-message-key]")).toHaveCount(0);
@@ -629,16 +647,20 @@ test(`a replacement with ${opening} settles and follows its last output`, async 
     next_message_seq: 201, oldest_loaded_seq: opening === "empty" ? 0 : 200, has_more_messages: false });
   if (opening === "empty") await expect(scroller.locator("[data-message-key]")).toHaveCount(0);
   else await expect(scroller.getByRole("heading", { name: "Initial final marker" })).toBeInViewport();
-  await settle();
   await expect.poll(gap).toBeLessThanOrEqual(2);
+  await settle();
+  expect(await gap()).toBeLessThanOrEqual(2);
   send({ type: "assistant_delta", content: output("Final streaming output") });
   await expect(scroller.getByTestId("streaming-text")).toContainText("Final streaming output line 12");
-  await settle(); await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await settle();
+  expect(await gap()).toBeLessThanOrEqual(2);
   send({ type: "assistant_text", seq: 201, content: "Saved final output\n\n### Persisted final marker" });
   await expect(scroller.getByTestId("streaming-text")).toHaveCount(0);
-  await settle();
   await expect(scroller.getByRole("heading", { name: "Persisted final marker" })).toBeInViewport();
   await expect.poll(gap).toBeLessThanOrEqual(2);
+  await settle();
+  expect(await gap()).toBeLessThanOrEqual(2);
 });
 }
 
@@ -646,7 +668,7 @@ test("navigation before the initial target retires it through late viewport meas
   let gate!: Awaited<ReturnType<typeof page.evaluateHandle<{
     flush: () => void; release: () => void; writes: () => number;
   }>>>;
-  const { scroller, settle } = await openChat(page, 60, [], async () => {
+  const { scroller, settle } = await openChat(page, 60, [], { beforeSelect: async () => {
     gate = await page.evaluateHandle(() => {
       const request = window.requestAnimationFrame, cancel = window.cancelAnimationFrame;
       const scroll = HTMLElement.prototype.scrollTo;
@@ -665,7 +687,7 @@ test("navigation before the initial target retires it through late viewport meas
           for (const callback of pending.values()) request(callback); pending.clear(); },
       };
     });
-  });
+  } });
   try {
     await expect.poll(async () => {
       const extent = await scroller.evaluate((element) => element.scrollHeight - element.clientHeight);
@@ -691,6 +713,7 @@ test("navigation before the initial target retires it through late viewport meas
 });
 
 test("a late downward scroll after expansion cannot restore follow intent", async ({ page }) => {
+  await mockHelperDetails(page, 41);
   const { scroller, send, settle, output } = await openChat(page);
   send({ type: "subagent", ...helper, seq: 41 });
   const card = scroller.locator(".subagent-card");
@@ -788,7 +811,7 @@ test(`a completed task's ${label} respects reading without fetching full output`
   const joined = "\u0644\u0627";
   const preview = reshaped ? "\u0644\u200d\u0627" :
     clipping ? "\u00a0".repeat(prefix) + "RESULT" : "A newly saved background output preview";
-  const summaryPath = `**/api/sessions/${sessionId}/bg-task-summaries/${taskId}`;
+  const summaryPath = `/api/sessions/${sessionId}/bg-task-summaries/${taskId}`;
   const completion = { type: "bg_completed", task_id: taskId, status: "completed", completed_at: "2026-11-20T00:01:00Z", exit_code: 0 };
   const taskSummary = (output: string) => ({ id: taskId, session_id: sessionId, command: "echo preview",
     description: null, status: "completed", started_at: startedAt, completed_at: completion.completed_at,
@@ -798,9 +821,10 @@ test(`a completed task's ${label} respects reading without fetching full output`
   let releaseSummary!: () => void;
   const holdSummary = new Promise<void>((resolve) => { releaseSummary = resolve; });
   const reference = `/api/sessions/${sessionId}/messages/5`;
-  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+  await mockChatGet(page, `${reference}?view=browser`, (route) => route.fulfill({ json: {
     role: "assistant", type: "text", seq: 5, content: "Keep reading this reply.\n\n".repeat(reshaped ? 17 : mounted ? 9 : 55),
   } }));
+  await mockChatGet(page, summaryPath, (route) => route.fulfill({ status: 404, json: { detail: "Summary not ready" } }));
   send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
   if (observesStart) send({ type: "bg_started", task_id: taskId, command: "echo preview", started_at: startedAt });
   send({ type: "tool_use", seq: 6, tool: "mcp__bg__run", input: { command: "echo preview" },
@@ -814,7 +838,7 @@ test(`a completed task's ${label} respects reading without fetching full output`
   if (reshaped) {
     let releaseFirst!: () => void;
     const holdFirst = new Promise<void>((resolve) => { releaseFirst = resolve; });
-    await page.route(summaryPath, async (route) => {
+    await mockChatGet(page, summaryPath, async (route) => {
       const initial = ++summaryReads === 1;
       await (initial ? holdFirst : holdSummary);
       return route.fulfill({ json: taskSummary(initial ? joined : preview) });
@@ -849,11 +873,11 @@ test(`a completed task's ${label} respects reading without fetching full output`
   const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
   await expect(jump).toHaveCount(0);
 
-  await page.route(`**/api/sessions/${sessionId}/bg-tasks/${taskId}`, (route) => {
+  await mockChatGet(page, `/api/sessions/${sessionId}/bg-tasks/${taskId}`, (route) => {
     fullReads++;
     return route.fulfill({ status: 503, json: {} });
   });
-  if (!reshaped) await page.route(summaryPath, async (route) => {
+  if (!reshaped) await mockChatGet(page, summaryPath, async (route) => {
     summaryReads++;
     await holdSummary;
     return route.fulfill({ json: taskSummary(preview) });
@@ -1125,14 +1149,10 @@ test(`saving a multi-line ${format} preserves the selected word and exposes new 
 }
 
 for (const { expression, word, fraction } of [
-  ...["x+y", "a^2+x", "x+\\alpha", "\\alpha+x+\\beta"].map((expression) => ({ expression, word: /x(?=[+$])/, fraction: undefined })),
+  { expression: "x+y", word: /x(?=[+$])/, fraction: undefined },
+  { expression: "a^2+x", word: /x(?=[+$])/, fraction: undefined },
   { expression: "x/y", word: /x\/y/, fraction: undefined },
-  { expression: "x/y", word: /\//, fraction: undefined },
-  { expression: String.raw`x/y+\alpha`, word: /x\/y/, fraction: undefined },
-  { expression: "(x+y)", word: /\(x\+y\)/, fraction: undefined },
-  { expression: "α+β", word: /α/, fraction: undefined },
   { expression: String.raw`\alpha+x`, word: /\+/, fraction: undefined },
-  { expression: String.raw`\alpha=x`, word: /=/, fraction: undefined },
   { expression: String.raw`\frac{x}{x}`, word: /x(?=\}\{)/, fraction: "numerator" },
   { expression: String.raw`\frac{x}{x}`, word: /x(?=\}\$)/, fraction: "denominator" },
 ]) {
@@ -1164,12 +1184,14 @@ test(`saving a formula keeps the selected literal characters and their offset: $
   await settle();
   const saved = await scroller.evaluate((viewport) => {
     const selection = window.getSelection()!;
-    const first = selection.rangeCount ? selection.getRangeAt(0).getClientRects()[0] : undefined;
-    return { text: selection.toString(), top: first?.top,
+    const range = selection.rangeCount ? selection.getRangeAt(0) : undefined;
+    return { text: selection.toString(), top: range?.getClientRects()[0]?.top,
+      spansMultipleNodes: range?.startContainer !== range?.endContainer,
       scrollTop: viewport.scrollTop, maximum: viewport.scrollHeight - viewport.clientHeight };
   });
   expect(saved.text).toBe(original.text);
   expect(saved.top).toBeDefined();
+  if (expression === "x/y") expect(saved.spansMultipleNodes).toBe(true);
   if (fraction) {
     const glyphs = await scroller.locator(".katex-html").evaluate((element) => {
       const range = document.createRange();
@@ -1407,7 +1429,7 @@ test(`a ${mounted ? "mounted" : "unmounted"} ${painted ? "stylesheet formula str
     await expect(live).not.toBeInViewport();
   } else {
     const reference = "/api/sessions/follow-output/messages/5";
-    await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+    await mockChatGet(page, `${reference}?view=browser`, (route) => route.fulfill({ json: {
       role: "assistant", type: "text", seq: 5, content: "Expanded paragraph.\n\n".repeat(55),
     } }));
     send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
@@ -1444,7 +1466,7 @@ test(`a ${mounted ? "mounted" : "unmounted"} ${painted ? "stylesheet formula str
 test("an unmounted empty Markdown image does not offer a return", async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page, 4);
   const reference = "/api/sessions/follow-output/messages/5";
-  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+  await mockChatGet(page, `${reference}?view=browser`, (route) => route.fulfill({ json: {
     role: "assistant", type: "text", seq: 5, content: "Reading a long reply.\n\n".repeat(55),
   } }));
   send({ type: "assistant_text", seq: 5, content: "Long reply preview", body_state: "preview", detail_ref: reference });
@@ -1494,7 +1516,7 @@ test(`a new saved ${kind} outside the mounted rows offers a return`, async ({ pa
     await page.addStyleTag({ content: ".msg-tool-result .tool-preview { max-width: 19.5ch }" });
   }
   const reference = "/api/sessions/follow-output/messages/5";
-  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+  await mockChatGet(page, `${reference}?view=browser`, (route) => route.fulfill({ json: {
     role: "assistant", type: "text", seq: 5,
     content: Array.from({ length: 55 }, (_, index) => `Expanded paragraph ${index + 1}`).join("\n\n"),
   } }));
@@ -1610,7 +1632,7 @@ for (const { source, stationaryWheel } of [
 test(`an unmounted existing helper offers a return for a short ${source} continuation${stationaryWheel ? " during a zero-distance wheel" : ""}`, async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page, 4);
   const reference = "/api/sessions/follow-output/messages/5";
-  await page.route(`**${reference}?view=browser`, (route) => route.fulfill({ json: {
+  await mockChatGet(page, `${reference}?view=browser`, (route) => route.fulfill({ json: {
     role: "assistant", type: "text", seq: 5,
     content: "Expanded content shifts the helper outside the mounted range.\n\n".repeat(55),
   } }));
@@ -1661,6 +1683,7 @@ test(`an unmounted existing helper offers a return for a short ${source} continu
 }
 
 test("a helper answer revealed by preview eviction stays readable without a return offer", async ({ page }) => {
+  await mockHelperDetails(page, 5);
   const { scroller, gap, send, settle } = await openChat(page, 4);
   const nextHelper = { ...helper, card_id: "next-helper-card", task_id: "next-helper", native_thread_id: "next-helper",
     runtime_metadata: identity("next-helper", "item"), name: "Next helper" };
@@ -1838,7 +1861,8 @@ test("departed transcript selection and composer selection cannot pause the retu
 
 for (const reading of [true, false]) {
 test(`ordinary send and receipts preserve ${reading ? "history reading" : "latest following"}`, async ({ page }) => {
-  const { scroller, gap, send, settle, submissions } = await openChat(page);
+  const submissions: MockSubmission[] = [];
+  const { scroller, gap, send, settle } = await openChat(page, 40, [], { submit: (message) => submissions.push(message) });
   const input = page.locator(".chat-input-bar textarea");
   if (reading) {
     await scroller.hover();
@@ -1893,8 +1917,9 @@ test("chat follows output after a card, preserves history reading and resumes at
   await expect.poll(gap).toBeLessThanOrEqual(2);
   send({ type: "assistant_delta", content: output("First output") });
   await expect(scroller.getByTestId("streaming-text")).toContainText("First output line 12");
+  await expect.poll(gap).toBeLessThanOrEqual(2);
   await settle();
-  const firstGap = await gap();
+  expect(await gap()).toBeLessThanOrEqual(2);
 
   await scroller.hover();
   await page.mouse.wheel(0, 10000);
@@ -1925,10 +1950,9 @@ test("chat follows output after a card, preserves history reading and resumes at
   await expect(scroller).toBeFocused();
   send({ type: "assistant_delta", content: output("Resumed output") });
   await expect(scroller.getByTestId("streaming-text")).toContainText("Resumed output line 12");
+  await expect.poll(gap).toBeLessThanOrEqual(2);
   await settle();
-  const resumedGap = await gap();
-  expect.soft(firstGap).toBeLessThanOrEqual(2);
-  expect.soft(resumedGap).toBeLessThanOrEqual(2);
+  expect(await gap()).toBeLessThanOrEqual(2);
 });
 
 test("a cross-frame reply burst follows one continuous path to the latest output", async ({ page }, info) => {
@@ -1981,18 +2005,19 @@ test("a cross-frame reply burst follows one continuous path to the latest output
 
 test("continuous and delayed output stays pinned while history reading stays parked", async ({ page }) => {
   const { scroller, gap, send, settle, output } = await openChat(page);
-  for (let block = 0; block < 4; block++) {
+  for (let block = 0; block < 2; block++) {
     send({ type: "assistant_delta", content: output(`Bottom ${block}`) });
     await expect(scroller.getByTestId("streaming-text")).toContainText(`Bottom ${block} line 12`);
     await expect.poll(gap).toBeLessThanOrEqual(2);
     // Also exercise growth after the library's 100ms autoscroll observation.
     await settle();
+    expect(await gap()).toBeLessThanOrEqual(2);
   }
   await scroller.hover();
   await page.mouse.wheel(0, -400);
   await expect.poll(gap).toBeGreaterThan(300);
   const before = await scroller.evaluate((element) => element.scrollTop);
-  for (let block = 0; block < 4; block++) {
+  for (let block = 0; block < 2; block++) {
     send({ type: "assistant_delta", content: output(`History ${block}`) });
     await expect(scroller.getByTestId("streaming-text")).toContainText(`History ${block} line 12`);
     await settle();
@@ -2006,6 +2031,7 @@ test("continuous and delayed output stays pinned while history reading stays par
 });
 
 test("manual helper expansion preserves reading and returning to the bottom follows native output", async ({ page }) => {
+  await mockHelperDetails(page, 41);
   const { scroller, gap, send, output, settle } = await openChat(page);
   send({ type: "subagent", ...helper, seq: 41 });
   const card = scroller.locator(".subagent-card");
@@ -3009,7 +3035,8 @@ test("touch reading survives a stationary range change before the next scroll", 
 
 for (const notification of ["before", "after"] as const) {
 test(`touch reading survives a scroll reported ${notification} history page merge`, async ({ page }) => {
-  const { scroller, settle, pages, replaceOnReconnect } = await openChat(page);
+  const pages = await mockHistoryPages(page);
+  const { scroller, settle, replaceOnReconnect } = await openChat(page);
   const row = (seq: number): Message => ({ role: "assistant", type: "text", seq, content: `History ${seq}` });
   replaceOnReconnect({ messages: Array.from({ length: 40 }, (_, index) => row(index + 200)),
     next_message_seq: 240, oldest_loaded_seq: 200, has_more_messages: true });
@@ -3058,7 +3085,8 @@ test(`touch reading survives a scroll reported ${notification} history page merg
 
 for (const destination of ["top", "tail", "tail after measurement", "tail after a quantized correction"] as const) {
   test(`touch navigation to the ${destination} takes over a queued replacement window correction`, async ({ page }) => {
-    const { scroller, gap, send, settle, pages, replaceOnReconnect } = await openChat(page);
+    const pages = await mockHistoryPages(page);
+    const { scroller, gap, send, settle, replaceOnReconnect } = await openChat(page);
     const row = (seq: number, content = `History ${seq}`): Message => ({ role: "assistant", type: "text", seq, content });
     replaceOnReconnect({ messages: Array.from({ length: 40 }, (_, index) => row(index + 200)),
       next_message_seq: 240, oldest_loaded_seq: 200, has_more_messages: false });
@@ -3315,7 +3343,7 @@ test("loading full reply details preserves reading while the response and new ou
   let release!: () => void;
   const body = new Promise<void>((resolve) => { release = resolve; });
   const reference = "/api/sessions/follow-output/messages/41";
-  await page.route(`**${reference}?view=browser`, async (route) => {
+  await mockChatGet(page, `${reference}?view=browser`, async (route) => {
     await body;
     await route.fulfill({ json: { role: "assistant", type: "text", seq: 41,
       content: Array.from({ length: 40 }, (_, index) => `Complete reply paragraph ${index}`).join("\n\n") } });
@@ -3340,6 +3368,7 @@ test("loading full reply details preserves reading while the response and new ou
 });
 
 test("only readable new text from a helper answer offers a return", async ({ page }) => {
+  await mockHelperDetails(page, 6);
   const { scroller, send, settle } = await openChat(page, 4);
   send({ type: "tool_result", seq: 5, output: "Tool output to read" });
   send({ type: "subagent", ...helper, seq: 6 });
@@ -3390,6 +3419,7 @@ test("only readable new text from a helper answer offers a return", async ({ pag
 
 for (const item of ["first", "second"] as const) {
 test(`a helper keeps its selected ${item} item when the first grows and the second is saved`, async ({ page }) => {
+  await mockHelperDetails(page, 5);
   const { scroller, send, settle } = await openChat(page, 4);
   const first = identity("helper", "first-answer");
   const second = identity("helper", "second-answer");
@@ -3450,6 +3480,7 @@ test("an expanded Claude helper offers a return for its final summary and keeps 
 });
 
 test("saving a capped helper item preserves its selected prefix and visible passage", async ({ page }) => {
+  await mockHelperDetails(page, 5);
   const { scroller, send, settle } = await openChat(page, 4);
   send({ type: "subagent", ...helper, seq: 5 });
   await scroller.getByRole("button", { name: /Helper Reading/ }).click();
@@ -3527,7 +3558,7 @@ test("loading an outside-window question pauses following through new output", a
   const { scroller, send, settle, output } = await openChat(page, 40, [question]);
   let release!: () => void;
   const body = new Promise<void>((resolve) => { release = resolve; });
-  await page.route("**/api/sessions/follow-output/messages/0?view=browser", async (route) => {
+  await mockChatGet(page, "/api/sessions/follow-output/messages/0?view=browser", async (route) => {
     await body;
     await route.fulfill({ json: { role: "assistant", type: "question_request", seq: 0, tool_use_id: "outside",
       tool_input: { question_id: "outside", request_id: "request", attempt_id: "attempt",

@@ -665,6 +665,74 @@ def test_existing_evidence_directory_is_not_reused(tmp_path):
         codex_live.run(SimpleNamespace(codex_home=str(tmp_path), output=str(tmp_path)))
 
 
+@pytest.mark.parametrize("selection", ["overlap", "deselected", "unknown-node", "bad-import"])
+@pytest.mark.usefixtures("clean_pytest_selection")
+def test_real_pytest_certifies_all_targets_without_masking_native_errors(
+    tmp_path, monkeypatch, selection,
+):
+    source = tmp_path / "login"
+    source.mkdir()
+    (source / "auth.json").write_text("stand-in")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    (checkout / ".venv").symlink_to(codex_live.ROOT / ".venv", target_is_directory=True)
+    (checkout / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\nmarkers = ["real", "real_codex", "codex_bin", "real_claude", "knowledge_eval", "wiki_perf"]\n'
+    )
+    (checkout / "conftest.py").write_text(
+        'def pytest_addoption(parser):\n    parser.addoption("--run-real", action="store_true")\n'
+    )
+    (checkout / "tests").mkdir()
+    (checkout / "tests/test_capability.py").write_text(
+        'import pytest\n'
+        '@pytest.mark.real\n@pytest.mark.real_codex\n'
+        'def test_eligible(): print("eligible capability executed")\n'
+        'def test_offline(): pytest.fail("must be deselected")\n'
+    )
+    project = codex_live.ROOT
+    monkeypatch.setattr(codex_live, "ROOT", checkout)
+    execute = codex_live.execute
+
+    def execute_local_pytest(argv, *, env, log, cwd, proxy):
+        proxy.record("models.example", 443, "forwarded")
+        return execute(argv, env={**env, "PYTHONPATH": str(project)}, log=log, cwd=cwd, proxy=proxy)
+
+    monkeypatch.setattr(codex_live, "execute", execute_local_pytest)
+    target = "tests/test_capability.py"
+    eligible = f"{target}::test_eligible"
+    deselected = f"{target}::test_offline"
+    targets = [target, eligible]
+    other = "tests/test_other.py"
+    if selection == "deselected":
+        targets.append(deselected)
+    elif selection == "unknown-node":
+        (checkout / other).write_text("def test_present(): pass\n")
+        targets.append(f"{other}::test_misspelled")
+    elif selection == "bad-import":
+        (checkout / other).write_text("import octopus_missing_live_fixture\n")
+        targets.append(other)
+    output = tmp_path / "evidence"
+    args = SimpleNamespace(codex_home=str(source), output=str(output), model=None, service_tier=None,
+                           upstream_proxy=None, suite="pytest", pytest_target=targets)
+    assert codex_live.run(args) == int(selection != "overlap")
+    result = json.loads((output / "result.json").read_text())
+    assert result["selection"] == {"pytest": {"scope": "targets", "targets": targets}}
+    report = output / "pytest-selection.json"
+    log = (output / "pytest.log").read_text()
+    if selection in {"overlap", "deselected"}:
+        selected = json.loads(report.read_text())
+        assert selected == {"selected": [eligible], "unmatched_targets": [deselected] if selection == "deselected" else []}
+    else:
+        assert not report.exists()
+        expected = "not found:" if selection == "unknown-node" else "No module named 'octopus_missing_live_fixture'"
+        assert expected in log
+    if selection == "deselected":
+        assert deselected in result["errors"][0]
+        assert "test_eligible PASSED" not in log
+    elif selection == "overlap":
+        assert result["suites"]["pytest"]["passed"] == 1
+
+
 @pytest.mark.parametrize("selector", codex_live.PYTEST_SELECTION_ENVIRONMENT)
 @pytest.mark.usefixtures("clean_pytest_selection")
 def test_direct_live_pytest_refuses_selection_overrides(tmp_path, monkeypatch, selector):

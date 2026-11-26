@@ -1,4 +1,4 @@
-import { accountToken, enterAccountCredentials } from "./current-account";
+import { accountToken, openAsCurrentAccount } from "./current-account";
 /**
  * Sidebar pins, end to end (docs/implemented/sidebar-pins.md). Pure UI, no model.
  *
@@ -47,8 +47,7 @@ async function ownOrder(page: Page): Promise<string[]> {
 }
 
 async function login(page: Page) {
-  await page.goto("/");
-  await enterAccountCredentials(page);
+  await openAsCurrentAccount(page);
   await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
 }
 

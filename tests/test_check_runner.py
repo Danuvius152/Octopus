@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -45,15 +46,34 @@ def test_cli_runs_only_the_named_gates(monkeypatch):
     assert [gate.id for gate in execute.call_args.args[1]] == ["ruff", "docs-index"]
 
 
-def test_cli_release_runs_independent_offline_and_live_gates(monkeypatch, tmp_path):
+@pytest.mark.parametrize("live", ["smoke", "targets", "full", "full-gate"])
+def test_cli_release_runs_the_selected_codex_scope(monkeypatch, tmp_path, live):
     execute = Mock(return_value=1)
     monkeypatch.setattr(runner, "run_checks", execute)
-    monkeypatch.setattr(sys, "argv", ["check.sh", "--release", "--supervisor", "--output", str(tmp_path)])
+    targets = ["tests/test_question_codex_real.py", "tests/test_research_real.py"]
+    options = {
+        "smoke": [],
+        "targets": [f"--codex-live-target={target}" for target in [*targets, targets[0]]],
+        "full": ["--codex-live-full"],
+        "full-gate": ["--gate", "codex-live-pytest"],
+    }
+    monkeypatch.setattr(sys, "argv", ["check.sh", "--release", "--supervisor", "--output", str(tmp_path), *options[live]])
     assert runner.main() == 1
     _, gates, output = execute.call_args.args
-    assert [gate.id for gate in gates[-4:]] == ["supervisor", "offline-e2e", "codex-live-pytest", "codex-live-browser"]
+    assert [gate.id for gate in gates if gate.id.startswith("codex-live")] == {
+        "smoke": ["codex-live-browser"],
+        "targets": ["codex-live-pytest", "codex-live-browser"],
+        "full": ["codex-live-pytest", "codex-live-browser"],
+        "full-gate": ["codex-live-pytest"],
+    }[live]
     assert output == tmp_path
-    assert next(gate for gate in gates if gate.id == "pytest").pytest_context == "required"
+    if live != "full-gate":
+        assert next(gate for gate in gates if gate.id == "pytest").pytest_context == "required"
+        assert {"supervisor", "offline-e2e"} <= {gate.id for gate in gates}
+    if live != "smoke":
+        live_pytest = next(gate for gate in gates if gate.id == "codex-live-pytest")
+        assert live_pytest.argv[4:] == (tuple(f"--pytest-target={target}" for target in targets) if live == "targets" else ())
+        assert live_pytest.scope == (f"live Codex pytest targets: {', '.join(targets)}" if live == "targets" else "full live Codex pytest")
 
 
 def test_cli_release_targeted_load_probe_records_parallel_arguments(monkeypatch, tmp_path):
@@ -203,6 +223,7 @@ from pathlib import Path
 out = Path(sys.argv[-1])
 out.mkdir()
 (out / "result.json").write_text(json.dumps({"passed": True,
+    "selection": {"browser": {"scope": "smoke"}},
     "suites": {"browser": {"passed": 1, "failed": 0, "skipped": 0, "exit_code": 0}},
     "execution": {"browser": {"exit_code": 0}}}))
 '''
@@ -218,6 +239,52 @@ out.mkdir()
     })
     assert offline["partitions"][1]["counts"]["passed"] == 2
     assert live["status"] == "passed" and live["counts"]["passed"] == 1
+
+
+@pytest.mark.parametrize("mode", ["matching", "missing", "different", "changed-input"])
+def test_release_codex_acceptance_verifies_scope_and_ignored_inputs(tmp_path, monkeypatch, mode):
+    root = tmp_path / "checkout"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".gitignore").write_text("test-results/\n")
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "baseline"],
+        cwd=root, check=True,
+    )
+    filename = "tests/test-results/test_capability.py"
+    target = root / filename
+    target.parent.mkdir(parents=True)
+    target.write_text("# selected capability\n")
+    conftest = target.with_name("conftest.py")
+    conftest.write_text("# selected fixture context\n")
+    subprocess.run(["git", "check-ignore", "-q", filename], cwd=root, check=True)
+    monkeypatch.setattr(runner, "environment_identity", lambda *_: {})
+    selection = {"scope": "targets", "targets": [filename]}
+    details = {
+        "passed": True,
+        "execution": {"pytest": {"exit_code": 0}},
+        "suites": {"pytest": {"passed": 1, "failed": 0, "skipped": 0, "exit_code": 0}},
+    }
+    if mode != "missing":
+        details["selection"] = {"pytest": selection if mode != "different" else {"scope": "full", "targets": []}}
+    program = f'''import json, sys
+from pathlib import Path
+out = Path(sys.argv[-1])
+out.mkdir()
+(out / "result.json").write_text(json.dumps({details!r}))
+'''
+    if mode == "changed-input":
+        program += f'Path({filename!r}).write_text("# changed during execution\\n")\n'
+    [live] = [gate for gate in runner.release_gates(root, supervisor=False, codex_targets=(filename,))
+              if gate.id == "codex-live-pytest"]
+    assert filename in live.source_files and str(conftest.relative_to(root)) in live.source_files
+    output = tmp_path / "report"
+    assert runner.run_checks(root, [replace(live, argv=(sys.executable, "-c", program))], output) == int(mode != "matching")
+    report = json.loads((output / "results.json").read_text())
+    assert report["inputs_changed"] == (mode == "changed-input")
+    [row] = report["gates"]
+    assert row["selection"] == details.get("selection", {}).get("pytest")
+    assert bool(row["evidence_error"]) == (mode in {"missing", "different"})
 
 
 @pytest.mark.parametrize(("first_counts", "second_counts", "expected_totals"), [

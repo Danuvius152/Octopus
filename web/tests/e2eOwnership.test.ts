@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { beforeAll, expect, it } from "vitest";
 import { collectExecutionPlan, executionPlan, playwrightArgs } from "../e2e/execution-plan";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -119,33 +119,42 @@ test("case omitted by focus", () => { throw new Error("This case must not be sil
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 10_000);
 
+let root: string;
+let environment: NodeJS.ProcessEnv;
+let config: string;
+beforeAll(() => {
+  root = mkdtempSync(path.join(os.tmpdir(), "octopus-project-selection-"));
+  config = `--config=${path.join(root, "playwright.config.cjs")}`;
+  environment = { ...process.env, TMPDIR: root };
+  symlinkSync(path.resolve("node_modules"), path.join(root, "node_modules"));
+  writeFileSync(path.join(root, "playwright.config.cjs"), `module.exports = { projects: [
+{ name: "chromium", testMatch: "**/app.spec.ts" },
+{ name: "installation", testMatch: "**/connectors.spec.ts" },
+] };`);
+  for (const file of files) {
+    writeFileSync(path.join(root, file), `import { test } from "@playwright/test"; test("example", () => {});`);
+  }
+  return () => rmSync(root, { recursive: true, force: true });
+});
 for (const [label, selection, expected] of [
-  ["installation only", [...files, "--project=installation"], ["installation"]],
-  ["chromium only", [...files, "--project", "chromium"], ["chromium"]],
-  ["default", files, ["chromium", "installation"]],
-  ["variadic", [...files, "--project", "chromium", "installation"], ["chromium", "installation"]],
-  ["repeated options", [...files, "--project=chromium", "--project=installation"], ["chromium", "installation"]],
-  ["wildcard", [...files, "--project=*"], ["chromium", "installation"]],
-  ["partial wildcard", [...files, "--project=INSTALL*"], ["installation"]],
-  ["inline before files", ["--project=installation", ...files], ["installation"]],
+["installation only", [...files, "--project=installation"], ["installation"]],
+["chromium only", [...files, "--project", "chromium"], ["chromium"]],
+["default", files, ["chromium", "installation"]],
+["variadic", [...files, "--project", "chromium", "installation"], ["chromium", "installation"]],
+["repeated options", [...files, "--project=chromium", "--project=installation"], ["chromium", "installation"]],
+["wildcard", [...files, "--project=*"], ["chromium", "installation"]],
+["partial wildcard", [...files, "--project=INSTALL*"], ["installation"]],
+["inline before files", ["--project=installation", ...files], ["installation"]],
 ] as const) it(`intersects ${label} with each real configuration partition`, () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "octopus-project-selection-"));
-  try {
-    const env = { ...process.env, OCTOPUS_E2E_MODE: "offline", OCTOPUS_E2E_AUDIT_DIR: root, TMPDIR: root };
-    expect(collectExecutionPlan([...selection], env)).toEqual(expected.map(project => ({
-      project, scope: "main", args: project === "installation" ? [...files, "--workers=1"] : files,
-    })));
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  expect(collectExecutionPlan([config, ...selection], environment)).toEqual(expected.map(project => ({
+    project, scope: "main", args: [config, ...files, ...(project === "installation" ? ["--workers=1"] : [])],
+  })));
 }, 15_000);
 
 it("preserves native unknown-project, unmatched-pattern and empty file selection failures", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "octopus-project-rejection-"));
-  try {
-    const env = { ...process.env, OCTOPUS_E2E_MODE: "offline", OCTOPUS_E2E_AUDIT_DIR: root, TMPDIR: root };
-    for (const args of [["--project=unknown"], ["--project=chromium", "--project=unknown"], ["--project=unknown*"], ["no-such-file.spec.ts"]]) {
-      expect(() => collectExecutionPlan(args, env)).toThrow(/Project|No tests found/);
-    }
-  } finally { rmSync(root, { recursive: true, force: true }); }
+  for (const args of [["--project=unknown"], ["--project=chromium", "--project=unknown"], ["--project=unknown*"], ["no-such-file.spec.ts"]]) {
+    expect(() => collectExecutionPlan([config, ...args], environment)).toThrow(/Project|No tests found/);
+  }
 }, 15_000);
 
 it("reuses ordinary and exclusive services across repeats; only first-account stories restart", () => {

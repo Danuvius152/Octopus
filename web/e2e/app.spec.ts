@@ -1,4 +1,4 @@
-import { accountToken, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials, openAsCurrentAccount } from "./current-account";
 import { test, expect, type Page } from "./test";
 import { systemAgentId } from "./system-agent";
 
@@ -37,8 +37,7 @@ test.describe("Login", () => {
 test.describe("Session Management", () => {
   test.beforeEach(async ({ page }) => {
     // Login first
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     await expect(page.locator(".agent-list-header")).toBeVisible();
   });
 
@@ -112,8 +111,7 @@ test.describe("Chat", () => {
   test.describe.configure({ timeout: 120_000 });
 
   test.beforeEach(async ({ page, request }) => {
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     await expect(page.locator(".agent-list-header")).toBeVisible();
 
     // Create a session
@@ -234,8 +232,7 @@ test.describe("Touch affordances", () => {
       expect(created.ok()).toBeTruthy();
     }
 
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
 
     // Without this the test proves nothing: every assertion below is about a
     // rule that only applies when the browser reports no hover.
@@ -274,8 +271,7 @@ test.describe("Touch affordances", () => {
 test.describe("Responsive Layout", () => {
   test("shows hamburger menu on mobile", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
 
     // Hamburger should be visible on mobile
     await expect(page.locator(".btn-menu")).toBeVisible();
@@ -325,8 +321,7 @@ test.describe("Responsive Layout", () => {
     expect(created.ok()).toBeTruthy();
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
 
     await page.locator(".btn-menu").first().click();
     await expect(page.locator(".sidebar")).toHaveClass(/open/);
@@ -371,8 +366,7 @@ test.describe("Responsive Layout", () => {
         });
       }
     });
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
 
     await page.locator(".btn-menu").first().click();
     await page.locator(".agent-item", { hasText: "Octo" }).click();
@@ -443,8 +437,7 @@ test.describe("Foldable sidebar", () => {
   test("hover reveals the handle, and the rail keeps its icons", async ({
     page,
   }) => {
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     await expect(page.locator(".sidebar")).toHaveCSS("width", "270px");
 
     const handle = page.locator(".btn-sidebar-toggle");
@@ -486,8 +479,7 @@ test.describe("Foldable sidebar", () => {
   test("clicking an agent on the rail opens the sidebar with it", async ({
     page,
   }) => {
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     await expect(page.locator(".agent-item").first()).toBeVisible();
 
     await page.mouse.move(263, EDGE_Y);

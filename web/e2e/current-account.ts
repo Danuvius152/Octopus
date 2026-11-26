@@ -29,3 +29,14 @@ export async function enterAccountCredentials(page: Page,
   await page.locator("#password").fill(credentials.password);
   await page.locator("button.btn-login").click();
 }
+
+export async function openAsCurrentAccount(page: Page): Promise<void> {
+  const token = accountToken();
+  // Seed the existing account's bearer once, before the app starts. Reloads
+  // and later logout still use the browser's real, mutable storage.
+  const seedPath = "/__octopus_e2e_account__";
+  await page.route(seedPath, (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html>" }), { times: 1 });
+  await page.goto(seedPath);
+  await page.evaluate((bearer) => localStorage.setItem("octopus_token", bearer), token);
+  await page.goto("/");
+}

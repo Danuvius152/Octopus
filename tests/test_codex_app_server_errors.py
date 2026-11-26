@@ -146,11 +146,19 @@ async def test_repeated_native_errors_cannot_extend_idle_budget(native_runtime, 
 
 @pytest.mark.parametrize("info,code", [("usageLimitExceeded", "usage_limit_exceeded"),
                                      ("rateLimitExceeded", "rate_limit_exceeded")])
-async def test_quota_and_unqualified_rate_limit_keep_one_attempt(native_runtime, tmp_path, info, code):
+async def test_quota_and_unqualified_rate_limit_keep_one_attempt(native_runtime, tmp_path, monkeypatch, info, code):
     manager, database, session, mode, starts, events = native_runtime
+    # This test exercises a provider failure after acceptance. Allow the real
+    # acceptance write to finish under xdist load before sending the failure.
+    monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", 3)
     mode[0] = "control_output"
     receipt = await manager.start_message(session.id, "One request")
-    await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
+
+    async def accepted():
+        saved = await database.get_submission_for_request(session.id, receipt.request_id)
+        return bool(saved and saved["native_inputs"] and saved["native_inputs"][0]["state"] == "accepted")
+
+    await native_tests.wait_until(accepted)
     inject(tmp_path, {"__stderr": "Connector error 401 Unauthorized"}, failed(info))
     completion = await asyncio.wait_for(receipt.wait(), 4)
     assert completion.outcome.status == "failed" and not any(completion.outcome.recovery.values())

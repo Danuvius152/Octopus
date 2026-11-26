@@ -1,4 +1,4 @@
-import { accountToken, enterAccountCredentials } from "./current-account";
+import { accountToken, openAsCurrentAccount } from "./current-account";
 import { capturePaint } from "./paint-capture";
 import { expect, test } from "./test";
 
@@ -14,8 +14,7 @@ test("both tabs observe archive while only the initiating tab follows the succes
   } });
   expect(imported.ok(), await imported.text()).toBeTruthy();
   const source: { id: string; name: string } = await imported.json();
-  await page.goto("/");
-  await enterAccountCredentials(page);
+  await openAsCurrentAccount(page);
   await expect(page.locator(".conn-status.on")).toBeVisible();
   const observer = await context.newPage();
   try {
@@ -71,8 +70,7 @@ test("only a visible chat confirms rendered Research, including cards outside th
     document.dispatchEvent(new Event("visibilitychange"));
   }, state);
   try {
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     await expect(page.locator(".conn-status.on")).toBeVisible();
     const agent = page.locator(".agent-item", { hasText: "Octo" });
     if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
@@ -185,8 +183,7 @@ test(title, async ({ page, request }, info) => {
     });
   }
   try {
-    await page.goto("/");
-    await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     // Keep the normal sidebar entry while testing the compact chat column.
     await page.addStyleTag({ content: ".chat-view { max-width: 390px; }" });
     if (initialHeight) await page.setViewportSize({ width: page.viewportSize()!.width, height: initialHeight });
@@ -441,8 +438,7 @@ for (const destination of ["same opening", "Monitor", "reopened source"] as cons
       await route.fulfill({ response, json: { ...await response.json(), is_admin: true } });
     });
     try {
-      await page.goto("/");
-      await enterAccountCredentials(page);
+      await openAsCurrentAccount(page);
       const agent = page.locator(".agent-item", { hasText: "Octo" });
       if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
       await expect(page.locator(".conn-status.on")).toBeVisible();
@@ -522,8 +518,7 @@ for (const outcome of ["refusal", "lost-reply", "partial-failure"] as const) {
       }
     });
     try {
-      await page.goto("/");
-      await enterAccountCredentials(page);
+      await openAsCurrentAccount(page);
       const agent = page.locator(".agent-item", { hasText: "Octo" });
       if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
       await page.locator(".session-item", { hasText: source.name }).click();
@@ -595,8 +590,7 @@ for (const receipt of ["lost", "received"] as const) {
       await route.fulfill({ status: 503, json: { detail: "Successor state unavailable" } });
     });
     try {
-      await page.goto("/");
-      await enterAccountCredentials(page);
+      await openAsCurrentAccount(page);
       const agent = page.locator(".agent-item", { hasText: "Octo" });
       if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
       await page.locator(".session-item", { hasText: source.name }).click();
@@ -660,7 +654,7 @@ test("an archive header deadline keeps a manual GET-only confirmation in the rea
     await route.fulfill({ status: 503, json: { detail: "Confirmation unavailable" } });
   });
   try {
-    await page.goto("/"); await enterAccountCredentials(page);
+    await openAsCurrentAccount(page);
     const agent = page.locator(".agent-item", { hasText: "Octo" });
     if (!(await agent.locator(".agent-fold.rotate-90").count())) await agent.click();
     await page.locator(".session-item", { hasText: source.name }).click();

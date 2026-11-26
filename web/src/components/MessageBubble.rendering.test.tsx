@@ -122,6 +122,35 @@ it("preserves image order and transcript text offsets when rendering standalone 
   expect(selection.spans.map(({ start, end }) => body.textContent!.slice(start, end)).join("")).toBe(passage);
 });
 
+it.each([
+  [String.raw`x+\alpha`, "x"],
+  [String.raw`\alpha+x+\beta`, "x"],
+  ["x/y", "/"],
+  [String.raw`x/y+\alpha`, "x/y"],
+  ["(x+y)", "(x+y)"],
+  ["α+β", "α"],
+  [String.raw`\alpha=x`, "="],
+] as const)("maps %s source text %s to its rendered KaTeX glyphs", (expression, literal) => {
+  const prefix = "Keep $";
+  const content = `${prefix}${expression}$ beside the original line`;
+  const start = prefix.length + expression.indexOf(literal);
+  const selection = projectMarkdownOutput(content, { start, end: start + literal.length }, "selection");
+  const view = render(<MessageBubble sessionId={session.id} message={{ role: "assistant", type: "text", content }} />);
+  const body = view.container.querySelector(".markdown")!;
+  const visual = body.querySelector(".katex-html")!;
+  const preceding = document.createRange();
+  preceding.selectNodeContents(body);
+  preceding.setEndBefore(visual);
+  const glyphOffset = visual.textContent!.indexOf(literal);
+  expect(glyphOffset).toBeGreaterThanOrEqual(0);
+  expect(selection.text).toBe(body.textContent);
+  const renderedStart = preceding.toString().length + glyphOffset;
+  expect(selection.spans).toEqual(Array.from(literal, (_, index) => {
+    const offset = renderedStart + index;
+    return { start: offset, end: offset + 1 };
+  }));
+});
+
 it("parses only actual preview/full content changes while the full-message request settles", async () => {
   useSessionStore.setState({ token: "rendering-account" });
   const preview = { role: "assistant" as const, type: "text", seq: 7, content: "## Saved preview",

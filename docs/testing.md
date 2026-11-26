@@ -307,18 +307,35 @@ decision and validation evidence, not a permanent default-suite cost.
 
 ### Browser ownership and execution
 
-Import offline specs from [`web/e2e/test.ts`](../web/e2e/test.ts). Requests stay
-on loopback or explicit local mocks; bundle assets locally. Mark individual
-model-dependent cases `@llm`. The [selection check](../web/tests/e2eSelection.test.ts)
-collects real specs without servers; ordinary typecheck covers `tsconfig.e2e.json`.
+Use the [real-account fixture](../web/e2e/test.ts) for offline integration specs
+and the [mock chat fixture](../web/e2e/mock-chat.ts) for isolated transcript
+rendering with explicit API and WebSocket responses. Requests stay on loopback
+or explicit mocks. Bundle assets locally and mark model-dependent cases
+`@llm`. The [selection check](../web/tests/e2eSelection.test.ts) collects the
+actual specs without servers. Ordinary typecheck covers `tsconfig.e2e.json`.
 
-Each ordinary attempt, repeat or rebuilt worker receives a real isolated
-account. Read its bearer at call time through `current-account.ts`. Creation
+Each real-account attempt, repeat or rebuilt worker receives a real isolated
+account. Read its bearer at call time through `current-account.ts`. Tests of
+signed-in behavior may start the app with that test's registration bearer.
+Tests of login, logout, expiry or revocation exercise the relevant interaction. Creation
 receipts and returned IDs grant cleanup authority, including account-local
 successors with lost responses; names do not. Teardown checks inventories and
 mutations, retaining both body and cleanup errors. Archived sessions stay in
 the isolated runtime: their public DELETE is unavailable. Test accounts need
 no product deletion feature, and cache residue is acceptable.
+
+Mock chat provisions only its own page and context. Unmatched API requests
+and WebSocket connections or messages are blocked and recorded on the test.
+Vite hot reload uses a distinct loopback socket. Independent chat-follow-output
+cases opt into file-level parallel scheduling within the ordinary two-worker
+budget. Keep the original browser frame observation for drift and first-paint
+assertions. The [Markdown rendering tests](../web/src/components/MessageBubble.rendering.test.tsx)
+cover the formula source-to-glyph matrix. Browser representatives cover live-to-saved
+selection position, font loading, ranges spanning several glyph nodes, and identical
+glyphs in distinct fraction positions.
+The four warm presentation cases each test one round trip in the
+default suite. Use `bun run test:e2e:chat-performance` in `web/` for ten round
+trips per case, compositor JPEGs and latency percentiles.
 
 The [runner](../web/e2e/run.ts) uses native Playwright collection to preserve
 project/grep selection and unmatched-selection errors, then executes only the
@@ -390,18 +407,29 @@ evidence-reuse rules above. Release adds the installation-specific checks below.
 
 | When | Required validation |
 |------|---------------------|
-| Before release on this Codex installation | All commit gates, **offline E2E**, **live Codex pytest** and **Codex browser E2E** from Test Coverage below; then follow [自动发布](local-wsl.md#自动发布). Include supervisor checks when managed-service behavior changed. |
+| Before release on this Codex installation | All commit gates, **offline E2E**, **Codex browser E2E** and any required **live Codex pytest** capabilities from Test Coverage below. Then follow [自动发布](local-wsl.md#自动发布). Include supervisor checks when managed-service behavior changed. |
 | Documentation only | Affected links, index and diff checks; follow [repository action policy](../AGENTS.md#repository-and-upstream-maintenance). |
 
 With the [selected existing Codex login](local-wsl.md#live-凭据与网络) configured,
-run `./scripts/check.sh --release --output <new-directory>`. Add `--supervisor`
-for managed-service changes. Supervisor selects `real and supervisor` from
-`tests/` using the repository pytest configuration and requires at least one
-passed case. To fill a specific gap using existing evidence,
-select `--gate` IDs from the release set, such as `offline-e2e`,
-`codex-live-pytest`, or `codex-live-browser`. Each scoped report covers only its
-selected gates. The optional `knowledge_eval` and `wiki_perf` tiers remain
-separate.
+run `./scripts/check.sh --release --output <new-directory>`. Add
+`--codex-live-target <test-file-or-node>` for each affected Codex capability
+whose contract needs a provider, such as native questions, app generation,
+research, image output, history migration or long MCP waits. Use
+`--codex-live-full` for Codex CLI or selected model changes, shared runtime
+protocol changes and uncertain impact, and when checking complete provider
+compatibility. Record the required live scope in the release acceptance record.
+Each explicit target must contribute a case after native pytest selection. An
+unmatched target stops the suite before any of the selected cases execute.
+
+Add `--supervisor` for managed-service changes. It selects
+`real and supervisor` and requires at least one passed case. To fill gaps
+using existing evidence, select release `--gate` IDs such as `offline-e2e`,
+`codex-live-pytest` or `codex-live-browser`. Selecting the live pytest gate
+explicitly with no targets requests the full live pytest capability matrix.
+Each release gate verifies the scope reported by its Codex runner. Focused
+live pytest evidence includes the selected files and their ancestor
+`conftest.py` inputs, including Git-ignored source. The optional
+`knowledge_eval` and `wiki_perf` tiers remain separate.
 
 The release report lists all selected stages from startup, with pending work
 marked `not-run`. A test failure leaves the run nonzero and allows the remaining
@@ -409,9 +437,10 @@ independent stages to run. The offline browser runner records each selected
 partition's command, effective worker count when Playwright reports it, native
 JSON and offline audit, with Playwright traces retained on failure. Playwright
 rejects focused `.only` tests during collection and partition execution. Stage
-totals require valid counts from every partition. The two live Codex gates
-retain their own native reports, raw logs and network audits and print elapsed
-time every 15 seconds while their test output is redirected. Use separate output
+totals require valid counts from every partition. Selected live Codex gates
+run independently and retain their own native reports, raw logs and network
+audits. While their output is redirected, they print elapsed time every 15
+seconds. Use separate output
 directories for follow-up executions and link them to the first run in the
 acceptance record.
 
@@ -436,7 +465,7 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 | Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
 | Live Codex pytest | `.venv/bin/python scripts/codex_live.py --suite pytest --output "$CODEX_EVIDENCE_DIR"` | Full live Codex selection through the explicitly selected existing login; excludes device authentication and optional evaluation/performance tiers. Set `CODEX_HOME` and a new evidence directory using [the common acceptance entry](local-wsl.md#live-凭据与网络). |
 | Supervisor integration | `.venv/bin/pytest tests/ --run-real -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
-| Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
+| Frontend unit | `cd web && bun run test` | Tooling tests in `web/tests/` use Node. The other Vitest tests use jsdom and the DOM setup. Both projects keep Vitest's native file matching and share one invocation and evidence reporter. |
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
 | Codex browser E2E | `.venv/bin/python scripts/codex_live.py --suite browser --output "$CODEX_EVIDENCE_DIR"` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Uses the same isolated credential, network and evidence checks as pytest; the default `--suite all` runs both serially. |
 
@@ -476,6 +505,12 @@ Keep failed initial runs and passing targeted follow-ups distinct when composing
 evidence under the reuse policy above.
 
 ## Shared fixtures and protocol evidence
+
+Use [`tests/accounts.py`](../tests/accounts.py) to start an already owned
+business test. It reuses one valid test password hash per worker while
+creating each account's database record, default agent, key, workspace and
+real bearer independently. Tests of registration, password behavior and KDF
+work exercise the account APIs.
 
 - `tests/native_app_server.py` keeps its function-scoped runtime, original Manager,
   SQLite database and cleanup together. `tests/session_runtime.py` owns shared

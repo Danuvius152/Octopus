@@ -55,10 +55,29 @@ async def test_poll_window_expiry_keeps_the_original_question_until_its_answer(s
 
     async with served_ask() as (mcp, manager, session, client):
         monkeypatch.setattr(ask, "_PER_POLL_TIMEOUT", 1)
+        wait_for_result = manager.wait_for_question_result
+        get = httpx.AsyncClient.get
+        expired = []
+        two_expirations = asyncio.Event()
+
+        async def short_wait(session_id, question_id, timeout):
+            return await wait_for_result(session_id, question_id, min(timeout, 0.05))
+
+        async def observe_poll(self, url, **kwargs):
+            response = await get(self, url, **kwargs)
+            if str(url).endswith("/answer") and response.status_code == 408:
+                expired.append(str(url).split("/")[-2])
+                if len(expired) == 2:
+                    two_expirations.set()
+            return response
+
+        monkeypatch.setattr(manager, "wait_for_question_result", short_wait)
+        monkeypatch.setattr(httpx.AsyncClient, "get", observe_poll)
         calling = asyncio.create_task(mcp.call_tool("user", {"questions": [{"question": "How should we proceed?"}]}))
         original = await pending_question(manager, session)
         assert original.deadline is None  # Config 0, rather than an MCP-local 30-minute budget.
-        await asyncio.sleep(2.1)
+        await asyncio.wait_for(two_expirations.wait(), 3)
+        assert expired[:2] == [original.question_id, original.question_id]
         assert manager.get_pending_questions(session.id) == (original,) and not calling.done()
         response = await client.post(f"/api/sessions/{session.id}/questions/{original.question_id}/answer",
                                      json={"answers": [{"text": "Use the existing framework"}]})

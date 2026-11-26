@@ -15,6 +15,7 @@
     "test:watch": "vitest",
     "test:e2e": "bun run test:e2e:fast && bun run test:e2e:llm",
     "test:e2e:fast": "bun e2e/run.ts offline --grep-invert @llm",
+    "test:e2e:chat-performance": "OCTOPUS_E2E_CHAT_PERFORMANCE=1 bun run test:e2e:fast chat-presentation.spec.ts --grep 'warm presentation'",
     "test:e2e:llm": "bun e2e/run.ts real --grep @llm --workers=1",
     "test:e2e:ui": "bun e2e/run.ts offline --ui"
   },

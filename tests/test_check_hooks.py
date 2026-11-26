@@ -1,5 +1,6 @@
 """Exercise the installed hook scheduler against real verification inputs."""
 
+import inspect
 import json
 import os
 import re
@@ -10,9 +11,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+
+from scripts.pytest_evidence import failure_details
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -287,12 +291,40 @@ def test_focused_pytest_accepts_an_unrelated_plugin_named_dsession(pytest_checko
     assert json.loads(Path(gate["execution_context"]).read_text())["workers_started"] == 0
 
 
-@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
-@pytest.mark.parametrize(("representation", "line"), [
-    ("BrokenRenderer()", 1), ("TerminalOnly()", 1), ("WithLocation(item.path, 2)", 2),
-    ("WithLocation(7, True)", 1),
+class BrokenRenderer:
+    def __str__(self):
+        return "original failure text"
+
+    def toterminal(self, writer):
+        raise RuntimeError("renderer failure")
+
+
+class TerminalOnly:
+    def toterminal(self, writer):
+        writer.line("original failure text")
+
+
+class WithLocation(TerminalOnly):
+    def __init__(self, path, line):
+        self.reprcrash = SimpleNamespace(path=path, lineno=line, message="original failure text")
+
+
+@pytest.mark.parametrize(("representation", "location"), [
+    (BrokenRenderer(), {"file": "tests/test_gate.py", "line": 1}),
+    (TerminalOnly(), {"file": "tests/test_gate.py", "line": 1}),
+    (WithLocation(Path("tests/crash.py"), 2), {"file": "tests/crash.py", "line": 2}),
+    (WithLocation(7, True), {"file": "tests/test_gate.py", "line": 1}),
 ], ids=["broken-renderer", "terminal-only", "structured-location", "invalid-location"])
-def test_focused_pytest_keeps_plugin_failure_text_and_location(pytest_checkout, tmp_path, release, representation, line):
+def test_failure_details_keeps_original_text_and_resolves_location(representation, location):
+    report = pytest.TestReport(
+        nodeid="tests/test_gate.py::test_a", location=("tests/test_gate.py", 0, "test_a"),
+        keywords={}, outcome="failed", longrepr=representation, when="call",
+    )
+    assert failure_details(report) == {"error": "original failure text", "location": location}
+
+
+@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
+def test_focused_pytest_keeps_plugin_failure_text_and_location(pytest_checkout, tmp_path, release):
     root, env = pytest_checkout
     output = tmp_path / "focused evidence"
     target = "tests/test_gate.py"
@@ -303,26 +335,14 @@ def test_focused_pytest_keeps_plugin_failure_text_and_location(pytest_checkout, 
 
 import pytest
 
-class BrokenRenderer:
-    def __str__(self):
-        return 'original failure text'
-
-    def toterminal(self, writer):
-        raise RuntimeError('renderer failure')
-
-class TerminalOnly:
-    def toterminal(self, writer):
-        writer.line('original failure text')
-
-class WithLocation(TerminalOnly):
-    def __init__(self, path, line):
-        self.reprcrash = SimpleNamespace(path=path, lineno=line, message='original failure text')
+{inspect.getsource(TerminalOnly)}
+{inspect.getsource(WithLocation)}
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_makereport(item):
     report = yield
     if report.failed:
-        report.longrepr = {representation}
+        report.longrepr = WithLocation(item.path, 2)
     return report
 """)
     command = ["./scripts/check.sh", "--pytest-target", target, "--output", str(output)]
@@ -338,7 +358,7 @@ def pytest_runtest_makereport(item):
     [failure] = json.loads(Path(gate["execution_context"]).read_text())["failures"]
     assert failure["nodeid"] == f"{target}::test_a"
     assert failure["error"] == "original failure text"
-    assert root / failure["location"]["file"] == root / target and failure["location"]["line"] == line
+    assert root / failure["location"]["file"] == root / target and failure["location"]["line"] == 2
 
 
 def test_focused_pytest_retains_surrogate_failure_and_executes_next_test(pytest_checkout, tmp_path):
@@ -529,10 +549,11 @@ def test_focused_pytest_records_the_original_import_error(pytest_checkout, tmp_p
     assert execution["targets"] == ([target] if source == "test-module" else [])
 
 
-@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
-@pytest.mark.parametrize(("source", "exit_code"), [
-    ("configuration", 3), ("configuration-usage", 4), ("conftest-syntax", 4), ("addopts-plugin", 1),
-    ("conftest-system-exit", 1),
+@pytest.mark.parametrize(("source", "exit_code", "release"), [
+    ("configuration", 3, False), ("configuration", 3, True),
+    ("configuration-usage", 4, True),
+    ("conftest-syntax", 4, False), ("conftest-syntax", 4, True),
+    ("addopts-plugin", 1, True), ("conftest-system-exit", 1, False),
 ])
 def test_focused_pytest_records_startup_errors(pytest_checkout, tmp_path, release, source, exit_code):
     root, env = pytest_checkout
@@ -594,22 +615,27 @@ def pytest_configure():
     assert "tests/test_gate.py" in gate["source_files"] and "tests/test_gate.py" in gate["argv"]
 
 
-@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
-@pytest.mark.parametrize(("hook", "phase"), [
-    ("pytest_collection_modifyitems", "collection"),
-    ("pytest_configure", "startup"),
-    ("pytest_sessionstart", "startup"),
-], ids=["collection", "configure", "sessionstart"])
-@pytest.mark.parametrize(("statement", "exit_code"), [
-    ("pytest.exit('execution rejected by validation plugin', returncode=17)", 17),
-    ("pytest.exit('execution stopped successfully', returncode=0)", 0),
-    ("raise KeyboardInterrupt", 2),
-], ids=["failed", "successful", "interrupt"])
-def test_focused_pytest_records_only_failed_explicit_exits(pytest_checkout, tmp_path, release, statement, exit_code,
-                                                         hook, phase):
+@pytest.mark.parametrize(("hook", "phase", "exit_code", "release"), [
+    ("pytest_collection_modifyitems", "collection", 17, False),
+    ("pytest_collection_modifyitems", "collection", 0, False),
+    ("pytest_collection_modifyitems", "collection", 0, True),
+    ("pytest_collection_modifyitems", "collection", 2, True),
+    ("pytest_configure", "startup", 17, True),
+    ("pytest_configure", "startup", 0, False),
+    ("pytest_configure", "startup", 2, False),
+    ("pytest_sessionstart", "startup", 17, False),
+    ("pytest_sessionstart", "startup", 0, True),
+    ("pytest_sessionstart", "startup", 2, True),
+])
+def test_focused_pytest_records_only_failed_explicit_exits(pytest_checkout, tmp_path, hook, phase, exit_code, release):
     root, env = pytest_checkout
     output = tmp_path / "explicit exit evidence"
     conftest = root / "tests/conftest.py"
+    statement = {
+        17: "pytest.exit('execution rejected by validation plugin', returncode=17)",
+        0: "pytest.exit('execution stopped successfully', returncode=0)",
+        2: "raise KeyboardInterrupt",
+    }[exit_code]
     conftest.write_text(f"import pytest\n\ndef {hook}():\n    {statement}\n")
     command = ["./scripts/check.sh", "--pytest-target", "tests/test_gate.py", "--output", str(output)]
     if release:

@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -46,6 +46,7 @@ class Gate:
     quiet: bool = False
     source_files: tuple[str, ...] = ()
     pytest_context: Literal["required", "diagnostic"] | None = None
+    codex_targets: tuple[str, ...] = ()
 
 
 class Interrupted(Exception):
@@ -497,10 +498,18 @@ def run_gate(
                     else:
                         summary = details["suites"].get(suite)
                         row["execution"] = details["execution"].get(suite)
+                        row["selection"] = details.get("selection", {}).get(suite)
+                        if suite == "pytest":
+                            expected_selection = {
+                                "scope": "targets" if gate.codex_targets else "full",
+                                "targets": list(gate.codex_targets),
+                            }
+                        else:
+                            expected_selection = {"scope": "smoke"}
                         if summary is not None:
                             row["counts"] = {**release_counts(summary, CODEX_LIVE_COUNTS), "exit_code": summary["exit_code"]}
                         confirmed = bool(summary and summary["exit_code"] == 0 and summary["skipped"] == 0 and row["execution"]
-                                         and row["execution"]["exit_code"] == 0)
+                                         and row["execution"]["exit_code"] == 0 and row["selection"] == expected_selection)
                     totals = row["counts"]
                     if row["returncode"] == 0 and not (
                         details["passed"] is True and confirmed and totals and totals["passed"] > 0
@@ -645,7 +654,8 @@ def commit_gates(root: Path, e2e: bool) -> list[Gate]:
     return gates
 
 
-def release_gates(root: Path, *, supervisor: bool) -> list[Gate]:
+def release_gates(root: Path, *, supervisor: bool, codex_full: bool = False,
+                  codex_targets: tuple[str, ...] = ()) -> list[Gate]:
     python = str(root / ".venv/bin/python")
     gates = [
         replace(gate, argv=(python, "-m", "pytest", *gate.argv[1:]), pytest_context="required")
@@ -660,10 +670,16 @@ def release_gates(root: Path, *, supervisor: bool) -> list[Gate]:
         ), root, "isolated systemd user units", "pytest", pytest_context="required"))
     gates.append(Gate("offline-e2e", "offline browser E2E", ("bun", "run", "test:e2e:fast"),
                       root / "web", "all offline browser partitions", "offline-e2e"))
-    for suite in ("pytest", "browser"):
-        gates.append(Gate(f"codex-live-{suite}", f"live Codex {suite}",
-                          (python, "scripts/codex_live.py", "--suite", suite),
-                          root, f"full live Codex {suite}", "codex-live"))
+    if codex_full or codex_targets:
+        target_args = tuple(f"--pytest-target={target}" for target in codex_targets)
+        scope = f"live Codex pytest targets: {', '.join(codex_targets)}" if codex_targets else "full live Codex pytest"
+        gates.append(Gate("codex-live-pytest", "live Codex pytest",
+                          (python, "scripts/codex_live.py", "--suite", "pytest", *target_args),
+                          root, scope, "codex-live", source_files=pytest_source_files(codex_targets),
+                          codex_targets=codex_targets))
+    gates.append(Gate("codex-live-browser", "live Codex browser",
+                      (python, "scripts/codex_live.py", "--suite", "browser"),
+                      root, "live Codex browser smoke", "codex-live"))
     return gates
 
 
@@ -675,6 +691,13 @@ def pytest_target(root: Path, target: str) -> str:
     return f"{path.relative_to(root)}{separator}{node}"
 
 
+def codex_pytest_target(root: Path, target: str) -> str:
+    target = pytest_target(root, target)
+    if target.partition("::")[0] == "tests/test_codex_login_real.py":
+        raise argparse.ArgumentTypeError("Device authentication is outside the Codex live acceptance selection")
+    return target
+
+
 def pytest_input(root: Path, filename: str) -> str:
     path = root / filename
     if not path.is_relative_to(root) or not path.is_file() or not path.resolve().is_relative_to(root):
@@ -682,19 +705,30 @@ def pytest_input(root: Path, filename: str) -> str:
     return str(path.relative_to(root))
 
 
+def pytest_source_files(targets: tuple[str, ...], inputs: Iterable[str] = ()) -> tuple[str, ...]:
+    test_files = {Path(target.partition("::")[0]) for target in targets}
+    conftests = {parent / "conftest.py" for path in test_files for parent in path.parents}
+    return tuple(sorted(set(inputs).union(map(str, test_files | conftests))))
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     available = commit_gates(root, e2e=True)
-    release_available = release_gates(root, supervisor=True)
+    release_available = release_gates(root, supervisor=True, codex_full=True)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--e2e", action="store_true", help="add Playwright to the full commit checks")
-    parser.add_argument("--release", action="store_true", help="run commit gates, offline E2E and both live Codex suites")
+    parser.add_argument("--release", action="store_true", help="run commit gates, offline E2E and Codex browser smoke")
     parser.add_argument("--supervisor", action="store_true", help="include isolated supervisor checks with --release")
     parser.add_argument("--gate", action="append", choices=sorted({gate.id for gate in available + release_available}),
                         help="run only named gates (repeat to select additional gates)")
     parser.add_argument("--pytest-target", action="append", metavar="FILE_OR_NODE_ID",
                         type=lambda target: pytest_target(root, target),
                         help="run focused hermetic pytest (serial by default, repeat to select more tests)")
+    codex = parser.add_mutually_exclusive_group()
+    codex.add_argument("--codex-live-full", action="store_true", help="include the full Codex pytest capability matrix")
+    codex.add_argument("--codex-live-target", action="append", metavar="FILE_OR_NODE_ID",
+                       type=lambda target: codex_pytest_target(root, target),
+                       help="include a live Codex capability target (repeat for multiple targets)")
     parser.add_argument("--pytest-workers", type=int, metavar="COUNT",
                         help="set the xdist worker count for a targeted release diagnostic run")
     parser.add_argument("--pytest-input", action="append", metavar="FILE", default=[],
@@ -706,10 +740,16 @@ def main() -> int:
         parser.error("--supervisor requires --release")
     if args.release and (args.e2e or not args.output):
         parser.error("--release requires --output and supplies its own browser selection")
+    if args.codex_live_full or args.codex_live_target:
+        if not args.release or args.pytest_target or (args.gate and "codex-live-pytest" not in args.gate):
+            parser.error("Codex live options require a release selection that includes codex-live-pytest")
     if args.release:
-        available = release_available if args.supervisor or "supervisor" in (args.gate or ()) else [
-            gate for gate in release_available if gate.id != "supervisor"
-        ]
+        codex_targets = tuple(dict.fromkeys(args.codex_live_target or ()))
+        available = release_gates(
+            root, supervisor=args.supervisor or "supervisor" in (args.gate or ()),
+            codex_full=args.codex_live_full or ("codex-live-pytest" in (args.gate or ()) and not codex_targets),
+            codex_targets=codex_targets,
+        )
     if set(args.gate or ()).difference(gate.id for gate in available):
         parser.error("Choose gates from the selected commit or release check set")
     if args.pytest_input and not args.pytest_target:
@@ -724,9 +764,6 @@ def main() -> int:
             if "pytest" in (args.gate or ()):
                 parser.error("Choose full --gate pytest or focused --pytest-target")
             targets = tuple(dict.fromkeys(args.pytest_target))
-            test_files = {Path(target.partition("::")[0]) for target in targets}
-            conftests = {parent / "conftest.py" for target in test_files for parent in target.parents}
-            source_files = set(args.pytest_input).union(map(str, test_files | conftests))
             command = ((str(root / ".venv/bin/python"), "-m", "pytest") if args.release
                        else (str(root / ".venv/bin/pytest"),))
             workers = ("-n", str(args.pytest_workers or 0)) if args.release else ()
@@ -736,7 +773,7 @@ def main() -> int:
                 "pytest-focused", "backend unit (focused hermetic selection)",
                 (*command, *config, *targets, "-m", HERMETIC_PYTEST_SELECTION, *workers, *distribution, "-q"),
                 root, f"{', '.join(targets)} ({HERMETIC_PYTEST_SELECTION})", "pytest",
-                source_files=tuple(sorted(source_files)),
+                source_files=pytest_source_files(targets, args.pytest_input),
                 pytest_context="required" if args.release else "diagnostic",
             ))
     elif args.release:

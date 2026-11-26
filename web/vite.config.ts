@@ -1,28 +1,27 @@
-/// <reference types="vitest/config" />
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { defineConfig, searchForWorkspaceRoot } from 'vite'
+import { defineConfig, searchForWorkspaceRoot, type Plugin } from 'vite'
+import { configDefaults } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitestEvidence } from './tests/vitestEvidence'
+import { OFFLINE_VITE_HMR_PATH } from './e2e/vite-hmr'
 
 const apiTarget = `http://localhost:${process.env.OCTOPUS_API_PORT || '8000'}`
 const evidenceDirectory = process.env.OCTOPUS_VITEST_EVIDENCE_DIR
 const evidence = evidenceDirectory ? new VitestEvidence(evidenceDirectory) : undefined
+const evidencePlugin: Plugin | undefined = evidence && {
+  name: 'octopus-vitest-evidence',
+  configureVitest({ vitest }) {
+    // The inline projects use this root config's instance even when Vite
+    // reloads the inherited config for each project.
+    if (!vitest.config.reporters.includes(evidence)) vitest.config.reporters.push(evidence)
+  },
+}
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [
-    react(),
-    tailwindcss(),
-    evidence && {
-      name: 'octopus-vitest-evidence',
-      configureVitest({ vitest }) {
-        // CLI overrides are already resolved, and Vitest has yet to instantiate the reporters.
-        if (!vitest.config.reporters.includes(evidence)) vitest.config.reporters.push(evidence)
-      },
-    },
-  ],
+  plugins: [react(), tailwindcss()],
   // Two dev servers run at once during e2e (playwright.config.ts: one proxying
   // to the shared backend, one to the accounts backend). They share this
   // project, so they share `node_modules/.vite` — and each one's dependency
@@ -32,6 +31,7 @@ export default defineConfig({
   // it.
   cacheDir: process.env.VITE_CACHE_DIR || undefined,
   server: {
+    ...(process.env.OCTOPUS_E2E_MODE === 'offline' && { hmr: { path: OFFLINE_VITE_HMR_PATH } }),
     // Worktrees reuse installed dependencies; font URLs resolve to that
     // directory's real path, which can be outside this checkout.
     fs: { allow: [searchForWorkspaceRoot(fileURLToPath(new URL('.', import.meta.url))),
@@ -47,11 +47,29 @@ export default defineConfig({
     },
   },
   test: {
-    environment: 'jsdom',
-    globals: true,
-    setupFiles: './src/test-setup.ts',
-    exclude: ['e2e/**', 'node_modules/**'],
     ...(evidence && { includeTaskLocation: true, onUnhandledError: evidence.onUnhandledError }),
+    projects: [
+      {
+        extends: true,
+        plugins: [evidencePlugin],
+        test: {
+          name: 'frontend',
+          exclude: [...configDefaults.exclude, 'e2e/**', 'tests/**'],
+          environment: 'jsdom',
+          globals: true,
+          setupFiles: './src/test-setup.ts',
+        },
+      },
+      {
+        extends: true,
+        plugins: [evidencePlugin],
+        test: {
+          name: 'tooling',
+          include: configDefaults.include.map(pattern => `tests/${pattern}`),
+          environment: 'node',
+        },
+      },
+    ],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],
