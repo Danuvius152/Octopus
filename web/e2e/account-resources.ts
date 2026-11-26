@@ -11,6 +11,23 @@ async function checked(response: APIResponse): Promise<APIResponse> {
   return response;
 }
 
+export async function editExtraRoots(request: APIRequestContext, userId: string) {
+  const adminToken = process.env.OCTOPUS_E2E_ACCOUNT_TOKEN;
+  if (!adminToken) throw new Error("Editing extra roots requires the offline provisioning account");
+  const headers = { Authorization: `Bearer ${adminToken}` };
+  const accountPath = `${ACCOUNT_API}/auth/users/${userId}`;
+  const flow = await checked(await request.post(`${accountPath}/workspace-edits`, { headers, data: { flow_id: randomUUID() } }));
+  const { flow_id, service_generation } = await flow.json();
+  let sequence = 0;
+  return async (extra_roots: string[]) => {
+    const update = await checked(await request.put(`${accountPath}/extra-roots`, {
+      headers, data: { flow_id, service_generation, sequence: ++sequence, extra_roots },
+    }));
+    const saved = (await update.json()).extra_roots;
+    if (JSON.stringify(saved) !== JSON.stringify(extra_roots)) throw new Error("Fixture extra roots did not match the requested grants");
+  };
+}
+
 export async function createTestAccount(request: APIRequestContext, admin: string): Promise<TestAccount> {
   // Every attempt, retry/repeat and rebuilt worker creates a new namespace.
   const username = `e2e-${randomUUID().replaceAll("-", "").slice(0, 24)}`;

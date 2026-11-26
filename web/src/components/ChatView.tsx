@@ -1,4 +1,3 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
 import { schedules } from "../lib/scheduleList";
 import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 import { ArchiveDeadline, postArchive } from "../lib/sessionArchive";
@@ -280,7 +279,7 @@ export function ChatView({
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const mainView = useSessionStore((s) => s.mainView);
   const composerRevision = useRef(0);
-  const viewing = useRef<{ account: number; sessionId: string } | null>(null);
+  const archiveIntent = useRef<{ account: number; sessionId: string } | null>(null);
   useEffect(() => {
     const unsubscribe = useSessionStore.subscribe((state, before) => {
       const sameConversation = state.activeSessionId === before.activeSessionId && state.accountGeneration === before.accountGeneration;
@@ -302,12 +301,12 @@ export function ChatView({
       }
       if (!sameConversation || state.mainView !== before.mainView || state.viewer !== before.viewer) {
         focusAfterArchive.current = null;
-        viewing.current = null;
+        archiveIntent.current = null;
         submissionCommand.current = null;
         pendingFileRestore.current = null;
       }
     });
-    return () => { viewing.current = null; unsubscribe(); };
+    return () => { archiveIntent.current = null; unsubscribe(); };
   }, [preserveArchiveLayout]);
   const compactSending = useRef<AbortController | null>(null);
   useEffect(() => () => {
@@ -716,7 +715,7 @@ export function ChatView({
       // Dispatch can clear its controls before archive membership arrives.
       archiveWrites.current.add(intent);
       preserveArchiveLayout(intent);
-      viewing.current = intent;
+      archiveIntent.current = intent;
       const version = textDraft.store.getState().version;
       setArchiveFeedback(null);
       archiveObserver.current?.stop();
@@ -759,7 +758,7 @@ export function ChatView({
         if (archiveObserver.current === ownership) archiveObserver.current = null;
       };
       const ownership = { stop, revokeHandoff };
-      const current = () => mounted.current && foreground && viewing.current === intent &&
+      const current = () => mounted.current && foreground && archiveIntent.current === intent &&
         sessionList.accountCurrent(observation) && textDraft.current() && textDraft.store.getState().version === version;
       const keepObserving = () => current() &&
         (retain || observedFeedback !== undefined || !hasPostResult && sessionList.archiveActivityCurrent(activeSessionId, observation));
@@ -1105,83 +1104,10 @@ export function ChatView({
       return;
     }
 
-    if (lower === "/showme" || lower.startsWith("/showme ")) {
-      const store = useSessionStore.getState();
-      if (store.activeSessionId !== activeSessionId || store.mainView !== "chat") return;
+    if (/^\/showme(?:\s|$)/i.test(trimmed)) {
       const text = trimmed.slice("/showme".length).trim();
-      if (!text) {
-        useSessionStore.getState().addMessage(activeSessionId, {
-          role: "system",
-          type: "notice",
-          content: "Usage: /showme <file reference>",
-          is_error: true,
-        });
-        setInput("");
-        return;
-      }
-
-      // Immediate UX feedback: clear the composer, echo the command into
-      // the transcript (so it doesn't look like Enter was missed), and
-      // post a loading notice (the resolver call can take a second or two
-      // when the model has to interpret a fuzzy reference).
       setInput("");
-      const intent = { account: store.accountGeneration, sessionId: activeSessionId };
-      viewing.current = intent;
-      const current = () => {
-        const now = useSessionStore.getState();
-        return viewing.current === intent && now.accountGeneration === intent.account &&
-          now.activeSessionId === intent.sessionId && now.mainView === "chat";
-      };
-      const failure = (content: string) => {
-        if (current()) useSessionStore.getState().addMessage(activeSessionId, { role: "system", type: "notice", content, is_error: true });
-      };
-      store.addMessage(activeSessionId, {
-        role: "user",
-        type: "text",
-        content: trimmed,
-      });
-      store.addMessage(activeSessionId, {
-        role: "system",
-        type: "notice",
-        content: `Looking for “${text}”…`,
-      });
-
-      try {
-        const res = await fetch(
-          `${window.location.origin}/api/sessions/${activeSessionId}/showme/resolve`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${store.token}`,
-            },
-            body: JSON.stringify({ text }),
-          }
-        );
-        if (!current()) return;
-        if (!res.ok) {
-          let detail = `Couldn't resolve file reference (HTTP ${res.status}).`;
-          try {
-            const body = await res.json();
-            if (typeof body?.detail === "string") detail = body.detail;
-          } catch {
-            // keep the generic message
-          }
-          failure(detail);
-          return;
-        }
-        const data = await res.json();
-        if (!current()) return;
-        if (typeof data?.path === "string" && data.path) {
-          useSessionStore.getState().openViewer(activeSessionId, data.path);
-        } else {
-          failure(typeof data?.message === "string" && data.message ? data.message : "Couldn't resolve that file reference.");
-        }
-      } catch {
-        failure("Couldn't resolve file reference — network error.");
-      } finally {
-        if (viewing.current === intent) viewing.current = null;
-      }
+      foreground.openViewer(activeSessionId, text, { mode: text ? "command" : "picker" });
       return;
     }
 
@@ -1224,7 +1150,7 @@ export function ChatView({
           {submissionError && submissionError.command === submissionCommand.current &&
             submissionError.command.account === accountGeneration && submissionError.command.sessionId === sessionId &&
             <p role="alert" className="mb-2 text-sm text-destructive">{submissionError.message}</p>}
-          {archiveFeedback && viewing.current === archiveFeedback.intent &&
+          {archiveFeedback && archiveIntent.current === archiveFeedback.intent &&
             archiveFeedback.intent.account === accountGeneration && archiveFeedback.intent.sessionId === sessionId &&
             textDraft.store.getState().version === archiveFeedback.version && sessionList.accountCurrent(archiveFeedback.observation) &&
             <>
@@ -1355,6 +1281,8 @@ export function ChatView({
                 — viewing read-only history. Unarchive from the sidebar to continue the conversation.
               </span>}
               {archived && <ArchivedSuccessor key={`successor:${sessionId}`} sessionId={sessionId} />}
+              {!preparation && <button type="button" data-open-session-file className="underline" onClick={() =>
+                useSessionStore.getState().openViewer(sessionId, "", { mode: "edit" })}>Open file</button>}
               <SessionContextMeter key={`context:${sessionId}`} sessionId={sessionId} archived={archived} />
             </div>
           ) : (

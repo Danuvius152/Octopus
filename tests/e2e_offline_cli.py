@@ -5,6 +5,11 @@ HarnessRun readers, session turn engine, WS broadcasts and durable messages.
 """
 
 import json
+import os
+
+if (reply := os.environ.get("OCTOPUS_E2E_ONESHOT_REPLY")) is not None:
+    print(reply, flush=True)
+    raise SystemExit(0)
 
 for event in [
     {"type": "assistant", "message": {"role": "assistant", "content": [

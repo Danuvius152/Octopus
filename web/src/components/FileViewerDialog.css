@@ -1,24 +1,155 @@
-/* GitHub-flavored markdown styling for the FileViewerDialog body.
- *
- * Layered on top of @tailwindcss/typography (the .prose base class):
- * the plugin gives reasonable line-height, list indents, spacing, etc.;
- * we override the bits that matter for a GitHub-feel (heading scale +
- * bottom borders, table grid lines, code block container, inline code
- * background, blockquote styling).
- *
- * Selector strategy: scope everything under .md-github so it only
- * targets the viewer body and not, e.g., the assistant message bubbles
- * elsewhere in the chat that use `.markdown` for plain react-markdown.
- *
- * Colors come from the project's CSS variables (see tokens.css) so the
- * styling tracks the rest of the app's theme.
- */
+/* The file viewer uses the shared theme and typography tokens. Markdown
+ * rules under .md-github customize the prose defaults only in the viewer. */
+
+.file-viewer-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: "heading tools close" "path path path" "request request request";
+  align-items: center;
+  column-gap: .5rem;
+  padding: .5rem clamp(.625rem, 2vw, 1.25rem);
+  font-size: 14px;
+}
+
+.file-viewer-heading,
+.file-viewer-tools,
+.file-viewer-path {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  min-width: 0;
+}
+
+.file-viewer-heading { grid-area: heading; }
+.file-viewer-heading h2 { font-size: 16px; }
+.file-viewer-tools { grid-area: tools; flex-wrap: wrap; }
+.file-viewer-close { grid-area: close; }
+.file-viewer-path { grid-area: path; }
+.file-viewer-request { grid-area: request; }
+.file-viewer-path, .file-viewer-request { font-family: var(--font-family-mono); }
+.file-viewer-path-expanded {
+  max-height: 4.5em;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.file-viewer-actions { display: flex; }
+.file-viewer-more { display: none; }
+.file-viewer-menu {
+  max-width: calc(100vw - 1rem);
+  max-height: var(--radix-dropdown-menu-content-available-height);
+  overflow: auto;
+  font-size: 14px;
+}
+.file-viewer-menu [role="menuitem"] {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .375rem .5rem;
+  border-radius: .25rem;
+  cursor: pointer;
+}
+.file-viewer-menu [data-highlighted] { background: hsl(var(--accent)); }
+.file-viewer-menu [data-disabled] { opacity: .5; cursor: default; }
+
+.file-viewer :focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+.file-viewer-body {
+  --reader-prose-size: 18px;
+  --reader-code-size: 16px;
+}
+.file-viewer-body[data-reader-size="compact"] {
+  --reader-prose-size: 16px;
+  --reader-code-size: 14px;
+}
+.file-viewer-body[data-reader-size="large"] {
+  --reader-prose-size: 20px;
+  --reader-code-size: 18px;
+}
+.file-viewer-body[data-reader-size="larger"] {
+  --reader-prose-size: 22px;
+  --reader-code-size: 20px;
+}
 
 .md-github {
-  /* GitHub default body line height + font size feel. The prose-sm
-   * modifier already sets a 14px base; we just nudge line-height. */
-  line-height: 1.55;
+  box-sizing: content-box;
+  max-width: 44rem;
+  margin-inline: auto;
+  padding: 1.5rem clamp(.75rem, 3vw, 2rem);
+  overflow-wrap: anywhere;
+  font-family: var(--font-family-sans);
+  font-size: var(--reader-prose-size);
+  line-height: 1.75;
   color: hsl(var(--foreground));
+}
+
+.file-source,
+.md-github .md-codeblock pre {
+  font-family: var(--font-family-mono);
+  font-size: var(--reader-code-size);
+  line-height: 1.6;
+}
+
+.file-source {
+  padding-inline: clamp(.75rem, 2vw, 1.5rem);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.file-source > code {
+  display: block;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.file-source-line {
+  position: relative;
+  display: block;
+  padding-inline-start: 12ch;
+  min-height: 1lh;
+}
+
+.file-source-line::before {
+  content: attr(data-line);
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  width: 10ch;
+  text-align: end;
+  white-space: nowrap;
+  color: hsl(var(--muted-foreground));
+  user-select: none;
+}
+
+.file-source-line[data-located] {
+  background-color: hsl(var(--accent));
+  box-shadow: inset 3px 0 currentColor;
+}
+
+.file-source-line[data-located]::before {
+  content: "▸ " attr(data-line);
+  font-weight: 700;
+}
+
+@media (max-width: 42rem) {
+  .file-viewer-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "heading close" "tools tools" "path path" "request request";
+    row-gap: .125rem;
+  }
+  .file-viewer-bytes, .file-viewer-actions { display: none; }
+  .file-viewer-more { display: flex; }
+}
+
+@media (max-width: 24rem) {
+  .file-source { white-space: pre; }
+  .file-source-line { width: max-content; min-width: 100%; }
 }
 
 /* ── Headings ─────────────────────────────────────────────────────── */
@@ -74,7 +205,7 @@
 
 .md-github :not(pre) > code {
   font-family: var(--font-family-mono, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 0.88em;
+  font-size: 0.94em;
   padding: 0.16em 0.36em;
   margin: 0;
   background-color: hsl(var(--muted));
@@ -85,8 +216,6 @@
 .md-github :not(pre) > code::after { content: none !important; }
 
 /* ── Block code (the container our custom MarkdownPreBlock wraps) ── */
-
-.md-github .md-codeblock { /* wrapper from MarkdownPreBlock */ }
 
 .md-github .md-codeblock pre {
   /* White (card) background, matching GitHub's actual code-block
@@ -102,14 +231,17 @@
   border-radius: 6px;
   padding: 0.8rem 1rem;
   overflow-x: auto;
-  font-size: 0.85em;
-  line-height: 1.5;
+  overflow-wrap: normal;
   margin: 0;
 }
 .md-github .md-codeblock pre code {
   background: transparent;
   padding: 0;
+  overflow: visible;
   font-size: inherit;
+  font-family: inherit;
+  line-height: inherit;
+  white-space: pre;
   /* Let hljs's per-token colors win for highlighted blocks; for
    * blocks with no hljs class, this gives a strong base color. */
   color: hsl(var(--foreground));
@@ -117,14 +249,18 @@
 
 /* ── Tables (GitHub grid look) ───────────────────────────────────── */
 
-.md-github table {
-  display: block;
-  width: max-content;
-  max-width: 100%;
+.file-markdown-table {
   overflow-x: auto;
+  margin-block: 1em;
+}
+.md-github .file-markdown-table > table {
+  width: max-content;
+  max-width: none;
   border-spacing: 0;
   border-collapse: collapse;
-  margin: 1em 0;
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
 }
 .md-github th,
 .md-github td {

@@ -353,7 +353,8 @@ def test_oneshot_argv_and_parse(tmp_path):
     )
     settings_index = argv.index("--settings")
     assert argv[:settings_index] + argv[settings_index + 2:] == [
-        "claude", "--print", "--output-format=json", "--model", "claude-opus-4-7", "--", "parse this",
+        "claude", "--print", "--output-format=json", "--safe-mode", "--tools", "",
+        "--model", "claude-opus-4-7", "--", "parse this",
     ]
     assert kw["cwd"] == str(tmp_path)
     assert kw["env"]["ANTHROPIC_API_KEY"] == "sk-1"

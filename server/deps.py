@@ -27,12 +27,14 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .mcp_identity import McpScope, scope_is_authorized
+from .credential_use import CredentialUse
+from .mcp_identity import McpScope, scope_is_authorized, scope_is_live
 from .mcp_identity import verify as verify_mcp_scope
 from .question_resolution import AnswerSource
 from .sessions import SessionManager
 from .sessions import session_manager as _singleton
 from .users import UserManager, token_digest
+from .workspace import decode_extra_roots
 
 
 def get_session_manager() -> SessionManager:
@@ -193,14 +195,19 @@ class Principal:
             run_lease_id=scope.run_lease_id if scope else None)
 
 
+async def _account_for_bearer(token: str) -> dict[str, Any] | None:
+    if _user_manager is None:
+        return None
+    return await _user_manager.resolve_token(token, touch=False)
+
+
 async def resolve_principal(token: str) -> Principal | None:
     """Validate once, read only. Runtime scopes keep their live authority checks."""
     if not token:
         return None
-    if _user_manager is not None:
-        user = await _user_manager.resolve_token(token, touch=False)
-        if user is not None:
-            return Principal(user["id"], "account")
+    user = await _account_for_bearer(token)
+    if user is not None:
+        return Principal(user["id"], "account")
     scope = verify_mcp_scope(token)
     if scope is not None and scope.user_id is not None:
         return Principal(scope.user_id, "mcp", scope) if await scope_is_authorized(scope) else None
@@ -226,21 +233,64 @@ async def data_key_for(user_id: str | None) -> str:
     return await get_user_manager().data_key_for(user_id)
 
 
-async def viewer_user_id(
+async def viewer_token(
     request: Request,
     creds: _BearerCreds,
     token: _QueryToken = None,
-) -> str | None:
-    """Allowed *and* scoped, for the routes a browser reaches without a header.
+) -> str:
+    """Read the credential without authorizing a queued file operation yet."""
+    return _presented(request, creds, token)
 
-    `verify_token` reads the `Authorization` header only, so a route an `<img
-    src>` or an iframe has to fetch — the file viewer, an attachment — carried
-    its own hand-rolled check against `OCTOPUS_AUTH_TOKEN`, and would have
-    stopped opening anything the moment an account existed. This is the one
-    dependency that both admits the request and says whose rows it may see,
-    from any of the three places a bearer travels.
-    """
-    allowed, user_id = await scope_user_id_for(_presented(request, creds, token))
+
+ViewerToken = Annotated[str, Depends(viewer_token)]
+
+
+@dataclass(frozen=True)
+class ViewerAuthority:
+    user_id: str | None
+    extra_roots: list[str]
+
+
+async def resolve_viewer_authority(token: str) -> ViewerAuthority | None:
+    """Resolve the credential and its account's directory grants together."""
+    if not token:
+        return None
+    user = await _account_for_bearer(token)
+    if user is None:
+        scope = verify_mcp_scope(token)
+        if scope is None or scope.user_id is None or _user_manager is None:
+            return None
+        user = await _user_manager.db.get_user(scope.user_id)
+        if user is None or user["disabled_at"] or not scope_is_live(scope):
+            return None
+    # For account tokens, this row is part of the same committed read that
+    # checked revocation and account state. Runtime scopes use the current owner
+    # row and check their in-process lease after reading it.
+    return ViewerAuthority(user["id"], decode_extra_roots(user.get("extra_roots")))
+
+
+async def resolve_viewer_run_authority(
+    token: str, user_id: str | None, credential_id: str | None, backend: str,
+    credential_use: CredentialUse | None,
+) -> ViewerAuthority | None:
+    """Authorize a viewer's model launch against contemporaneous grants and credentials."""
+    if not token or user_id is None or _user_manager is None:
+        return None
+    scope = verify_mcp_scope(token)
+    if scope is not None and (scope.user_id != user_id or not scope_is_live(scope)):
+        return None
+    user = await _user_manager.db.get_viewer_run_user(
+        user_id, credential_id, backend, token_hash=token_digest(token) if scope is None else None,
+        credential_use=credential_use,
+    )
+    if user is None or (scope is not None and not scope_is_live(scope)):
+        return None
+    return ViewerAuthority(user_id, decode_extra_roots(user.get("extra_roots")))
+
+
+async def viewer_user_id(token: ViewerToken) -> str | None:
+    """Authenticate and scope viewer requests before entering the route."""
+    allowed, user_id = await scope_user_id_for(token)
     if not allowed:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
     return user_id

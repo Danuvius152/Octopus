@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import { useStore } from "zustand";
-import { IconEye, IconRestore, IconTrash } from "@tabler/icons-react";
+import { IconEye, IconFile, IconRestore, IconTrash } from "@tabler/icons-react";
 import {
   useSessionStore,
   type Agent,
@@ -33,6 +33,7 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
   const archived = useSessionStore((s) => s.archivedSessions);
+  const canOpenFile = useSessionStore((s) => s.mainView === "chat" && s.activeSessionId !== null);
   const read = useSessionStore((s) => s.sessionRead);
   const identity = useSessionStore((s) => s.identity?.user_id);
   const live = useSessionStore((s) => s.sessions);
@@ -221,6 +222,18 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
                         <IconEye size={13} />
                         View
                       </button>
+                      {canOpenFile && <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+                        aria-haspopup="dialog"
+                        onClick={(event) => {
+                          event.currentTarget.focus({ preventScroll: true });
+                          useSessionStore.getState().openViewer(s.id, "", { mode: "edit" });
+                        }}
+                      >
+                        <IconFile size={13} aria-hidden="true" />
+                        Open file
+                      </button>}
                       <button
                         className="btn-archived-unarchive inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-primary hover:bg-primary/10"
                         onClick={() => unarchive(s)}

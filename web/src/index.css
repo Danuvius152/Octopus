@@ -450,6 +450,55 @@ body {
   outline-offset: 2px;
 }
 
+.chat-file-link {
+  display: inline-flex;
+  align-items: baseline;
+  vertical-align: baseline;
+  gap: 0.3em;
+  max-width: 100%;
+  margin: 0 0.05em;
+  padding: 0.04em 0.36em;
+  border: 1px solid hsl(var(--primary) / 0.28);
+  border-radius: 5px;
+  background: hsl(var(--primary) / 0.08);
+  color: hsl(var(--primary));
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  user-select: text;
+}
+
+.chat-file-link:hover {
+  background: hsl(var(--primary) / 0.15);
+}
+
+.chat-file-link:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
+}
+
+.chat-file-link > svg {
+  flex: none;
+  align-self: center;
+}
+
+.chat-file-link [data-file-position] {
+  flex: none;
+  max-inline-size: 50%;
+  overflow: hidden;
+  padding-inline-start: 0.35em;
+  border-inline-start: 1px solid hsl(var(--primary) / 0.28);
+  font-size: 0.85em;
+  text-overflow: ellipsis;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.chat-file-link [data-file-position]::before {
+  content: attr(data-file-position);
+}
+
 .msg-assistant .markdown ul, .msg-assistant .markdown ol {
   padding-left: 1.5rem;
   margin: 0.4rem 0;

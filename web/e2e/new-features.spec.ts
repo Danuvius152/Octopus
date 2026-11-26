@@ -2014,23 +2014,6 @@ test.describe("File attachments", () => {
 });
 
 // ---------------------------------------------------------------------------
-// In-app file viewer (/showme — client-resolved, no MCP tool)
-// ---------------------------------------------------------------------------
-//
-// Full-chain test: user types `/showme <reference>` → ChatView intercepts
-// client-side → POST /api/sessions/{id}/showme/resolve → a one-shot model
-// call interprets the reference in conversation context and returns a
-// concrete path → ChatView calls openViewer(path) → FileViewerDialog fetches
-// /api/sessions/{id}/files/meta then the bytes and dispatches to the
-// markdown renderer.
-//
-// Real Claude is required (the resolver makes a one-shot model call). One
-// scenario (markdown) is enough to validate the chain — per-renderer
-// dispatch is covered by vitest in src/components/FileViewerDialog.test.tsx,
-// per-extension classification by tests/test_file_viewer.py, and resolver
-// failure modes by tests/test_showme_ai.py.
-
-// ---------------------------------------------------------------------------
 // Cross-turn background tasks (mcp__bg__run)
 // ---------------------------------------------------------------------------
 //
@@ -2365,82 +2348,6 @@ test.describe("Bg-task pipeline hardening @llm", () => {
         page.locator(".msg-assistant .msg-content").last()
       ).toContainText(SENTINEL, { timeout: 90_000 });
     } finally {
-      fs.rmSync(wd, { recursive: true, force: true });
-    }
-  });
-});
-
-test.describe("File viewer (/showme) @llm", () => {
-  test.setTimeout(180_000);
-
-  test("/showme on a markdown file opens the viewer with rendered content", async ({
-    page,
-    request,
-  }) => {
-    // Stage a working_dir with a markdown file the model can resolve.
-    // Using a per-test tmpdir keeps us isolated from anything else
-    // running on the box. tmpdir is on the same filesystem as the
-    // server since both share this host, so path sandbox checks work
-    // as in production.
-    const wd = fs.mkdtempSync(path.join(os.tmpdir(), "octopus-viewer-e2e-"));
-    fs.writeFileSync(
-      path.join(wd, "intro.md"),
-      "# Octopus Viewer\n\nThis is the **intro** doc rendered live.\n"
-    );
-
-    try {
-      const sessRes = await request.post(`${API}/sessions`, {
-        headers: {
-          Authorization: `Bearer ${accountToken()}`,
-          "Content-Type": "application/json",
-        },
-        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${accountToken()}` }), name: "Viewer Showme Test", working_dir: wd },
-      });
-      expect(sessRes.ok()).toBeTruthy();
-
-      await login(page);
-      await page
-        .locator(".session-item .session-name", {
-          hasText: "Viewer Showme Test",
-        })
-        .click();
-      await expect(page.locator(".chat-header .crumb-current")).toHaveText(
-        "Viewer Showme Test"
-      );
-
-      // Send the slash command. ChatView intercepts /showme client-side
-      // and POSTs to the resolver, which runs a one-shot model call.
-      // No model turn appears in the chat — the dialog opens directly.
-      await page
-        .locator(".chat-input-bar textarea")
-        .fill("/showme intro.md");
-      await page.locator("button.btn-send").click();
-
-      // Dialog opens once the resolver returns the concrete path. Radix
-      // Dialog renders role=dialog on the content node; the data-state
-      // attribute flips to "open" when mounted.
-      const dialog = page.locator('[role="dialog"][data-state="open"]');
-      await expect(dialog).toBeVisible({ timeout: 90_000 });
-
-      // Header surfaces the filename.
-      await expect(dialog).toContainText("intro.md");
-
-      // Markdown renderer turns # into an <h1>, and the bold span lands
-      // as a <strong>. Asserting both proves we mounted the markdown
-      // body (not e.g. the plain-text fallback) and that the file
-      // bytes actually rendered.
-      await expect(
-        dialog.locator("h1", { hasText: "Octopus Viewer" })
-      ).toBeVisible({ timeout: 15_000 });
-      await expect(dialog.locator("strong", { hasText: "intro" })).toBeVisible();
-
-      // Close button (aria-label="Close") returns the dialog state to closed.
-      await dialog.locator('button[aria-label="Close"]').click();
-      await expect(page.locator('[role="dialog"][data-state="open"]')).toHaveCount(
-        0
-      );
-    } finally {
-      // Clean up the tmpdir whatever the test result.
       fs.rmSync(wd, { recursive: true, force: true });
     }
   });

@@ -23,6 +23,8 @@ import type {
   ConnectorCatalogEntry as ApiConnectorCatalogEntry,
   ConnectorInstallationInfo as ApiConnectorInstallationInfo,
   CredentialInfo as ApiCredentialInfo,
+  FilePosition,
+  FileResourceDirectory,
   ScheduleInfo,
   SessionInfo as ApiSessionInfo,
   SubagentDefinition as ApiSubagentDefinition,
@@ -36,20 +38,33 @@ export type BackendCatalogRead =
   | { status: "idle" | "loading" | "failed" }
   | { status: "ready"; catalog: BackendCatalog };
 
-export interface FileResourceDirectory {
-  path: string;
-  path_id: string;
-}
-
 export interface FileViewerIntent {
   id: number;
   sessionId: string;
   path: string;
-  fragment?: string;
+  mode?: "command" | "description" | "edit" | "unsupported" | "picker";
+  description?: string;
+  accountGeneration: number;
+  foregroundSessionId: string | null;
+  foregroundView: MainView;
+  position?: FilePosition;
+  source?: string;
   sourceDirectory?: FileResourceDirectory;
 }
 
+export type FileViewerOptions = Pick<FileViewerIntent, "mode" | "description" | "position" | "source" | "sourceDirectory">;
+
 let nextFileViewerId = 0;
+
+export function isCurrentFileViewer(viewer: FileViewerIntent): boolean {
+  const state = useSessionStore.getState();
+  return state.viewer === viewer && state.accountGeneration === viewer.accountGeneration;
+}
+
+function viewerForForeground(state: SessionStore, view: MainView, sessionId = state.activeSessionId) {
+  const { viewer } = state;
+  return viewer?.foregroundView === view && viewer.foregroundSessionId === sessionId ? viewer : null;
+}
 
 interface AcceptedTextConsumer { sessionId: string; account: number; notify: () => void }
 // Only openings waiting for their one timeout recovery subscribe. The original
@@ -464,10 +479,10 @@ interface SessionStore {
   connected: boolean;
   setConnected: (c: boolean) => void;
 
-  // The App-level viewer reads this slot. Each open owns its source
-  // session, file path, source directory and fragment until replaced or closed.
+  // The App-level viewer reads this slot. Each open owns its session, file
+  // path, selected source, relative document directory and position.
   viewer: FileViewerIntent | null;
-  openViewer: (sessionId: string, path: string, options?: Pick<FileViewerIntent, "fragment" | "sourceDirectory">) => void;
+  openViewer: (sessionId: string, path: string, options?: FileViewerOptions) => void;
   closeViewer: () => void;
 
   // Cross-turn background tasks. Keyed by sessionId → list of tasks
@@ -963,6 +978,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => ({
       activeApplicationId: id,
       mainView: "application",
+      viewer: viewerForForeground(s, "application"),
       sidebarOpen: false,
       // Opening it is what "seen" means.
       unseenFailedApplications: s.unseenFailedApplications.filter(
@@ -970,15 +986,17 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       ),
     })),
   openApplicationCreate: () =>
-    set({
+    set((s) => ({
       activeApplicationId: null,
       mainView: "application-create",
+      viewer: viewerForForeground(s, "application-create"),
       pageTab: "form",
       sidebarOpen: false,
-    }),
+    })),
   openAgentForm: (agentId = null) =>
     set((s) => ({
       mainView: "agent-form",
+      viewer: viewerForForeground(s, "agent-form"),
       editingAgentId: agentId,
       agentFormGeneration: s.agentFormGeneration + 1,
       pageTab: "form",
@@ -993,9 +1011,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         : { unseenFailedApplications: [...s.unseenFailedApplications, id] }
     ),
   openManage: (view) =>
-    set({ mainView: view, activeApplicationId: null, sidebarOpen: false }),
+    set((s) => ({ mainView: view, viewer: viewerForForeground(s, view), activeApplicationId: null, sidebarOpen: false })),
   showChat: () =>
-    set({ mainView: "chat", activeApplicationId: null, sidebarOpen: false }),
+    set((s) => ({ mainView: "chat", viewer: viewerForForeground(s, "chat"), activeApplicationId: null, sidebarOpen: false })),
 
   backendCatalog: { status: "idle" },
 
@@ -1016,15 +1034,16 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   // Selecting a session is also what leaves an application view — see
   // `mainView` above.
   setActiveSessionId: (id) =>
-    set({
+    set((s) => ({
       activeSessionId: id,
       mainView: "chat",
+      viewer: viewerForForeground(s, "chat", id),
       activeApplicationId: null,
       sidebarOpen: false,
-    }),
+    })),
   forgetSession: (id) => set((s) => ({
     activeSessionId: s.activeSessionId === id ? null : s.activeSessionId,
-    viewer: s.viewer?.sessionId === id ? null : s.viewer,
+    viewer: s.viewer?.sessionId === id || s.viewer?.foregroundSessionId === id ? null : s.viewer,
     messages: dropKey(s.messages, id), pendingQuestions: dropKey(s.pendingQuestions, id),
     closedQuestionIds: dropKey(s.closedQuestionIds, id), pendingForks: dropKey(s.pendingForks, id),
     questionDrafts: Object.fromEntries(Object.entries(s.questionDrafts).filter(([, draft]) => draft.sessionId !== id)),
@@ -1419,9 +1438,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setConnected: (c) => set({ connected: c }),
 
   viewer: null,
-  openViewer: (sessionId, path, options) => set({
-    viewer: { id: ++nextFileViewerId, sessionId, path, ...options },
-  }),
+  openViewer: (sessionId, path, options) => set((state) => ({
+    viewer: {
+      id: ++nextFileViewerId, sessionId, path, ...options,
+      accountGeneration: state.accountGeneration,
+      foregroundSessionId: state.activeSessionId,
+      foregroundView: state.mainView,
+    },
+  })),
   closeViewer: () => set({ viewer: null }),
 
   bgTasks: {},

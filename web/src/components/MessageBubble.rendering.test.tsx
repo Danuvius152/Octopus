@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
+import { FileViewerDialog } from "./FileViewerDialog";
 import { MessageBubble } from "./MessageBubble";
 import { projectMarkdownOutput } from "./chatMarkdown";
 import { mockChatViewport } from "./chatViewport.test-support";
@@ -51,6 +52,97 @@ it("keeps streaming text literal and renders the completed content through Markd
   view.rerender(<MessageBubble sessionId={session.id} message={message} />);
   expect(screen.getByText("Still arriving").tagName).toBe("STRONG");
   expect(observed.sources).toEqual([message.content]);
+});
+
+it("opens a historical table link for the message session and preserves the selected text offsets", () => {
+  const passage = "keep this passage";
+  const content = [
+    "| Result |", "| --- |",
+    "| [**Report**](file:///tmp/Plan%20%2523%23%3A.md:12) " + passage + " |",
+  ].join("\n");
+  const view = render(<MessageBubble sessionId="archived-source" message={{ role: "assistant", type: "text", content }} />);
+  const file = screen.getByRole("button", { name: "Open file: Report at line 12" });
+  expect(screen.getByRole("cell")).toContainElement(file);
+  expect(file).toHaveAttribute("aria-haspopup", "dialog");
+  expect(file.textContent).toBe("Report");
+  expect(file.querySelector("strong")).toHaveTextContent("Report");
+  expect(useSessionStore.getState().viewer).toBeNull();
+
+  const start = content.indexOf(passage);
+  const projection = projectMarkdownOutput(content, { start, end: start + passage.length }, "selection");
+  const body = view.container.querySelector(".markdown")!;
+  expect(body.textContent).toBe(projection.text);
+  expect(projection.spans.map(({ start, end }) => body.textContent!.slice(start, end)).join("")).toBe(passage);
+
+  fireEvent.click(file);
+  expect(useSessionStore.getState().viewer).toMatchObject({
+    sessionId: "archived-source", foregroundSessionId: session.id,
+    path: "/tmp/Plan %23#:.md", position: { kind: "lines", start: 12 },
+  });
+});
+
+it("keeps website, fragment and unsafe URLs on the Markdown URL pipeline", () => {
+  const anchors = {
+    Website: "https://example.org/report.md",
+    "Protocol-relative website": "//example.org/report.md",
+    Endpoint: "/api/sessions",
+    App: "/apps/app/assets/report.md",
+    Asset: "/assets/app.js",
+    Manifest: "/manifest.webmanifest",
+    "Encoded endpoint": "/%61pi/sessions",
+    "Normalized endpoint": "/docs/../api/sessions",
+    "Normalized asset": "/./index.html",
+    "Relative endpoint": "api/backends",
+    "Dot-relative endpoint": "./api/backends",
+    "Parent-relative endpoint": "../api/backends",
+    Anchor: "#footnote",
+    Unsafe: "javascript:/tmp/report.md",
+  };
+  const content = [
+    ...Object.entries(anchors).map(([name, href]) => `[${name}](${href})`),
+    "[ASCII](/tmp/result.ts:12)",
+    "[Extensionless absolute](/report:12)",
+    "[Relative](notes/plan.md#L2-L3)",
+    "[Explicit relative](./notes/plan.md)",
+    "[Bare](README:7)",
+    "[Literal colon](draft%3A12.md)",
+    "[Local](file://localhost/tmp/changelog.md)",
+    "![Unsafe image](file:///tmp/image.png)",
+  ].join("\n\n");
+  render(<MessageBubble sessionId={session.id} message={{ role: "assistant", type: "text", content }} />);
+  for (const [name, href] of Object.entries(anchors)) {
+    const anchor = screen.getByText(name);
+    expect(anchor.tagName).toBe("A");
+    expect(anchor).toHaveAttribute("href", name === "Unsafe" ? "" : href);
+  }
+  expect(screen.getByAltText("Unsafe image")).not.toHaveAttribute("src", "file:///tmp/image.png");
+  for (const [name, path, position] of [
+    ["ASCII at line 12", "/tmp/result.ts", { kind: "lines", start: 12 }],
+    ["Extensionless absolute at line 12", "/report", { kind: "lines", start: 12 }],
+    ["Relative at lines 2–3", "notes/plan.md", { kind: "lines", start: 2, end: 3 }],
+    ["Explicit relative", "./notes/plan.md", undefined],
+    ["Bare at line 7", "README", { kind: "lines", start: 7 }],
+    ["Literal colon", "draft:12.md", undefined],
+    ["Local", "/tmp/changelog.md", undefined],
+  ] as const) {
+    fireEvent.click(screen.getByRole("button", { name: `Open file: ${name}` }));
+    expect(useSessionStore.getState().viewer).toMatchObject({ path, position });
+  }
+});
+
+it.each([
+  ["Remote", "file://remote/share/report.md"],
+  ["Windows drive", "C:/work/report.md"],
+  ["Windows URI", "file:///C:/work/report.md"],
+  ["UNC", "%5C%5Cremote%5Cshare%5Creport.md"],
+])("explains an unsupported %s link without requesting a file", async (label, href) => {
+  const fetch = vi.fn();
+  vi.stubGlobal("fetch", fetch);
+  render(<><MessageBubble sessionId={session.id} message={{ role: "assistant", type: "text", content: `[${label}](${href})` }} />
+    <FileViewerDialog /></>);
+  fireEvent.click(screen.getByRole("button", { name: `Open file: ${label}` }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("This file link uses an unsupported path format.");
+  expect(fetch).not.toHaveBeenCalled();
 });
 
 it("keeps native Markdown structure and applies the original image entry to standalone images", () => {
@@ -174,7 +266,7 @@ beforeEach(() => {
   sessionStorage.clear();
   mockChatViewport();
   useSessionStore.getState().setToken("");
-  useSessionStore.setState({ activeSessionId: session.id, mainView: "chat", sessions: [session], archivedSessions: [],
+  useSessionStore.setState({ viewer: null, activeSessionId: session.id, mainView: "chat", sessions: [session], archivedSessions: [],
     agents: [], credentials: [],
     messages: { [session.id]: [{ role: "assistant", type: "text", seq: 1, content: saved }] },
     streamingText: {}, streamingItems: {}, pendingQuestions: {}, subagents: {}, dispatchStates: {}, dispatchUnavailable: {},

@@ -107,7 +107,7 @@ def augmented_path(base: str | None = None, extra_dir: str | None = None) -> str
 
 
 def prepare_spawn(
-    argv: list[str], kwargs: dict[str, Any]
+    argv: list[str], kwargs: dict[str, Any], *, create_cwd: bool = True,
 ) -> tuple[list[str], dict[str, Any]]:
     """Resolve a bare binary name to an absolute path (PATH + per-user
     fallback dirs) and augment the child's PATH so its node shebang resolves.
@@ -128,7 +128,7 @@ def prepare_spawn(
     # turn never dies on a missing directory. Confinement has already vetted the
     # path by the time it reaches here.
     cwd = kwargs.get("cwd")
-    if cwd:
+    if create_cwd and cwd:
         os.makedirs(cwd, exist_ok=True)
     env = kwargs.get("env") or os.environ.copy()
     cli_dir = os.path.dirname(argv[0]) if argv and os.path.isabs(argv[0]) else None

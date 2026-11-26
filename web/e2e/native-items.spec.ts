@@ -25,7 +25,8 @@ test("native failures, hook provenance and original image paths survive WS and h
     else if (pathname === `/api/sessions/${session.id}/files/meta`) {
       expect(new URL(route.request().url()).searchParams.get("path")).toBe(path);
       if (missing) { await route.fulfill({ status: 404, json: { detail: "Original file no longer exists" } }); return; }
-      data = { path, kind: "image", mime_type: "image/png", size: 68 };
+      data = { absolute_path: path, path: "native.png", source: "/working", canonical_path_id: "saved-image",
+        canonical_directory: { path: ".", path_id: "working-path" }, kind: "image", mime_type: "image/png", size: 68 };
     } else if (pathname === `/api/sessions/${session.id}/files`) {
       await route.fulfill({ contentType: "image/png", body: Buffer.from(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a/r8AAAAASUVORK5CYII=", "base64") });
@@ -71,7 +72,7 @@ test("native failures, hook provenance and original image paths survive WS and h
   await page.getByRole("button", { name: "Copy path" }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(path);
   await page.getByRole("button", { name: "Open in viewer" }).click();
-  const image = page.getByRole("dialog").getByRole("img", { name: path, exact: true });
+  const image = page.getByRole("dialog").getByRole("img", { name: "native.png", exact: true });
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBe(1);
   await page.getByRole("button", { name: "Close", exact: true }).click();
@@ -81,5 +82,5 @@ test("native failures, hook provenance and original image paths survive WS and h
   missing = true;
   await page.getByRole("button", { name: "Open in viewer" }).click();
   await expect(page.getByRole("dialog").getByText("Original file no longer exists")).toBeVisible();
-  await expect(page.getByRole("dialog").getByRole("img", { name: path, exact: true })).toHaveCount(0);
+  await expect(page.getByRole("dialog").getByRole("img", { name: "native.png", exact: true })).toHaveCount(0);
 });

@@ -981,7 +981,8 @@ class ClaudeEventParser(EventParser):
 
 def build_oneshot_argv(ctx: OneShotContext) -> tuple[list[str], dict[str, Any]]:
     """A lean, tool-free `claude --print --output-format=json` call."""
-    argv = ["claude", "--print", "--output-format=json"]
+    # Safe mode keeps normal login handling while skipping project hooks and MCP discovery.
+    argv = ["claude", "--print", "--output-format=json", "--safe-mode", "--tools", ""]
     if ctx.model:
         argv += ["--model", ctx.model]
     env = os.environ.copy()

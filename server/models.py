@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -16,6 +17,7 @@ from pydantic import (
 
 from .config import settings
 from .context_models import ContextState
+from .file_viewer import FileKind, ResourceDirectory
 from .session_operations import CompactResult, OperationKind
 
 
@@ -558,18 +560,70 @@ class ScheduleFromTextRequest(BaseModel):
     session_id: str | None = None
 
 
+@dataclass(frozen=True)
+class FileViewerMetadata:
+    source: str
+    path: str
+    absolute_path: str
+    canonical_path_id: str
+    canonical_directory: ResourceDirectory
+    kind: FileKind
+    mime_type: str
+    size: int
+
+
+@dataclass(frozen=True)
+class FilePickerSources:
+    cwd: str | None
+    roots: list[str]
+
+
 class ShowMeResolveRequest(BaseModel):
-    # The user's natural reference after `/showme`, e.g. "this file" or
-    # "README.md". The backend asks the session's model to resolve it to a
-    # concrete file path, then the client opens the viewer.
+    # The command argument can be a path or a description.
     text: str = Field(min_length=1)
+    mode: Literal["command", "description"] | None = None
+
+
+class FileLinePosition(BaseModel):
+    kind: Literal["lines"]
+    start: int
+    end: int | None = None
+
+
+class FileHeadingPosition(BaseModel):
+    kind: Literal["heading"]
+    slug: str
+
+
+class InvalidFilePosition(BaseModel):
+    kind: Literal["invalid"]
+    suffix: str
+
+
+FilePosition = Annotated[FileLinePosition | FileHeadingPosition | InvalidFilePosition, Field(discriminator="kind")]
+
+
+class ShowMeEditTarget(BaseModel):
+    path: str
+    position: FilePosition | None = None
+    source: str | None = None
 
 
 class ShowMeResolveResponse(BaseModel):
-    # Resolved path relative to the session working directory. When null,
-    # `message` explains why the model couldn't resolve it cleanly.
+    # A checked path from cwd is relative to cwd. Other checked paths are absolute.
     path: str | None = None
     message: str | None = None
+    metadata: FileViewerMetadata | None = None
+    target: ShowMeEditTarget | None = None
+    description: str | None = None
+
+
+class ShowMeFileErrorResponse(BaseModel):
+    detail: str
+    target: ShowMeEditTarget | None = None
+    description: str | None = None
+    can_search_description: Literal[True] | None = None
+    code: Literal["working_directory_unavailable"] | None = None
 
 
 class AgentScheduleRequest(BaseModel):

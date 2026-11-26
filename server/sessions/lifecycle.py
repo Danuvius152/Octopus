@@ -9,7 +9,6 @@ so no call site moved.
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, nullcontext
@@ -35,7 +34,7 @@ from ..models import (
     SessionRestoreStatus,
 )
 from ..users import owner_is_available
-from ..workspace import WorkspaceError, confine
+from ..workspace import WorkspaceError, confine, decode_extra_roots
 from .base import (
     _BACKEND_RETIRE_TIMEOUT,
     ForkError,
@@ -345,14 +344,7 @@ class LifecycleMixin(SessionManagerBase):
         if not user_id or not self.db:
             return []
         user = await self.db.get_user(user_id)
-        raw = (user or {}).get("extra_roots")
-        if not raw:
-            return []
-        try:
-            roots = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return []
-        return [str(r) for r in roots] if isinstance(roots, list) else []
+        return decode_extra_roots((user or {}).get("extra_roots"))
 
     async def create_session(
         self, agent_id: str | None, name: str | None = None,

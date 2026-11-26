@@ -30,6 +30,9 @@ export default defineConfig({
   // way instead of 45 seconds. A cache dir per server costs nothing and ends
   // it.
   cacheDir: process.env.VITE_CACHE_DIR || undefined,
+  // The lazy source worker is outside the initial dependency scan. Prepare
+  // its dependency up front so the first source view doesn't reload open tabs.
+  optimizeDeps: { include: ['highlight.js'] },
   server: {
     ...(process.env.OCTOPUS_E2E_MODE === 'offline' && { hmr: { path: OFFLINE_VITE_HMR_PATH } }),
     // Worktrees reuse installed dependencies; font URLs resolve to that

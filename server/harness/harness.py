@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any
 
@@ -302,7 +304,7 @@ class Harness:
         try:
             argv, kwargs = self.profile.build_oneshot_argv(ctx)
             private_settings = kwargs.pop("private_settings", None)
-            argv, kwargs = prepare_spawn(argv, kwargs)
+            argv, kwargs = prepare_spawn(argv, kwargs, create_cwd=False)
         except LaunchConfigurationError as error:
             raise HarnessOneshotError("configuration", str(error)) from error
         except FileNotFoundError:
@@ -313,26 +315,33 @@ class Harness:
         # The transport may create its process before delivering the handle.
         # Capture that launch before cancellation can surrender ownership.
         async def spawn_process():
+            directory = None
             if ctx.authorize_spawn is not None:
                 try:
-                    await ctx.authorize_spawn()
+                    directory = await ctx.authorize_spawn()
                 except asyncio.CancelledError:
                     return None  # authorization ended before OS submission
                 except ValueError as error:
                     raise HarnessOneshotError("unauthorized", str(error)) from error
-            launch_argv = private_settings.materialize(argv) if private_settings else argv
-            try:
-                validate_launch(launch_argv, kwargs.get("env"))
-            except LaunchConfigurationError as error:
-                raise HarnessOneshotError("configuration", str(error)) from error
-            return await asyncio.create_subprocess_exec(
-                *launch_argv,
-                # DEVNULL gives a stdin-reading CLI EOF immediately.
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **kwargs,
-            )
+            with ExitStack() as stack:
+                if directory is not None:
+                    # The forked child inherits this fd through chdir and closes it before exec.
+                    kwargs["cwd"] = f"/proc/self/fd/{stack.enter_context(directory)}"
+                elif cwd := kwargs.get("cwd"):
+                    os.makedirs(cwd, exist_ok=True)
+                launch_argv = private_settings.materialize(argv) if private_settings else argv
+                try:
+                    validate_launch(launch_argv, kwargs.get("env"))
+                except LaunchConfigurationError as error:
+                    raise HarnessOneshotError("configuration", str(error)) from error
+                return await asyncio.create_subprocess_exec(
+                    *launch_argv,
+                    # DEVNULL gives a stdin-reading CLI EOF immediately.
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **kwargs,
+                )
 
         spawn = operation.spawn = asyncio.create_task(spawn_process(), name="one-shot-process-startup")
 

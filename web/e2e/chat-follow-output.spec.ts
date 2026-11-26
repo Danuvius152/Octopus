@@ -1116,6 +1116,34 @@ function textInScrollport(body: Locator, phrase: string) {
   }, phrase);
 }
 
+test("saving a table with a positioned file link preserves the text selection and reading position", async ({ page }) => {
+  const { scroller, gap, send, settle } = await openChat(page);
+  const before = "| Result |\n| --- |\n| [Report](notes/report.md:12) Keep this passage |";
+  send({ type: "assistant_delta", content: before });
+  send({ type: "assistant_delta", content: "Following native output\n".repeat(12),
+    runtime_metadata: identity("root", "following-file-link") });
+  const live = scroller.locator(".msg-streaming-text").filter({ hasText: "Keep this passage" });
+  await expect(live).toBeInViewport();
+  const original = await selectLiveWords(live, /this passage/);
+  const after = "\n\n" + "New content outside the current reading viewport.\n\n".repeat(45) + "Last new line";
+  send({ type: "assistant_text", seq: 41, content: before + after });
+  const saved = scroller.locator('[data-message-key="message:41"] .msg-content');
+  await expect(saved.getByRole("button", { name: "Open file: Report at line 12" })).toBeInViewport();
+  const jump = page.getByRole("button", { name: "Jump to latest", exact: true });
+  await expect(jump).toBeVisible();
+  await settle();
+  const selection = await page.evaluate(() => {
+    const selection = window.getSelection()!;
+    return { text: selection.toString(), top: selection.rangeCount ? selection.getRangeAt(0).getBoundingClientRect().top : 0 };
+  });
+  expect(selection.text).toBe(original.text);
+  expect(Math.abs(selection.top - original.top)).toBeLessThanOrEqual(2);
+  expect(await textInScrollport(saved, "Last new line")).toBe(false);
+  await jump.click();
+  await expect.poll(gap).toBeLessThanOrEqual(2);
+  await expect.poll(() => textInScrollport(saved, "Last new line")).toBe(true);
+});
+
 for (const format of ["quote", "fenced code", "task list"] as const) {
 test(`saving a multi-line ${format} preserves the selected word and exposes new lines beyond the viewport`, async ({ page }) => {
   const { scroller, gap, send, settle } = await openChat(page);

@@ -1,7 +1,10 @@
 import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { createServer, request as forwardRequest } from "node:http";
+import os from "node:os";
 import path from "node:path";
 
-import { accountToken, enterAccountCredentials } from "./current-account";
+import { accountToken, enterAccountCredentials, type TestAccount } from "./current-account";
+import { cleanupAccount, createTestAccount, editExtraRoots } from "./account-resources";
 import { expect, test, type APIRequestContext, type Page } from "./test";
 
 const API = "http://localhost:8765/api";
@@ -30,16 +33,1392 @@ async function openSession(page: Page, name: string) {
   await page.locator(".session-item").getByText(name, { exact: true }).click();
 }
 
-async function signIn(page: Page) {
-  await page.goto("/");
+async function signIn(page: Page, url = "/") {
+  await page.goto(url);
   await enterAccountCredentials(page);
   await page.locator(".agent-item", { hasText: "Octo" }).click();
 }
 
-async function showAlias(page: Page) {
-  await page.locator(".chat-input-bar textarea").fill("/showme alias.md");
+async function showFile(page: Page, target: string) {
+  await page.locator(".chat-input-bar textarea").fill(`/showme ${target}`);
   await page.locator("button.btn-send").click();
 }
+
+async function showAlias(page: Page) {
+  await showFile(page, "alias.md");
+}
+
+const browserZoomTest = previewTest.extend({
+  context: async ({ playwright, baseURL }, provideContext) => {
+    // Keep Chromium's profile and singleton socket paths within the Unix socket limit.
+    const profile = mkdtempSync(path.join(os.homedir(), ".cache", "octopus-tests", "zoom-"));
+    try {
+      const context = await playwright.chromium.launchPersistentContext(profile, {
+        channel: "chromium", serviceWorkers: "block", baseURL, env: { ...process.env, TMPDIR: profile },
+      });
+      try { await provideContext(context); }
+      finally { await context.close(); }
+    } finally {
+      rmSync(profile, { recursive: true, force: true });
+    }
+  },
+});
+
+browserZoomTest("reader typography preserves paragraphs and source lines and reflows at narrow widths", async ({ page, context, request, previewDirectory: directory }) => {
+  const filename = "阅读 中文台账.md";
+  const file = path.join(directory, filename);
+  const prose = "这里是包含中文的普通段落，浏览器会按照正文宽度重新排版。".repeat(6);
+  writeFileSync(file, [
+    "# Reader typography", "", "Inline `snippet`", "",
+    "| Column A | Column B | Column C |", "| --- | --- | --- |",
+    `| A long unbreakable table value \`${"a".repeat(60)}\` | b | c |`, "",
+    "```js", `const fenced = "${"x".repeat(120)}";`, "```", "",
+    ...Array.from({ length: 60 }, (_, index) => `Paragraph ${index + 1} — ${prose}\n`),
+    `- Long list item — ${prose.repeat(8)}`,
+    ...Array.from({ length: 30 }, (_, index) => `  - Nested bullet ${index + 1}`), "",
+  ].join("\n"));
+  const id = await createSession(request, directory, "Reader layout");
+  const fileRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith(`/api/sessions/${id}/files`)) fileRequests.push(request.url());
+  });
+  await page.setViewportSize({ width: 1080, height: 800 });
+  await signIn(page);
+  await openSession(page, "Reader layout");
+  await showFile(page, JSON.stringify(filename));
+  const viewer = page.getByRole("dialog");
+  const size = viewer.getByRole("combobox", { name: "Text size" });
+  const article = viewer.getByRole("article");
+  const fenced = article.locator("pre");
+  const table = article.getByRole("table");
+  const inline = article.getByText("snippet", { exact: true });
+  const title = viewer.getByRole("heading", { name: filename });
+  await expect(article.getByRole("heading", { name: "Reader typography" })).toBeVisible();
+  await expect(article).toHaveCSS("font-size", "18px");
+  await expect(article).toHaveCSS("line-height", "31.5px");
+  await expect(article).toHaveCSS("max-width", "704px");
+  await expect(title).toHaveCSS("font-size", "16px");
+  await expect(viewer.getByText(file, { exact: true })).toHaveCSS("font-size", "14px");
+  expect(await article.evaluate((element) => getComputedStyle(element).fontFamily)).toContain("Noto Sans SC Variable");
+  expect(await fenced.evaluate((element) => getComputedStyle(element).fontFamily)).toContain("IBM Plex Mono");
+  expect(Number.parseFloat(await inline.evaluate((element) => getComputedStyle(element).fontSize))).toBeCloseTo(16.92);
+  await expect(table.getByRole("cell").first()).toHaveCSS("font-size", "18px");
+  await expect(fenced).toHaveCSS("font-size", "16px");
+  await expect(fenced).toHaveCSS("line-height", "25.6px");
+
+  const paragraph = article.getByText(/^Paragraph 31 —/);
+  await paragraph.evaluate((element) => element.scrollIntoView({ block: "start" }));
+  const readingTop = (await paragraph.boundingBox())!.y;
+  const requests = fileRequests.length;
+  await size.selectOption("larger");
+  await expect(article).toHaveCSS("font-size", "22px");
+  await expect(fenced).toHaveCSS("font-size", "20px");
+  expect((await paragraph.boundingBox())!.y).toBeCloseTo(readingTop, 0);
+  await viewer.getByRole("button", { name: "Source", exact: true }).click();
+  const source = viewer.locator("pre");
+  const sourceLine = source.getByText(/^Paragraph 31 —/);
+  const numbered = sourceLine.locator("xpath=ancestor-or-self::*[@data-line][1]");
+  await numbered.evaluate((row) => {
+    const viewport = row.closest("pre")!.parentElement!;
+    viewport.scrollTop += row.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 2;
+  });
+  const line = await numbered.getAttribute("data-line");
+  const sourceTop = (await numbered.boundingBox())!.y;
+  await size.selectOption("compact");
+  await expect(source).toHaveCSS("font-size", "14px");
+  await expect(source).toHaveCSS("line-height", "22.4px");
+  await expect(numbered).toHaveAttribute("data-line", line!);
+  expect(Math.abs((await numbered.boundingBox())!.y - sourceTop)).toBeLessThan(1);
+  expect(fileRequests).toHaveLength(requests);
+
+  await page.setViewportSize({ width: 320, height: 520 });
+  await expect(viewer.getByRole("button", { name: "Close", exact: true })).toBeInViewport();
+  expect(await source.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+  await viewer.getByRole("button", { name: "Reading", exact: true }).click();
+  await size.selectOption("standard");
+  const settings = await context.newPage();
+  await settings.goto("chrome://settings/appearance");
+  const setZoom = (zoom: number) => settings.evaluate((zoom) => {
+    const chrome = (window as unknown as { chrome: { settingsPrivate: { setDefaultZoom: (zoom: number) => void } } }).chrome;
+    chrome.settingsPrivate.setDefaultZoom(zoom);
+  }, zoom);
+  try {
+    for (const zoom of [1, 2]) {
+      await page.setViewportSize({ width: 320 * zoom, height: 520 * zoom });
+      await setZoom(zoom);
+      await page.bringToFront();
+      await expect.poll(() => page.evaluate(() => [window.innerWidth, window.devicePixelRatio])).toEqual([320, zoom]);
+      const fits = await paragraph.evaluate((element) => ({
+        right: element.getBoundingClientRect().right,
+        lines: element.clientHeight / Number.parseFloat(getComputedStyle(element).lineHeight),
+        pageWidth: document.documentElement.scrollWidth,
+      }));
+      expect(fits.right).toBeLessThanOrEqual(320);
+      expect(fits.lines).toBeGreaterThan(2);
+      expect(fits.pageWidth).toBe(320);
+      const tableRegion = article.getByRole("region", { name: "Table", exact: true });
+      for (const [label, scroller] of [["table", tableRegion], ["fenced code", fenced]] as const) {
+        const [contentWidth, scrollportWidth] = await scroller.evaluate((element) => [element.scrollWidth, element.clientWidth]);
+        expect(contentWidth, label).toBeGreaterThan(scrollportWidth);
+      }
+      const menu = viewer.getByRole("button", { name: "File actions" });
+      await menu.press("Enter");
+      await expect(viewer.getByRole("menuitem", { name: "Copy path" })).toBeInViewport();
+      await expect(viewer.getByRole("menuitem", { name: "Download file" })).toBeVisible();
+      await expect(viewer.getByRole("menuitem", { name: "Open in new tab" })).toHaveCount(0);
+      await page.keyboard.press("Escape");
+      await expect(menu).toBeFocused();
+      await expect(menu).toHaveCSS("outline-width", "2px");
+      await expect(viewer).toBeVisible();
+    }
+  } finally {
+    await setZoom(1);
+    await settings.close();
+  }
+  await page.setViewportSize({ width: 320, height: 520 });
+  await size.selectOption("larger");
+  const listItem = article.getByRole("listitem").filter({ hasText: /^Long list item —/ });
+  const readingOffset = await listItem.evaluate((item) => {
+    const viewport = item.closest("article")!.parentElement!;
+    const nestedTop = item.querySelector("ul")!.getBoundingClientRect().top;
+    viewport.scrollTop += nestedTop - viewport.getBoundingClientRect().top - 30;
+    const text = item.firstChild as Text;
+    const range = document.createRange();
+    for (let offset = text.length - 1; offset >= 0; offset--) {
+      range.setStart(text, offset);
+      range.setEnd(text, offset + 1);
+      const { top, bottom } = range.getBoundingClientRect();
+      if (top < viewport.getBoundingClientRect().top + 10 && bottom > viewport.getBoundingClientRect().top) return offset;
+    }
+    throw new Error("The viewport should start within the long list item's text");
+  });
+  await size.selectOption("compact");
+  expect(await listItem.evaluate((item, offset) => {
+    const viewport = item.closest("article")!.parentElement!.getBoundingClientRect();
+    const range = document.createRange();
+    range.setStart(item.firstChild!, offset);
+    range.setEnd(item.firstChild!, offset + 1);
+    const { top, bottom } = range.getBoundingClientRect();
+    return bottom > viewport.top && top < viewport.bottom;
+  }, readingOffset)).toBe(true);
+  const pathToggle = viewer.getByRole("button", { name: "Full file path" });
+  await pathToggle.click();
+  await expect(pathToggle).toHaveAttribute("aria-expanded", "true");
+  const fullPath = viewer.getByText(file, { exact: true });
+  await fullPath.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection()!;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(file);
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await viewer.getByRole("button", { name: "File actions" }).click();
+  await viewer.getByRole("menuitem", { name: "Copy path" }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(file);
+  await viewer.getByRole("button", { name: "File actions" }).press("Enter");
+  await viewer.getByRole("menuitem", { name: "Edit path" }).press("Enter");
+  await expect(viewer.getByRole("textbox", { name: "File path" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(viewer).toBeHidden();
+  await expect(page.locator(".chat-input-bar textarea")).toBeFocused();
+});
+
+const readerAccountsTest = previewTest.extend<{ otherAccount: TestAccount }>({
+  otherAccount: async ({ request }, provideAccount) => {
+    const admin = process.env.OCTOPUS_E2E_ACCOUNT_TOKEN;
+    if (!admin) throw new Error("Missing runner provisioning account");
+    const account = await createTestAccount(request, admin);
+    await provideAccount(account);
+    await cleanupAccount(request, account);
+  },
+});
+
+readerAccountsTest("reader text size survives reload and follows the account in the same browser", async ({
+  page, request, previewDirectory: directory, otherAccount,
+}) => {
+  const filename = "reader-preference.txt";
+  writeFileSync(path.join(directory, filename), "Account A reader preference");
+  await createSession(request, directory, "Reader account A");
+  const otherHeaders = { Authorization: `Bearer ${otherAccount.token}` };
+  const workspace = await request.get(`${API}/auth/workspace`, { headers: otherHeaders });
+  expect(workspace.ok()).toBeTruthy();
+  const cwd = (await workspace.json()).workspace;
+  writeFileSync(path.join(cwd, filename), "Account B reader preference");
+  expect((await request.post(`${API}/sessions/import`, {
+    headers: otherHeaders, data: { name: "Reader account B", working_dir: cwd },
+  })).status()).toBe(201);
+  // Change the stored login in this browser, retaining the same origin's preferences.
+  const switchTo = async (token: string, account: string) => {
+    await page.evaluate((bearer) => localStorage.setItem("octopus_token", bearer), token);
+    await page.reload();
+    await page.locator(".agent-item", { hasText: "Octo" }).click();
+    await openSession(page, `Reader account ${account}`);
+    await showFile(page, filename);
+    await expect(page.getByRole("dialog").getByText(`Account ${account} reader preference`)).toBeVisible();
+  };
+  await signIn(page);
+  await openSession(page, "Reader account A");
+  await showFile(page, filename);
+  const size = page.getByRole("combobox", { name: "Text size" });
+  const text = page.getByRole("dialog").locator("pre");
+  await expect(size).toHaveValue("standard");
+  await expect(text).toHaveCSS("font-size", "16px");
+  await size.selectOption("large");
+  await expect(text).toHaveCSS("font-size", "18px");
+  await switchTo(otherAccount.token, "B");
+  await expect(size).toHaveValue("standard");
+  await size.selectOption("compact");
+  await switchTo(accountToken(), "A");
+  await expect(size).toHaveValue("large");
+  await switchTo(otherAccount.token, "B");
+  await expect(size).toHaveValue("compact");
+});
+
+previewTest("showme searches conversation descriptions in the viewer and recovers after cwd revocation", async ({ page, request, account, previewDirectory }) => {
+  if (!account) throw new Error("Expected an isolated account");
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "octopus-context-search-"));
+  try {
+    writeFileSync(path.join(cwd, "plan.md"), "# Plan from the conversation");
+    writeFileSync(path.join(cwd, "中文 计划.md"), "# Literal Chinese filename");
+    writeFileSync(path.join(previewDirectory, "context-search-recovery.md"), "# File from an available source");
+    const setExtraRoots = await editExtraRoots(request, account.user_id);
+    await setExtraRoots([cwd]);
+    const id = await createSession(request, cwd, "Context search session");
+    const history = async () => {
+      const response = await request.get(`${API}/sessions/${id}/messages?before_seq=10000`, { headers });
+      expect(response.ok()).toBeTruthy();
+      return (await response.json()).messages;
+    };
+    const initialHistory = await history();
+    const resolutions: { text: string; mode?: string; status: number }[] = [];
+    page.on("response", response => {
+      if (new URL(response.url()).pathname === `/api/sessions/${id}/showme/resolve`) {
+        resolutions.push({ ...response.request().postDataJSON(), status: response.status() });
+      }
+    });
+    const submissions: string[] = [];
+    page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+      if (String(payload).includes('"send_message"')) submissions.push(String(payload));
+    }));
+
+    await signIn(page);
+    await openSession(page, "Context search session");
+    const viewer = page.getByRole("dialog");
+    const close = () => viewer.getByRole("button", { name: "Close", exact: true }).click();
+    await showFile(page, "中文 计划.md");
+    await expect(viewer.getByRole("heading", { name: "Literal Chinese filename" })).toBeVisible();
+    await close();
+
+    await showFile(page, "请打开 plan.md");
+    await expect(viewer.getByRole("alert")).toHaveText("File not found.");
+    expect(resolutions).toEqual([{ text: "中文 计划.md", status: 200 }, { text: "请打开 plan.md", status: 404 }]);
+    await viewer.getByRole("button", { name: "Search by description" }).press("Enter");
+    await expect(viewer.getByRole("status")).toHaveText("Which plan did you mean?");
+    const description = viewer.getByRole("textbox", { name: "File description" });
+    await expect(description).toHaveValue("请打开 plan.md");
+    await expect(description).toBeFocused();
+    await description.fill("the implementation plan.md");
+    await viewer.getByRole("button", { name: "Search conversation" }).click();
+    await expect(viewer.getByRole("heading", { name: "Plan from the conversation" })).toBeVisible();
+    await close();
+
+    await showFile(page, "the report from v1.2");
+    await expect(viewer.getByRole("heading", { name: "Plan from the conversation" })).toBeVisible();
+    await close();
+
+    await setExtraRoots([]);
+    await showFile(page, "the report from v1.2");
+    await expect(viewer.getByRole("alert")).toHaveText("The session working directory is no longer available.");
+    await expect(description).toHaveValue("the report from v1.2");
+    await viewer.getByRole("button", { name: "Choose a file" }).click();
+    await viewer.getByRole("searchbox", { name: "Search filenames" }).fill("context-search-recovery.md");
+    await viewer.getByRole("button", { name: /context-search-recovery\.md/ }).click();
+    await expect(viewer.getByRole("heading", { name: "File from an available source" })).toBeVisible();
+    expect(resolutions.slice(2)).toEqual([
+      { text: "请打开 plan.md", mode: "description", status: 200 },
+      { text: "the implementation plan.md", mode: "description", status: 200 },
+      { text: "the report from v1.2", status: 200 },
+      { text: "the report from v1.2", status: 403 },
+    ]);
+    expect(await history()).toEqual(initialHistory);
+    expect(submissions).toEqual([]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+previewTest("bare showme browses sources and opens the selected filename without a chat turn", async ({ page, request, account, previewDirectory }) => {
+  if (!account) throw new Error("Expected an isolated account");
+  const fixture = mkdtempSync(path.join(os.tmpdir(), "octopus-picker-"));
+  const cwd = path.join(fixture, "current");
+  const repo = path.join(fixture, "repo");
+  const team = path.join(repo, "team");
+  const archive = path.join(repo, "archive");
+  const report = "Report 中文 %#.md";
+  try {
+    for (const directory of [cwd, team, archive]) mkdirSync(directory, { recursive: true });
+    writeFileSync(path.join(cwd, "current.md"), "# Current working directory");
+    writeFileSync(path.join(previewDirectory, "workspace.md"), "# Workspace fallback");
+    writeFileSync(path.join(team, report), "# Team report\n\n![Team diagram](../diagram.svg)");
+    writeFileSync(path.join(archive, report), "# Archived report");
+    writeFileSync(path.join(repo, "diagram.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="blue" /></svg>');
+    symlinkSync(archive, path.join(repo, "linked-archive"));
+    for (let i = 0; i < 120; i++) writeFileSync(path.join(archive, `Budget-${i}.md`), "");
+    const setExtraRoots = await editExtraRoots(request, account.user_id);
+    await setExtraRoots([cwd, repo, team]);
+    const id = await createSession(request, cwd, "File picker session");
+    const history = async () => {
+      const response = await request.get(`${API}/sessions/${id}/messages?before_seq=10000`, { headers });
+      expect(response.ok()).toBeTruthy();
+      return (await response.json()).messages;
+    };
+    const before = await history();
+    const resolutions: { text: string; status: number }[] = [];
+    const submissions: string[] = [];
+    page.on("response", res => {
+      if (new URL(res.url()).pathname.endsWith("/showme/resolve")) {
+        resolutions.push({ text: res.request().postDataJSON().text, status: res.status() });
+      }
+    });
+    page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+      if (String(payload).includes('"send_message"')) submissions.push(String(payload));
+    }));
+
+    await signIn(page);
+    await openSession(page, "File picker session");
+    const input = page.locator(".chat-input-bar textarea");
+    await input.fill("/showm");
+    await expect(page.getByRole("option", { name: /showme.*Choose a file or enter its path/ })).toBeVisible();
+    await showFile(page, "");
+    const dialog = page.getByRole("dialog");
+    const close = async () => {
+      await dialog.getByRole("button", { name: "Close", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+    };
+    const pickerTitle = dialog.getByRole("heading", { name: "Choose a file" });
+    const source = dialog.getByRole("combobox", { name: "Source" });
+    const search = dialog.getByRole("searchbox", { name: "Search filenames" });
+    const breadcrumb = dialog.getByRole("navigation", { name: "Directory" });
+    await expect(pickerTitle).toBeFocused();
+    await expect(source).toHaveValue(cwd);
+    await expect(dialog.getByRole("button", { name: "current.md" })).toBeVisible();
+    await source.selectOption(repo);
+    await dialog.getByRole("button", { name: "team", exact: true }).click();
+    await expect(breadcrumb.getByText("team", { exact: true })).toHaveAttribute("aria-current", "location");
+    await expect(dialog.getByRole("button", { name: report, exact: true })).toBeVisible();
+    await search.fill("No filename like this");
+    await expect(dialog.getByText("No matching files.")).toBeVisible();
+    await expect(search).toHaveValue("No filename like this");
+    await search.fill("budget");
+    await expect(dialog.getByText(/Search limit reached/)).toBeVisible();
+    await search.fill("rEpOrT 中文");
+    const matches = dialog.getByRole("list").getByRole("button");
+    await expect(matches).toHaveCount(2);
+    await expect(dialog.getByText(/Some entries were skipped/)).toBeVisible();
+    await expect(matches.filter({ hasText: "archive" })).toContainText(report);
+    await matches.filter({ hasText: "team" }).click();
+    await expect(dialog.getByRole("heading", { name: "Team report" })).toBeVisible();
+    await expect(dialog.getByText(path.join(team, report), { exact: true })).toBeVisible();
+    const image = dialog.getByRole("img", { name: "Team diagram" });
+    await expect.poll(() => image.evaluate(node => (node as HTMLImageElement).naturalWidth)).toBe(16);
+    expect(new URL(await image.getAttribute("src") ?? "", page.url()).searchParams.get("source")).toBe(repo);
+    expect(resolutions).toHaveLength(0);
+    await close();
+
+    const explicitPath = `${JSON.stringify(path.join(team, report))} --source ${JSON.stringify(repo)}`;
+    await showFile(page, explicitPath);
+    await expect(dialog.getByRole("heading", { name: "Team report" })).toBeVisible();
+    await close();
+    await showFile(page, "missing.md");
+    await expect(dialog.getByRole("alert")).toHaveText("File not found.");
+    await setExtraRoots([repo, team]);
+    await dialog.getByRole("button", { name: "Choose a file" }).click();
+    await expect(pickerTitle).toBeFocused();
+    await expect(dialog.getByText("The session working directory is no longer available.")).toBeVisible();
+    await expect(source.getByRole("option", { name: cwd })).toHaveCount(0);
+    const workspace = await request.get(`${API}/auth/workspace`, { headers });
+    expect(workspace.ok()).toBeTruthy();
+    await source.selectOption((await workspace.json()).workspace);
+    await search.fill("workspace.md");
+    await dialog.getByRole("button", { name: /workspace.md/ }).click();
+    await expect(dialog.getByRole("heading", { name: "Workspace fallback" })).toBeVisible();
+    await close();
+    expect(resolutions).toEqual([{ text: explicitPath, status: 200 }, { text: "missing.md", status: 404 }]);
+    expect(submissions).toEqual([]);
+    expect(await history()).toEqual(before);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+previewTest("ten historical file links open from a saved reply and preserve the chat", async ({ page, request, account, previewDirectory }) => {
+  const repository = mkdtempSync(path.join(os.tmpdir(), "octopus-chat-link-repository-"));
+  try {
+    if (!account) throw new Error("Expected an isolated account");
+    const setExtraRoots = await editExtraRoots(request, account.user_id);
+    await setExtraRoots([repository]);
+    const encodePath = (filename: string) => filename.split("/").map(encodeURIComponent).join("/");
+    const report = path.join(previewDirectory, "原始 报告 %23#:.md");
+    writeFileSync(report, "# Historical report\n");
+    const fixtures = [
+      ["账户夹具", "web/e2e/test.ts", 10, "absolute"],
+      ["帧等待", "web/e2e/chat-follow-output.spec.ts", 155, "file"],
+      ["当前发布规则", "docs/testing.md", 389, "fragment"],
+      ["65 秒回归", "tests/test_question_codex_real.py", 85, "absolute"],
+      ["报告测试", "tests/test_check_hooks.py", 290, "absolute"],
+      ["全局夹具", "tests/conftest.py", 171, "absolute"],
+      ["参数矩阵", "web/tests/e2eOwnership.test.ts", 122, "absolute"],
+      ["注册响应", "server/routers/auth.py", 172, "absolute"],
+      ["发布 trace 配置", "web/e2e/run.ts", 92, "relative"],
+    ] as const;
+    const files = fixtures.map(([label, filename, line, format]) => {
+      const absolute = path.join(format === "relative" ? previewDirectory : repository, filename);
+      mkdirSync(path.dirname(absolute), { recursive: true });
+      const marker = `Historical source for ${label}`;
+      writeFileSync(absolute, "\n".repeat(line - 1) + `# ${marker}\n`);
+      const href = format === "file" ? `file://${encodePath(absolute)}:${line}`
+        : format === "fragment" ? `${encodePath(absolute)}#L${line}`
+        : format === "relative" ? `${filename}:${line}` : `${encodePath(absolute)}:${line}`;
+      return { label, absolute, line, marker, link: `[${label}](${href})` };
+    });
+    const content = [
+      ...Array.from({ length: 16 }, (_, index) => `Earlier paragraph ${index + 1}.\n`),
+      `前文 [原始报告](${encodePath(report)})`,
+      "",
+      "| 优先级 | 建议 |", "| --- | --- |",
+      `| 离线浏览器 | ${files[0].link} ${files[1].link} |`,
+      `| 实机 | ${files[2].link} ${files[3].link} |`,
+      `| pytest | ${files[4].link} ${files[5].link} |`,
+      `| Vitest | ${files[6].link} |`,
+      "",
+      `后文 ${files[7].link} ${files[8].link}`,
+      "",
+      "[普通网页](./health) [页内片段](#details)",
+      "",
+      ...Array.from({ length: 28 }, (_, index) => `Later paragraph ${index + 1}.\n`),
+    ].join("\n");
+    const name = "Historical file reply";
+    const imported = await request.post(`${API}/sessions/import`, { headers, data: {
+      name, working_dir: previewDirectory, messages: [{ role: "assistant", type: "text", content }],
+    } });
+    expect(imported.status(), await imported.text()).toBe(201);
+    const { id } = await imported.json();
+    const readHistory = async () => {
+      const saved = await request.get(`${API}/sessions/${id}/messages?before_seq=10000`, { headers });
+      expect(saved.ok()).toBeTruthy();
+      return (await saved.json()).messages;
+    };
+    const before = await readHistory();
+    const fileRequests: string[] = [];
+    const submissions: string[] = [];
+    const commandPath = `/api/sessions/${id}/showme/resolve`;
+    const commandResolutions: string[] = [];
+    const completedResolutions: string[] = [];
+    page.on("request", req => {
+      const pathname = new URL(req.url()).pathname;
+      if (pathname.startsWith(`/api/sessions/${id}/files`)) fileRequests.push(pathname);
+      if (pathname === commandPath) commandResolutions.push(pathname);
+    });
+    page.on("response", res => {
+      if (new URL(res.url()).pathname === commandPath && res.ok()) completedResolutions.push(res.url());
+    });
+    page.on("websocket", socket => socket.on("framesent", ({ payload }) => {
+      if (String(payload).includes('"send_message"')) submissions.push(String(payload));
+    }));
+
+    await signIn(page);
+    await openSession(page, name);
+    const reply = page.locator(".msg-content.markdown");
+    const buttonName = (label: string, line?: number) => `Open file: ${label}${line ? ` at line ${line}` : ""}`;
+    const fileButton = (label: string, line?: number) => reply.getByRole("button", { name: buttonName(label, line), exact: true });
+    await expect(reply.getByRole("button", { name: /^Open file:/ })).toHaveCount(10);
+    await expect(reply.getByRole("table").getByRole("button")).toHaveCount(7);
+    const firstCell = reply.getByRole("cell").filter({
+      has: page.getByRole("button", { name: buttonName(files[0].label, files[0].line), exact: true }),
+    });
+    await expect(firstCell.getByRole("button")).toHaveCount(2);
+    await expect(firstCell.getByRole("button", { name: buttonName(files[1].label, files[1].line), exact: true })).toBeVisible();
+    await expect(reply.getByRole("link", { name: "页内片段" })).toHaveAttribute("href", "#details");
+    expect(fileRequests).toEqual([]);
+    const originalUrl = page.url();
+    const dialog = page.getByRole("dialog");
+    const close = async () => {
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+    };
+    const first = fileButton("原始报告");
+    await first.scrollIntoViewIfNeeded();
+    await first.focus();
+    const scrollPosition = () => page.locator(".chat-messages").evaluate(node => node.scrollTop);
+    const readingPosition = await scrollPosition();
+    expect(readingPosition).toBeGreaterThan(0);
+    expect(await page.locator(".chat-messages").evaluate(node => node.scrollHeight - node.clientHeight - node.scrollTop))
+      .toBeGreaterThan(30);
+    await first.press("Enter");
+    await expect(dialog.getByRole("heading", { name: "Historical report" })).toBeVisible();
+    await expect(dialog.getByText(report, { exact: true })).toBeVisible();
+    expect(await dialog.evaluate(node => node.contains(document.activeElement))).toBeTruthy();
+    await close();
+    await expect(first).toBeFocused();
+    expect(await scrollPosition()).toBe(readingPosition);
+
+    for (const [index, file] of files.entries()) {
+      const button = fileButton(file.label, file.line);
+      await expect(button).toHaveText(file.label);
+      if (index === 0) {
+        await button.focus();
+        await button.press("Space");
+      } else await button.click();
+      await expect(dialog.getByText(file.absolute, { exact: true })).toBeVisible();
+      const located = dialog.locator(`[data-line="${file.line}"][data-located="true"]`);
+      await expect(located).toContainText(file.marker);
+      await expect(located).toBeInViewport();
+      await close();
+      await expect(button).toBeFocused();
+    }
+    expect(commandResolutions).toEqual([]);
+
+    const equivalent = files[6];
+    await showFile(page, `${JSON.stringify(equivalent.absolute)}:${equivalent.line}`);
+    await expect(dialog.getByText(equivalent.absolute, { exact: true })).toBeVisible();
+    await expect(dialog.locator(`[data-line="${equivalent.line}"][data-located="true"]`)).toContainText(equivalent.marker);
+    await close();
+    await showFile(page, JSON.stringify(report));
+    await expect(dialog.getByRole("heading", { name: "Historical report" })).toBeVisible();
+    await expect(dialog.getByText(report, { exact: true })).toBeVisible();
+    await close();
+
+    expect(page.url()).toBe(originalUrl);
+    expect(completedResolutions).toHaveLength(2);
+    expect(submissions).toEqual([]);
+    expect(before).toHaveLength(1);
+    expect(await readHistory()).toEqual(before);
+    const website = reply.getByRole("link", { name: "普通网页" });
+    await expect(website).toHaveAttribute("href", "./health");
+    const siteResponse = page.waitForResponse(res => new URL(res.url()).pathname === "/health" && res.request().isNavigationRequest());
+    await website.click();
+    expect((await siteResponse).ok()).toBeTruthy();
+    await expect(page).toHaveURL(/\/health$/);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+previewTest("opens an archived report and its image while keeping the foreground chat", async ({ page, context, request, previewDirectory: directory }) => {
+  const archiveDirectory = path.join(directory, "archive");
+  const liveDirectory = path.join(directory, "foreground");
+  mkdirSync(archiveDirectory);
+  mkdirSync(liveDirectory);
+  writeFileSync(path.join(archiveDirectory, "report.md"), "# Archived source\n\n![Archived diagram](diagram.png)");
+  writeFileSync(path.join(liveDirectory, "report.md"), "# Foreground source");
+  writeFileSync(path.join(archiveDirectory, "diagram.png"), png);
+  const archiveId = await createSession(request, archiveDirectory, "Archived file source");
+  const liveId = await createSession(request, liveDirectory, "Foreground chat");
+  expect((await request.post(`${API}/sessions/${archiveId}/archive?replace=false`, { headers })).status()).toBe(204);
+  await signIn(page);
+  await openSession(page, "Foreground chat");
+  const foreground = page.locator(`[data-chat-session="${liveId}"]:not([inert])`);
+  await expect(foreground).toBeVisible();
+  const openArchive = async (tab: Page) => {
+    await tab.getByRole("button", { name: "Account menu" }).click();
+    await tab.getByRole("menuitem", { name: "Archived sessions" }).click();
+    return tab.getByRole("dialog", { name: "Archived sessions" });
+  };
+  const archive = await openArchive(page);
+  const archiveRow = (tab: Page) => tab.locator(".archived-session-row").filter({ hasText: "Archived file source" });
+  const source = archiveRow(page);
+  const openFile = source.getByRole("button", { name: "Open file", exact: true });
+  await openFile.click();
+  const viewer = page.getByRole("dialog", { name: "Open file" });
+  const field = viewer.getByRole("textbox", { name: "File path" });
+  await expect(field).toBeFocused();
+  await field.fill("report.md");
+  await viewer.getByRole("button", { name: "Open file", exact: true }).click();
+  const report = page.getByRole("dialog", { name: "report.md" });
+  await expect(report.getByRole("heading", { name: "Archived source" })).toBeVisible();
+  const image = report.getByRole("img", { name: "Archived diagram" });
+  await expect.poll(() => image.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBe(1);
+  expect(new URL((await image.getAttribute("src"))!).pathname).toBe(`/api/sessions/${archiveId}/files`);
+  await expect(foreground).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(report).toHaveCount(0);
+  await expect(openFile).toBeFocused();
+  await openFile.click();
+  await expect(field).toBeFocused();
+  const otherTab = await context.newPage();
+  try {
+    await otherTab.goto("/");
+    await openArchive(otherTab);
+    await archiveRow(otherTab).getByRole("button", { name: "Unarchive", exact: true }).click();
+    await expect(source).toHaveCount(0);
+  } finally {
+    await otherTab.close();
+  }
+  await expect(viewer).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(viewer).toHaveCount(0);
+  await expect(archive.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(archive).toHaveCount(0);
+  await expect(foreground.locator(".chat-input-bar textarea")).toBeVisible();
+});
+
+previewTest("showme reopens positioned Markdown and corrects literal paths separately", async ({ page, context, request, previewDirectory: directory }) => {
+  const filename = "计划.md#附录 25%.md";
+  const absolute = path.join(directory, filename);
+  writeFileSync(absolute, "# Plan\n\n**Source target**\n\nFourth paragraph\n");
+  const sessionId = await createSession(request, directory, "Positioned Markdown");
+  await signIn(page);
+  await openSession(page, "Positioned Markdown");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const dialog = page.getByRole("dialog");
+  const line = dialog.locator('[data-line="3"]');
+  const source = dialog.getByRole("button", { name: "Source", exact: true });
+  const reading = dialog.getByRole("button", { name: "Reading", exact: true });
+  const close = async () => dialog.getByRole("button", { name: "Close", exact: true }).click();
+  const readClipboard = () => page.evaluate(() => navigator.clipboard.readText());
+  let reads = 0;
+  page.on("request", (req) => {
+    if (new URL(req.url()).pathname === `/api/sessions/${sessionId}/files`) reads++;
+  });
+
+  await showFile(page, `${JSON.stringify(filename)}#L3-L5`);
+  await expect(source).toHaveAttribute("aria-pressed", "true");
+  await expect(line).toContainText("**Source target**");
+  await expect(line).toBeInViewport();
+  expect(await line.evaluate((node) => getComputedStyle(node, "::before").content)).toContain("▸ 3");
+  await expect(dialog.locator('[data-line="5"]')).toHaveAttribute("data-located", "true");
+  const readsBeforeSwitching = reads;
+  expect(readsBeforeSwitching).toBeGreaterThan(0);
+  await reading.click();
+  await expect(dialog.getByRole("heading", { name: "Plan", exact: true })).toBeVisible();
+  await source.click();
+  await expect(line).toContainText("**Source target**");
+  expect(reads).toBe(readsBeforeSwitching);
+
+  await dialog.getByRole("button", { name: "Copy /showme command" }).click();
+  await expect(dialog.getByRole("status")).toHaveText("Command copied.");
+  const command = await readClipboard();
+  expect(command).toBe(`/showme ${JSON.stringify(absolute)} --source ${JSON.stringify(directory)}#L3-L5`);
+  await dialog.getByRole("button", { name: "Copy path" }).click();
+  await expect(dialog.getByRole("status")).toHaveText("Path copied.");
+  expect(await readClipboard()).toBe(absolute);
+  await close();
+
+  await page.locator(".chat-input-bar textarea").fill(command);
+  await page.locator("button.btn-send").click();
+  await expect(line).toBeInViewport();
+  await close();
+
+  for (const [target, error] of [
+    ["../计划.md#附录 25%.md", "You don't have access to this file."],
+    ["missing 25%#附录.md", "File not found."],
+  ]) {
+    await showFile(page, `${JSON.stringify(target)}:3`);
+    await expect(dialog.getByRole("alert")).toHaveText(error);
+    await dialog.getByRole("button", { name: "Edit path" }).click();
+    const field = dialog.getByRole("textbox", { name: "File path" });
+    await expect(field).toHaveValue(target);
+    const position = dialog.getByRole("textbox", { name: "Position (optional)" });
+    await expect(position).toHaveValue(":3");
+    await field.fill("");
+    await field.press("Control+V");
+    await expect(field).toHaveValue(absolute);
+    await position.fill("#L3-L5");
+    await dialog.getByRole("button", { name: "Open file" }).click();
+    await expect(line).toBeInViewport();
+    await close();
+  }
+
+  for (const [suffix, note, view] of [
+    [":0", "The requested file position is invalid.", "Reading"],
+    ["#L9-L3", "The requested file position is invalid.", "Reading"],
+    ["#missing", "The requested heading wasn't found.", "Reading"],
+    [":99", "The requested lines are outside this file.", "Source"],
+  ]) {
+    await showFile(page, `${JSON.stringify(filename)}${suffix}`);
+    await expect(dialog.getByRole("note")).toHaveText(note);
+    await expect(dialog.getByRole("button", { name: view, exact: true })).toHaveAttribute("aria-pressed", "true");
+    if (view === "Reading") await expect(dialog.getByRole("heading", { name: "Plan", exact: true })).toBeVisible();
+    else await expect(line).toBeVisible();
+    await dialog.getByRole("button", { name: "Copy /showme command" }).click();
+    await expect(dialog.getByRole("status")).toHaveText("Command copied.");
+    expect(await readClipboard()).toBe(`/showme ${JSON.stringify(absolute)} --source ${JSON.stringify(directory)}`);
+    await close();
+  }
+});
+
+previewTest("source copy preserves mixed newlines, wrapping and multiline syntax", async ({ page, context, request, previewDirectory: directory }) => {
+  const longLine = `second ${"word ".repeat(90)}continuation`;
+  const raw = `const marker = 1; /* first\r\n${longLine}\rthird */\n\nconst tail = 2;\n`;
+  writeFileSync(path.join(directory, "sample.js"), raw);
+  writeFileSync(path.join(directory, "notes.txt"), "plain first\rplain second\n");
+  await createSession(request, directory, "Source clipboard");
+  await page.setViewportSize({ width: 900, height: 700 });
+  await page.addInitScript(() => {
+    const send = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (this: Worker, message: unknown, options?: StructuredSerializeOptions | Transferable[]) {
+      const data = message as { language?: unknown; text?: unknown } | null;
+      const deliver = () => Reflect.apply(send, this, [message, options]);
+      if (data?.language !== "javascript" || typeof data.text !== "string") {
+        deliver();
+        return;
+      }
+      document.documentElement.dataset.sourceSyntaxWaiting = "true";
+      this.addEventListener("message", () => window.dispatchEvent(new Event("source-syntax-ready")), { once: true });
+      window.addEventListener("start-source-syntax", deliver, { once: true });
+    };
+  });
+  await signIn(page);
+  await openSession(page, "Source clipboard");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await showFile(page, "sample.js#L2-L4");
+
+  const dialog = page.getByRole("dialog");
+  const source = dialog.locator("pre code");
+  const comment = source.locator('[data-line="2"] .hljs-comment');
+  const expected = `first\r\n${longLine}\rthird */\n\nconst tail = 2;\n`;
+  await expect(source.locator('[data-line="2"]')).toContainText(longLine);
+  await expect(page.locator("html")).toHaveAttribute("data-source-syntax-waiting", "true");
+  await source.evaluate((code) => {
+    const start = code.querySelector('[data-line="1"]')?.firstChild;
+    if (!start) throw new Error("The first line should be visible before highlighting");
+    window.getSelection()!.setBaseAndExtent(code, code.childNodes.length, start, "const marker = 1; /* ".length);
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => {
+    window.addEventListener("source-syntax-ready", () => resolve(), { once: true });
+    window.dispatchEvent(new Event("start-source-syntax"));
+  }));
+  await expect(comment).toHaveCount(0);
+  await page.keyboard.press("Control+c");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(expected);
+  await page.evaluate(() => {
+    window.getSelection()?.removeAllRanges();
+    return navigator.clipboard.writeText("");
+  });
+
+  await expect(comment).toContainText(longLine);
+  await expect(source.locator('[data-line="3"] .hljs-comment')).toContainText("third */");
+  await expect(source.locator('[data-line="4"]')).toHaveAttribute("data-located", "true");
+  const heights = await source.locator("[data-line]").evaluateAll((rows) => rows.map((row) => row.getBoundingClientRect().height));
+  expect(heights).toHaveLength(5);
+  expect(heights[1]).toBeGreaterThan(heights[2]);
+  await source.evaluate((code) => {
+    const start = code.querySelector('[data-line="1"] .hljs-comment')?.firstChild;
+    if (!start) throw new Error("The first line of the block comment should be highlighted");
+    window.getSelection()!.setBaseAndExtent(code, code.childNodes.length, start, 3);
+  });
+  await page.keyboard.press("Control+c");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(expected);
+
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await showFile(page, "notes.txt:2");
+  const plain = dialog.getByText("plain second", { exact: true });
+  await expect(plain).toBeInViewport();
+  await expect(plain).toHaveAttribute("data-line", "2");
+  await expect(plain).toHaveAttribute("data-located", "true");
+});
+
+previewTest("reading and source retain the chosen section and copy a long source range", async ({ page, context, request, previewDirectory: directory }) => {
+  const rows = ["# Sections", ...Array.from({ length: 4000 }, (_, index) => `Line ${index + 2}`)];
+  writeFileSync(path.join(directory, "sections.md"), rows.join("\r\n"));
+  const sessionId = await createSession(request, directory, "Source sections");
+  await signIn(page);
+  await openSession(page, "Source sections");
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const dialog = page.getByRole("dialog");
+  const navigation = dialog.getByRole("navigation", { name: "Source line sections" });
+  let reads = 0;
+  page.on("request", (req) => {
+    if (new URL(req.url()).pathname === `/api/sessions/${sessionId}/files`) reads++;
+  });
+
+  await showFile(page, "sections.md:2500");
+  await expect(dialog.getByText("Line 2500", { exact: true })).toBeInViewport();
+  const readsBeforeSwitching = reads;
+  await navigation.getByRole("button", { name: "Next lines" }).click();
+  await expect(navigation).toContainText("4001–4001");
+  await dialog.getByRole("button", { name: "Reading", exact: true }).click();
+  await expect(dialog.getByRole("heading", { name: "Sections", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Source", exact: true }).click();
+  await expect(navigation).toContainText("4001–4001");
+  await expect(dialog.getByText("Line 4001", { exact: true })).toBeInViewport();
+  expect(reads).toBe(readsBeforeSwitching);
+
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await showFile(page, "sections.md#L1-L2001");
+  await navigation.getByRole("button", { name: "Copy highlighted lines" }).click();
+  await expect(dialog.getByRole("status")).toHaveText("Highlighted lines copied.");
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(rows.slice(0, 2001).join("\r\n") + "\r\n");
+});
+
+previewTest("copied showme commands and position edits retain the canonical file and authorized source", async ({ page, context, request, account, previewDirectory: directory }) => {
+  if (!account) throw new Error("The file source story requires an offline account");
+  const repo = mkdtempSync(path.join(os.tmpdir(), 'showme position "% source-'));
+  try {
+    const team = path.join(repo, "team");
+    const alias = path.join(repo, "alias.md");
+    const canonical = path.join(team, "plan.md");
+    const guide = path.join(repo, "guide.md");
+    mkdirSync(team);
+    writeFileSync(canonical, [
+      "## Target position", "![Shared diagram](../diagram.svg)", spacing, "## Second position",
+      "[Open source line](./README:12)", "[Open literal colon](./README%3A12)",
+    ].join("\n\n"));
+    writeFileSync(path.join(team, "repointed.md"), "# Repointed alias");
+    writeFileSync(guide, "[Follow team plan](./team/plan.md#target-position)");
+    symlinkSync("team/plan.md", alias);
+    writeFileSync(path.join(team, "README"), "first\n".repeat(11) + "The twelfth source line\n");
+    writeFileSync(path.join(team, "colon.md"), "# Literal colon alias");
+    symlinkSync("colon.md", path.join(team, "README:12"));
+    writeFileSync(path.join(repo, "diagram.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="8"><rect width="13" height="8"/></svg>');
+    const setExtraRoots = await editExtraRoots(request, account.user_id);
+    await setExtraRoots([repo, team]);
+    const sessionId = await createSession(request, directory, "Positioned source alias");
+    await signIn(page);
+    await openSession(page, "Positioned source alias");
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const dialog = page.getByRole("dialog");
+    const heading = dialog.getByRole("heading", { name: "Target position" });
+    const diagram = dialog.getByRole("img", { name: "Shared diagram" });
+    const expectDiagram = () => expect.poll(() => diagram.evaluate((node) => (node as HTMLImageElement).naturalWidth)).toBe(13);
+    const close = () => dialog.getByRole("button", { name: "Close", exact: true }).click();
+    const copyCommand = async (position: string) => {
+      await dialog.getByRole("button", { name: "Copy /showme command" }).click();
+      await expect(dialog.getByRole("status")).toHaveText("Command copied.");
+      const command = await page.evaluate(() => navigator.clipboard.readText());
+      expect(command).toBe(`/showme ${JSON.stringify(canonical)} --source ${JSON.stringify(repo)}${position}`);
+      return command;
+    };
+    const reopen = async (command: string) => {
+      const resolved = page.waitForResponse((resp) => new URL(resp.url()).pathname === `/api/sessions/${sessionId}/showme/resolve` && resp.ok());
+      await page.locator(".chat-input-bar textarea").fill(command);
+      await page.locator("button.btn-send").click();
+      expect((await (await resolved).json()).metadata.source).toBe(repo);
+    };
+
+    await showFile(page, `${JSON.stringify(alias)}#target-position`);
+    await expect(heading).toBeInViewport();
+    await expectDiagram();
+    symlinkSync("team/repointed.md", alias + ".new");
+    renameSync(alias + ".new", alias);
+    const command = await copyCommand("#target-position");
+    await close();
+    await reopen(command);
+    await expect(heading).toBeInViewport();
+    await expectDiagram();
+    await close();
+
+    await showFile(page, JSON.stringify(guide));
+    await dialog.getByRole("link", { name: "Follow team plan" }).click();
+    await expect(heading).toBeInViewport();
+    await expectDiagram();
+    const linked = await copyCommand("#target-position");
+
+    await dialog.getByRole("button", { name: "Edit path" }).click();
+    await expect(dialog.getByRole("textbox", { name: "File path" })).toHaveValue(canonical);
+    const position = dialog.getByRole("textbox", { name: "Position (optional)" });
+    await expect(position).toHaveValue("#target-position");
+    await position.fill("#second-position");
+    await dialog.getByRole("button", { name: "Open file" }).click();
+    await expect(dialog.getByRole("heading", { name: "Second position" })).toBeInViewport();
+    await expect(heading).not.toBeInViewport();
+    await expectDiagram();
+    await close();
+
+    await reopen(linked);
+    await expect(heading).toBeInViewport();
+    await expectDiagram();
+
+    await dialog.getByRole("link", { name: "Open source line" }).click();
+    const line = dialog.getByText("The twelfth source line", { exact: true });
+    await expect(line).toBeInViewport();
+    await expect(line).toHaveAttribute("data-located", "true");
+    await close();
+
+    await reopen(linked);
+    await dialog.getByRole("link", { name: "Open literal colon" }).click();
+    await expect(dialog.getByRole("heading", { name: "Literal colon alias" })).toBeVisible();
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+for (const editBeforeDenial of [true, false]) {
+  previewTest(`a position edit ${editBeforeDenial ? "before" : "after"} body denial retains its source`, async ({ page, request, account, previewDirectory: directory }) => {
+    if (!account) throw new Error("The source revocation story requires an offline account");
+    const repo = mkdtempSync(path.join(os.tmpdir(), "showme-edit-revocation-"));
+    try {
+      const team = path.join(repo, "team");
+      const guide = path.join(repo, "guide.md");
+      const canonical = path.join(team, "plan.md");
+      mkdirSync(team);
+      writeFileSync(guide, "[Open team plan](./team/plan.md#plan)");
+      writeFileSync(canonical, "# Plan\n\n## Alternative section");
+      const setExtraRoots = await editExtraRoots(request, account.user_id);
+      await setExtraRoots(editBeforeDenial ? [repo, team] : [repo]);
+      const sessionId = await createSession(request, directory, "Position edit during revocation");
+      await signIn(page);
+      await openSession(page, "Position edit during revocation");
+      if (editBeforeDenial) await showFile(page, JSON.stringify(guide));
+
+      const files = `/api/sessions/${sessionId}/files`;
+      const planBody = (url: URL) => url.pathname === files && url.searchParams.get("path") === "team/plan.md";
+      let release!: () => void;
+      const canRead = new Promise<void>((resolve) => { release = resolve; });
+      await page.route(planBody, async (route) => {
+        await canRead;
+        await route.continue();
+      });
+      const bodyStarted = page.waitForRequest((req) => planBody(new URL(req.url())));
+      const bodyDenied = page.waitForResponse((res) => planBody(new URL(res.url())) && res.status() === 403);
+      const dialog = page.getByRole("dialog");
+      const edit = dialog.getByRole("button", { name: "Edit path" });
+      const field = dialog.getByRole("textbox", { name: "File path" });
+      try {
+        if (editBeforeDenial) await dialog.getByRole("link", { name: "Open team plan" }).click();
+        else await showFile(page, `${JSON.stringify(canonical)}#plan`);
+        await bodyStarted;
+        if (editBeforeDenial) {
+          await edit.click();
+          await expect(field).toHaveValue(canonical);
+        }
+        await setExtraRoots([team]);
+      } finally {
+        release();
+      }
+      await bodyDenied;
+      await expect(dialog.getByRole("alert")).toHaveText("You don't have access to this file.");
+      if (!editBeforeDenial) {
+        await edit.click();
+        await expect(field).toHaveValue(canonical);
+      }
+      const position = dialog.getByRole("textbox", { name: "Position (optional)" });
+      await expect(position).toHaveValue("#plan");
+      await position.fill("#alternative-section");
+      const reopened = page.waitForResponse((res) => {
+        const url = new URL(res.url());
+        return url.pathname === `${files}/meta` && url.searchParams.get("path") === canonical;
+      });
+      await dialog.getByRole("button", { name: "Open file" }).click();
+      const response = await reopened;
+      expect(new URL(response.url()).searchParams.get("source")).toBe(repo);
+      expect(response.status()).toBe(403);
+      await expect(dialog.getByRole("alert")).toHaveText("You don't have access to this file.");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+}
+
+previewTest("a position edit started before metadata uses the confirmed source", async ({ page, request, account, previewDirectory: directory }) => {
+  if (!account) throw new Error("The source binding story requires an offline account");
+  const repo = mkdtempSync(path.join(os.tmpdir(), "showme-editor-source-"));
+  try {
+    const team = path.join(repo, "team");
+    const canonical = path.join(team, "plan.md");
+    mkdirSync(team);
+    writeFileSync(path.join(directory, "guide.md"), "# Guide");
+    writeFileSync(canonical, "# Plan\n\n## Alternative section");
+    const setExtraRoots = await editExtraRoots(request, account.user_id);
+    await setExtraRoots([repo]);
+    const sessionId = await createSession(request, directory, "Position edit before metadata");
+    await signIn(page);
+    await openSession(page, "Position edit before metadata");
+    await showFile(page, "guide.md");
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByRole("heading", { name: "Guide", exact: true })).toBeVisible();
+
+    const planMeta = (url: URL) => url.pathname === `/api/sessions/${sessionId}/files/meta` && url.searchParams.get("path") === canonical;
+    let release!: () => void;
+    const canRead = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(planMeta, async (route) => {
+      await canRead;
+      await route.continue();
+    });
+    const edit = dialog.getByRole("button", { name: "Edit path" });
+    const field = dialog.getByRole("textbox", { name: "File path" });
+    const open = dialog.getByRole("button", { name: "Open file", exact: true });
+    const initialMeta = page.waitForRequest((req) => planMeta(new URL(req.url())));
+    try {
+      await edit.click();
+      await field.fill(canonical);
+      await open.click();
+      await initialMeta;
+      await edit.click();
+      await expect(field).toHaveValue(canonical);
+    } finally {
+      release();
+    }
+    await expect(dialog.getByRole("heading", { name: "Plan", exact: true })).toBeVisible();
+    await setExtraRoots([repo, team]);
+    await dialog.getByRole("textbox", { name: "Position (optional)" }).fill("#alternative-section");
+    const reopened = page.waitForResponse((res) => planMeta(new URL(res.url())) && res.ok());
+    await open.click();
+    const response = await reopened;
+    expect(new URL(response.url()).searchParams.get("source")).toBe(repo);
+    expect((await response.json()).source).toBe(repo);
+    await expect(dialog.getByRole("heading", { name: "Alternative section", exact: true })).toBeInViewport();
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+previewTest("showme can reach a source line near the end of an exceptionally long file", async ({ page, request, previewDirectory: directory }) => {
+  writeFileSync(path.join(directory, "README"), "\n".repeat(1_400_000) + "TARGET SOURCE LINE\n" + "\n".repeat(100));
+  await createSession(request, directory, "Long source file");
+  await signIn(page);
+  await openSession(page, "Long source file");
+  await page.setViewportSize({ width: 320, height: 520 });
+  await showFile(page, "README:1400001");
+
+  const dialog = page.getByRole("dialog");
+  const last = dialog.getByText("TARGET SOURCE LINE", { exact: true });
+  const navigation = dialog.getByRole("navigation", { name: "Source line sections" });
+  await expect(last).toBeInViewport();
+  await expect(last).toHaveAttribute("data-line", "1400001");
+  const initialNav = (await navigation.boundingBox())!;
+  expect.soft((await last.boundingBox())!.y).toBeGreaterThanOrEqual(initialNav.y + initialNav.height - 1);
+  const marker = await last.evaluate(async (row) => {
+    await document.fonts.ready;
+    const style = getComputedStyle(row, "::before");
+    const canvas = document.createElement("canvas").getContext("2d")!;
+    canvas.font = style.font;
+    const markerText = style.content.slice(1, -1);
+    const rightEdge = row.getBoundingClientRect().left + Number.parseFloat(style.width);
+    const clipEdge = row.closest("pre")!.getBoundingClientRect().left;
+    return { text: markerText, fits: rightEdge - canvas.measureText(markerText).width >= clipEdge };
+  });
+  expect.soft(marker).toEqual({ text: "▸ 1400001", fits: true });
+  await dialog.getByRole("button", { name: "Previous lines" }).click();
+  await expect(navigation).toContainText("1398001–1400000");
+  await expect(last).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await page.setViewportSize({ width: 360, height: 520 });
+  await showFile(page, "README#L1399999-L1400001");
+  await expect(last).toBeInViewport();
+  await expect(dialog.locator('[data-located="true"]')).toHaveCount(3);
+  const firstMarked = dialog.locator('[data-line="1399999"]');
+  const navBounds = (await navigation.boundingBox())!;
+  expect((await firstMarked.boundingBox())!.y).toBeGreaterThanOrEqual(navBounds.y + navBounds.height - 1);
+});
+
+previewTest("one workspace chat opens explicit paths from workspace and repository and edits a missing target", async ({ page, context, request, account, previewDirectory }) => {
+  if (!account) throw new Error("The repository fixture needs its own account");
+  const repository = mkdtempSync(path.join(os.tmpdir(), "showme-repository-"));
+  const filename = "中文 %20#计划.md";
+  const workspaceFile = path.join(previewDirectory, filename);
+  const repositoryFile = path.join(repository, filename);
+  try {
+    const setExtraRoots = await editExtraRoots(request, account.user_id);
+    await setExtraRoots([repository]);
+    writeFileSync(workspaceFile, "# Workspace plan\n\nRead the **workspace** copy.");
+    writeFileSync(repositoryFile, "# Repository plan");
+    const guide = path.join(repository, "docs", "guide.md");
+    mkdirSync(path.dirname(guide));
+    writeFileSync(guide, "[Open missing plan](missing.md)");
+    writeFileSync(path.join(repository, "docs", "plan.md"), "# Relative repository plan");
+    writeFileSync(path.join(previewDirectory, "plan.md"), "# Unrelated workspace plan");
+    const crFile = path.join(repository, "literal\r.md");
+    const backslashFile = path.join(repository, "literal\\r.md");
+    const typedRepositoryFile = repositoryFile.replace(/\.md$/, "x.md");
+    const editedCrFile = path.join(repository, "literal\n\r.md");
+    const continuedCrFile = path.join(repository, "literal\r\nx.md");
+    writeFileSync(crFile, "# Carriage return name");
+    writeFileSync(backslashFile, "# Literal backslash name");
+    writeFileSync(typedRepositoryFile, "# Typed repository plan");
+    writeFileSync(path.join(repository, "literal\n.md"), "# Line feed name");
+    writeFileSync(editedCrFile, "# Line feed before carriage return");
+    writeFileSync(path.join(repository, "literal\r\n.md"), "# Carriage return before line feed");
+    writeFileSync(continuedCrFile, "# Continued edit");
+    writeFileSync(path.join(repository, "literal\r\n.mdx"), "# Wrong continued edit");
+    const sessionId = await createSession(request, previewDirectory, "Explicit file paths");
+    await signIn(page);
+    await openSession(page, "Explicit file paths");
+    const originalUrl = page.url();
+    const dialog = page.getByRole("dialog");
+
+    await showFile(page, JSON.stringify(filename));
+    await expect(dialog.getByRole("heading", { name: "Workspace plan" })).toBeVisible();
+    await expect(dialog.locator("strong")).toHaveText("workspace");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await showFile(page, JSON.stringify(repositoryFile));
+    await expect(dialog.getByRole("heading", { name: "Repository plan" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await showFile(page, "中文 缺失.md");
+    await expect(dialog.getByRole("alert")).toHaveText("File not found.");
+    await dialog.getByRole("button", { name: "Edit path" }).click();
+    const field = dialog.getByRole("textbox", { name: "File path" });
+    await expect(field).toHaveValue("中文 缺失.md");
+    await field.fill(repositoryFile);
+    await dialog.getByRole("button", { name: "Open file" }).click();
+    await expect(dialog.getByRole("heading", { name: "Repository plan" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+
+    await showFile(page, JSON.stringify(guide));
+    await dialog.getByRole("link", { name: "Open missing plan" }).click();
+    await expect(dialog.getByRole("alert")).toHaveText("File not found.");
+    await dialog.getByRole("button", { name: "Edit path" }).click();
+    await field.fill("plan.md");
+    await dialog.getByRole("button", { name: "Open file" }).click();
+    await expect(dialog.getByRole("heading", { name: "Relative repository plan" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await showFile(page, JSON.stringify(crFile));
+    await expect(dialog.getByRole("heading", { name: "Carriage return name" })).toBeVisible();
+    await dialog.getByRole("button", { name: "Copy path" }).click();
+    await expect(dialog.getByRole("status")).toHaveText("Path copied.");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(crFile);
+    await dialog.getByRole("button", { name: "Edit path" }).click();
+    await field.fill("");
+    await field.press("Control+V");
+    const displayedCrFile = crFile.replace("\r", "␛r");
+    await expect(field).toHaveValue(displayedCrFile);
+    await dialog.getByRole("button", { name: "Open file" }).click();
+    await expect(dialog.getByRole("heading", { name: "Carriage return name" })).toBeVisible();
+    const edit = () => dialog.getByRole("button", { name: "Edit path" }).click();
+    const editSelection = (start: number, end = start) => field.evaluate((input, [from, to]) => {
+      (input as HTMLTextAreaElement).setSelectionRange(from, to);
+    }, [start, end] as const);
+    const expectEditedPath = async (target: string, heading: string) => {
+      const lookup = page.waitForRequest((req) => (
+        new URL(req.url()).pathname === `/api/sessions/${sessionId}/files/meta`
+      ));
+      await dialog.getByRole("button", { name: "Open file" }).click();
+      expect(new URL((await lookup).url()).searchParams.get("path")).toBe(target);
+      await expect(dialog.getByRole("heading", { name: heading })).toBeVisible();
+    };
+    const carriageReturn = displayedCrFile.indexOf("␛r");
+    await edit();
+    await field.press("Control+a");
+    await field.press("Control+c");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(crFile);
+    await field.press("Control+v");
+    await expectEditedPath(crFile, "Carriage return name");
+
+    await edit();
+    await field.press("Control+a");
+    await field.press("Control+x");
+    await expect(field).toHaveValue("");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(crFile);
+    await field.press("Control+z");
+    await expectEditedPath(crFile, "Carriage return name");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+
+    await showFile(page, JSON.stringify(repositoryFile));
+    await expect(dialog.getByRole("heading", { name: "Repository plan" })).toBeVisible();
+    await edit();
+    await field.press("Control+a");
+    await field.press("Control+v");
+    await expect(field).toHaveValue(displayedCrFile);
+    await field.press("Control+z");
+    await expectEditedPath(repositoryFile, "Repository plan");
+    await edit();
+    await editSelection(repositoryFile.length - ".md".length);
+    await field.press("x");
+    await field.press("Control+v");
+    await field.press("Control+z");
+    await expectEditedPath(typedRepositoryFile, "Typed repository plan");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+
+    await showFile(page, JSON.stringify(crFile));
+    await expect(dialog.getByRole("heading", { name: "Carriage return name" })).toBeVisible();
+    await edit();
+    await page.evaluate(value => navigator.clipboard.writeText(value), backslashFile);
+    await field.press("Control+a");
+    await field.press("Control+v");
+    await expect(field).toHaveValue(backslashFile);
+    await field.press("Control+z");
+    await expectEditedPath(crFile, "Carriage return name");
+
+    await edit();
+    await editSelection(carriageReturn, carriageReturn + 2);
+    await field.press("Backspace");
+    await field.press("Control+z");
+    await expectEditedPath(crFile, "Carriage return name");
+
+    await edit();
+    await editSelection(carriageReturn + 2);
+    await field.press("Enter");
+    await field.press("x");
+    await expectEditedPath(continuedCrFile, "Continued edit");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+
+    await showFile(page, JSON.stringify(crFile));
+    await expect(dialog.getByRole("heading", { name: "Carriage return name" })).toBeVisible();
+    await edit();
+    await editSelection(carriageReturn);
+    await field.press("Enter");
+    await expectEditedPath(editedCrFile, "Line feed before carriage return");
+    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+
+    await expect(page.locator(`[data-chat-session="${sessionId}"] .msg`)).toHaveCount(0);
+    const history = await request.get(`${API}/sessions/${sessionId}/messages?before_seq=10000`, { headers });
+    expect(history.ok()).toBeTruthy();
+    expect((await history.json()).messages).toEqual([]);
+    expect(page.url()).toBe(originalUrl);
+
+    const archived = await request.post(`${API}/sessions/${sessionId}/archive?replace=false`, { headers });
+    expect(archived.status()).toBe(204);
+    const openArchived = page.locator(".chat-archived-banner").getByRole("button", { name: "Open file" });
+    await openArchived.click();
+    const archivedPath = dialog.getByRole("textbox", { name: "File path" });
+    await expect(archivedPath).toBeFocused();
+    await archivedPath.fill(repositoryFile);
+    await dialog.getByRole("button", { name: "Open file" }).click();
+    await expect(dialog.getByRole("heading", { name: "Repository plan" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(openArchived).toBeFocused();
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+previewTest("file path clipboard selections and guarded drops preserve literal escape markers", async ({ page, request, previewDirectory: directory }) => {
+  const name = "File path text transfers";
+  const markerPath = path.join(directory, "file␛r.md");
+  writeFileSync(markerPath, "# Literal marker target");
+  writeFileSync(path.join(directory, "file\r.md"), "# Carriage return target");
+  writeFileSync(path.join(directory, "file␛\r.md"), "# Incorrect partial edit");
+  writeFileSync(path.join(directory, "plain.md"), "# Plain text drop");
+  const sessionId = await createSession(request, directory, name);
+  await signIn(page);
+  await openSession(page, name);
+
+  const dialog = page.getByRole("dialog");
+  const field = dialog.getByRole("textbox", { name: "File path" });
+  const edit = () => dialog.getByRole("button", { name: "Edit path" }).click();
+  const select = (start: number, end: number) => field.evaluate((el, [from, to]) => {
+    (el as HTMLTextAreaElement).setSelectionRange(from, to);
+  }, [start, end] as const);
+  const submitPath = async (target = markerPath, heading = "Literal marker target") => {
+    const lookup = page.waitForRequest(req => new URL(req.url()).pathname === `/api/sessions/${sessionId}/files/meta`);
+    await dialog.getByRole("button", { name: "Open file" }).click();
+    expect(new URL((await lookup).url()).searchParams.get("path")).toBe(target);
+    await expect(dialog.getByRole("heading", { name: heading })).toBeVisible();
+  };
+
+  await showFile(page, JSON.stringify(markerPath));
+  await expect(dialog.getByRole("heading", { name: "Literal marker target" })).toBeVisible();
+  const marker = markerPath.lastIndexOf("␛");
+  await edit();
+  await select(marker, marker + 1);
+  await field.press("Control+c");
+  await field.press("Control+v");
+  await submitPath();
+
+  await edit();
+  await select(marker + 1, marker + 3);
+  await field.press("Control+x");
+  await expect(field).toHaveValue(path.join(directory, "file.md"));
+  await field.press("Control+v");
+  await submitPath();
+
+  const dropText = async (text: string) => {
+    await field.evaluate((el, value) => {
+      const source = document.createElement("span");
+      source.draggable = true;
+      source.textContent = "Drag path text";
+      source.addEventListener("dragstart", event => event.dataTransfer!.setData("text/plain", value));
+      el.closest("form")!.append(source);
+    }, text);
+    const source = dialog.getByText("Drag path text");
+    const width = await field.evaluate(el => el.clientWidth);
+    await source.dragTo(field, { targetPosition: { x: width - 6, y: 12 } });
+    await source.evaluate(el => el.remove());
+  };
+  const notice = dialog.getByText("Use copy or cut, then paste to place this text.");
+  await edit();
+  await field.fill("./");
+  await select(0, 0);
+  await dropText("plain.md");
+  await expect(field).toHaveValue("./plain.md");
+  await expect(notice).toHaveCount(0);
+  await submitPath("./plain.md", "Plain text drop");
+
+  await edit();
+  await field.fill("./plain.md");
+  await select(7, 7);
+  await field.press("x");
+  await field.press("Control+z");
+  for (const literal of ["file␛r.md", "file\r.md"]) {
+    await dropText(literal);
+    await expect(notice).toBeVisible();
+    await expect(field).toHaveValue("./plain.md");
+    await field.press("Control+Shift+z");
+    await expect(field).toHaveValue("./plainx.md");
+    await field.press("Control+z");
+  }
+  await submitPath("./plain.md", "Plain text drop");
+
+  const displayed = "./file␛␛r.md";
+  const typed = "./file␛␛rx.md";
+  const prepareHistory = async () => {
+    await edit();
+    await field.fill(displayed);
+    await select(displayed.length - 3, displayed.length - 3);
+    await field.press("x");
+    await expect(field).toHaveValue(typed);
+    await field.evaluate(el => {
+      el.addEventListener("beforeinput", event => {
+        if (event instanceof InputEvent && ["deleteByDrag", "insertFromDrop"].includes(event.inputType)) {
+          el.setAttribute("data-native-drop", event.inputType);
+        }
+      });
+    });
+  };
+  const moveInsideField = async () => {
+    await select(2, 6);
+    const { from, to, y } = await field.evaluate(el => {
+      const field = el as HTMLTextAreaElement;
+      const bounds = field.getBoundingClientRect();
+      const style = getComputedStyle(field);
+      const context = document.createElement("canvas").getContext("2d")!;
+      context.font = style.font;
+      const origin = bounds.left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft);
+      const x = (index: number) => origin + context.measureText(field.value.slice(0, index)).width;
+      return { from: x(4), to: x(7), y: bounds.top + 12 };
+    });
+    await page.mouse.move(from, y);
+    await page.mouse.down();
+    await page.mouse.move(to, y, { steps: 8 });
+    await page.mouse.move(to, y);
+    await page.mouse.up();
+  };
+  for (const rejectedDrop of [moveInsideField, () => dropText("plain.md")]) {
+    await prepareHistory();
+    await field.press("Control+z");
+    await rejectedDrop();
+    await expect(notice).toBeVisible();
+    await expect(field).not.toHaveAttribute("data-native-drop");
+    await expect(field).toHaveValue(displayed);
+    await field.press("Control+Shift+z");
+    await expect(field).toHaveValue(typed);
+    await field.press("Control+z");
+    await submitPath("./file␛r.md");
+
+    await prepareHistory();
+    await select(displayed.length - 3, displayed.length - 2);
+    await field.press("Backspace");
+    await expect(field).toHaveValue(displayed);
+    await rejectedDrop();
+    await expect(notice).toBeVisible();
+    await expect(field).not.toHaveAttribute("data-native-drop");
+    await field.press("Control+z");
+    await expect(field).toHaveValue(typed);
+    await field.press("Control+z");
+    await expect(field).toHaveValue(displayed);
+    await field.press("Control+Shift+z");
+    await expect(field).toHaveValue(typed);
+    await field.press("Control+Shift+z");
+    await expect(field).toHaveValue(displayed);
+    await submitPath("./file␛r.md");
+  }
+});
 
 const spacing = Array.from({ length: 32 }, (_, number) => `Paragraph ${number + 1}.`).join("\n\n");
 const png = Buffer.from(
@@ -62,13 +1441,16 @@ previewTest("Markdown assets and anchors follow the authorized source after its 
   writeFileSync(path.join(source, "assets", "diagram.png"), png);
   writeFileSync(path.join(other, "docs", "diagram.png"), png);
   writeFileSync(path.join(source, "docs", appendix), [
-    "# Appendix", spacing, "## 目标小节", spacing,
+    "# Appendix", spacing, "## 目标小节", "[Read source line](readme.md:1)", spacing,
   ].join("\n\n"));
   writeFileSync(path.join(other, "docs", appendix), "# Other appendix");
+  writeFileSync(path.join(source, "docs", "draft:old.md"), "# Archived draft\nArchived draft text");
+  writeFileSync(path.join(other, "docs", "draft:old.md"), "# Foreground draft\nForeground draft text");
   const content = [
     "# Source document",
     "[Jump to second heading](#检查结果-1)",
     "[Open appendix](%20中文%2520%23图.md?ignored=1#目标小节)",
+    "[Read draft source line](draft%3Aold.md:2)",
     "![Diagram](jump/../diagram.png?token=author)",
     "First reference [^中文]",
     spacing, "## 检查结果", spacing, "## 检查结果",
@@ -93,11 +1475,11 @@ previewTest("Markdown assets and anchors follow the authorized source after its 
   await openSession(page, "Markdown source");
 
   const sourceFiles = `/api/sessions/${sourceId}/files`;
-  await page.route((url) => url.pathname === `${sourceFiles}/meta` && url.searchParams.get("path") === "alias.md",
+  await page.route((url) => url.pathname === `/api/sessions/${sourceId}/showme/resolve`,
     async (route) => {
       const meta = await route.fetch();
       expect(meta.status()).toBe(200);
-      expect((await meta.json()).path).toBe("docs/readme.md");
+      expect((await meta.json()).metadata.path).toBe("docs/readme.md");
       unlinkSync(alias);
       symlinkSync("replacement.md", alias);
       const archived = await request.post(`${API}/sessions/${sourceId}/archive?replace=false`, { headers });
@@ -139,33 +1521,82 @@ previewTest("Markdown assets and anchors follow the authorized source after its 
   expect((await appendixRead).status()).toBe(200);
   await expect(article.getByRole("heading", { name: "目标小节" })).toBeInViewport();
   await expect(article.getByRole("heading", { name: "Appendix" })).not.toBeInViewport();
+  await article.getByRole("link", { name: "Read source line" }).click();
+  const sourceLine = dialog.locator('[data-line="1"][data-located="true"]');
+  await expect(sourceLine).toContainText("# Source document");
+  await expect(sourceLine).toBeInViewport();
+  await dialog.getByRole("button", { name: "Reading", exact: true }).click();
+  await article.getByRole("link", { name: "Read draft source line" }).click();
+  const draftLine = dialog.locator('[data-line="2"][data-located="true"]');
+  await expect(draftLine).toContainText("Archived draft text");
+  await expect(draftLine).toBeInViewport();
 });
 
 previewTest("heading fragments and generated footnotes reach their own targets", async ({ page, request, previewDirectory: directory }) => {
   writeFileSync(path.join(directory, "alias.md"), [
     "[Jump to note-named heading](#user-content-fn-a)",
     "[Jump to prefixed heading](#file-viewer-heading-start)",
-    "Reference to the footnote [^a]",
+    "Reference to the footnote [^a] and the Chinese footnote [^中文]",
     spacing, "## User Content Fn A", spacing,
     "## Start", spacing, "## File Viewer Heading Start", spacing,
-    "[^a]: The actual footnote.",
+    "## 重复标题", spacing, "## 重复标题", spacing,
+    "[^a]: The actual footnote.", "[^中文]: 中文脚注内容。",
   ].join("\n\n"));
   await createSession(request, directory, "Anchor collisions");
   await signIn(page);
   await openSession(page, "Anchor collisions");
-  await showAlias(page);
+  await showFile(page, "alias.md#user-content-fn-a");
 
-  const article = page.getByRole("dialog").getByRole("article");
+  const dialog = page.getByRole("dialog");
+  const article = dialog.getByRole("article");
+  await expect(article.getByRole("heading", { name: "User Content Fn A" })).toBeInViewport();
   await article.getByRole("link", { name: "Jump to note-named heading" }).click();
   await expect(article.getByRole("heading", { name: "User Content Fn A" })).toBeInViewport();
   await article.getByRole("link", { name: "Jump to prefixed heading" }).click();
   await expect(article.getByRole("heading", { name: "File Viewer Heading Start" })).toBeInViewport();
 
-  const reference = article.locator("a[data-footnote-ref]");
+  const reference = article.locator("a[data-footnote-ref]").first();
   await reference.click();
   await expect(article.getByText("The actual footnote.")).toBeInViewport();
-  await article.locator("a[data-footnote-backref]").click();
+  await article.locator("a[data-footnote-backref]").first().click();
   await expect(reference).toBeInViewport();
+  const chinese = article.locator("a[data-footnote-ref]").last();
+  await chinese.click();
+  await expect(article.getByText("中文脚注内容。")).toBeInViewport();
+  await article.locator("a[data-footnote-backref]").last().click();
+  await expect(chinese).toBeInViewport();
+
+  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await showFile(page, "alias.md#重复标题-1");
+  const duplicates = article.getByRole("heading", { name: "重复标题" });
+  await expect(duplicates.last()).toBeInViewport();
+  await expect(duplicates.first()).not.toBeInViewport();
+  await article.getByRole("link", { name: "Jump to note-named heading" }).scrollIntoViewIfNeeded();
+  await dialog.getByRole("button", { name: "Source", exact: true }).click();
+  await expect(dialog.locator("pre.file-source")).toBeVisible();
+  await dialog.getByRole("button", { name: "Reading", exact: true }).click();
+  await expect(duplicates.last()).not.toBeInViewport();
+});
+
+previewTest("a footnote backreference reveals its citation inside a wide table", async ({ page, request, previewDirectory: directory }) => {
+  writeFileSync(path.join(directory, "table-notes.md"), [
+    "Opening citation [^shared]", "",
+    "| Details | Citation |", "| --- | --- |",
+    `| \`${"wide".repeat(40)}\` | Later citation [^shared] |`, "",
+    spacing, "", "[^shared]: The shared note.",
+  ].join("\n"));
+  await createSession(request, directory, "Table footnotes");
+  await signIn(page);
+  await openSession(page, "Table footnotes");
+  await page.setViewportSize({ width: 320, height: 520 });
+  await showFile(page, "table-notes.md");
+
+  const article = page.getByRole("dialog").getByRole("article");
+  const tableReference = article.getByRole("table").locator("a[data-footnote-ref]");
+  await article.locator("a[data-footnote-ref]").first().click();
+  await expect(article.getByText("The shared note.")).toBeInViewport();
+  await article.locator("a[data-footnote-backref]").last().click();
+  await expect(tableReference).toBeInViewport({ ratio: 0.95 });
 });
 
 // Keep browser HTTP caching enabled for this story. The loopback-only proxy
@@ -176,6 +1607,101 @@ const cacheTest = previewTest.extend({
     if (!proxy) throw new Error("The cache story requires a loopback-only proxy");
     await runTest();
   },
+});
+
+cacheTest("a legacy cached image cannot satisfy a new viewer read after revocation", async ({ page, request, account, baseURL }) => {
+  if (!account || !baseURL) throw new Error("The cache story requires the offline account and runner");
+  const setExtraRoots = await editExtraRoots(request, account.user_id);
+
+  // The loopback proxy supplies the cache policy of a pre-upgrade response.
+  // It forwards the file request to the real API and cannot satisfy a cache miss.
+  let legacyPath: string | undefined;
+  let legacyNetworkReads = 0;
+  const upstream = new URL(baseURL);
+  const proxy = createServer((incoming, outgoing) => {
+    const forwarded = forwardRequest(upstream, {
+      path: incoming.url, method: incoming.method, headers: { ...incoming.headers, host: upstream.host },
+    }, (response) => {
+      const headers = { ...response.headers };
+      if (incoming.url === legacyPath) {
+        legacyNetworkReads++;
+        if (response.statusCode === 200) headers["cache-control"] = "private, max-age=600";
+      }
+      outgoing.writeHead(response.statusCode ?? 502, headers);
+      response.pipe(outgoing);
+    });
+    forwarded.on("error", (error) => outgoing.destroy(error));
+    incoming.pipe(forwarded);
+  });
+  const directory = mkdtempSync(path.join(os.tmpdir(), "viewer-legacy-cache-"));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      proxy.once("error", reject);
+      proxy.listen(0, "127.0.0.1", resolve);
+    });
+    const address = proxy.address();
+    if (!address || typeof address === "string") throw new Error("Cache proxy has no loopback port");
+    writeFileSync(path.join(directory, "logo.png"), png);
+    await setExtraRoots([directory]);
+    const sessionId = await createSession(request, directory, "Legacy file cache");
+    // Keep WebSocket traffic on the runner's existing loopback connection.
+    await page.addInitScript((host) => {
+      window.WebSocket = class extends WebSocket {
+        constructor(input: string | URL, protocols?: string | string[]) {
+          const url = new URL(input);
+          url.host = host;
+          super(url, protocols);
+        }
+      };
+    }, upstream.host);
+    await signIn(page, `http://127.0.0.1:${address.port}`);
+    await openSession(page, "Legacy file cache");
+
+    const filePath = `/api/sessions/${sessionId}/files`;
+    legacyPath = await page.evaluate((endpoint) => {
+      const token = localStorage.getItem("octopus_token");
+      if (!token) throw new Error("Browser has no file viewer token");
+      return endpoint + "?path=logo.png&token=" + encodeURIComponent(token);
+    }, filePath);
+    const loadLegacyImage = (url: string) => page.evaluate((src) => new Promise<number>((resolve) => {
+      const image = new Image();
+      image.onload = () => resolve(image.naturalWidth);
+      image.onerror = () => resolve(0);
+      image.src = src;
+    }), url);
+    expect(await loadLegacyImage(legacyPath)).toBe(1);
+    expect(legacyNetworkReads).toBe(1);
+
+    await page.exposeFunction("revokeViewerFileGrant", () => setExtraRoots([]));
+    await page.evaluate((endpoint) => {
+      performance.clearResourceTimings();
+      performance.setResourceTimingBufferSize(0);
+      const originalFetch = window.fetch.bind(window);
+      let revocation: Promise<void> | undefined;
+      window.fetch = async (input, init) => {
+        const response = await originalFetch(input, init);
+        if (response.ok && new URL(String(input), location.href).pathname === endpoint.replace(/\/files$/, "/showme/resolve")) {
+          revocation ??= (window as unknown as { revokeViewerFileGrant(): Promise<void> }).revokeViewerFileGrant();
+          await revocation;
+        }
+        return response;
+      };
+    }, filePath);
+    const freshRead = page.waitForResponse((response) => new URL(response.url()).pathname === filePath);
+    await page.locator(".chat-input-bar textarea").fill("/showme logo.png");
+    await page.locator("button.btn-send").click();
+    const response = await freshRead;
+    expect(response.status()).toBe(403);
+    const viewer = page.getByRole("dialog");
+    await expect(viewer.getByRole("alert")).toHaveText("You don't have access to this file.");
+    await expect(viewer.getByRole("button", { name: "Edit path" })).toBeVisible();
+    expect(await loadLegacyImage(legacyPath)).toBe(1);
+    expect(legacyNetworkReads).toBe(1);
+  } finally {
+    proxy.closeAllConnections();
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 cacheTest("reopening a Markdown preview rechecks the canonical path with an HTTP cache present", async ({ page, request, previewDirectory: directory }) => {
@@ -236,7 +1762,8 @@ cacheTest("an open Markdown preview keeps relative resources tied to its documen
     utimesSync(diagram, old, old);
     writeFileSync(path.join(root, "appendix.md"), `# ${title} appendix`);
   }
-  await createSession(request, original, "Relative resources");
+  symlinkSync("original/alias.md", path.join(directory, "alias.md"));
+  await createSession(request, directory, "Relative resources");
   await signIn(page);
   await openSession(page, "Relative resources");
   await showAlias(page);

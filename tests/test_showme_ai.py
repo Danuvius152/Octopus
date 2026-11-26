@@ -6,7 +6,6 @@ from server.showme_ai import (
     _bare_path_fallback,
     _format_messages,
     extract_json,
-    resolve_local_path,
     resolve_showme_reference,
 )
 
@@ -34,47 +33,7 @@ async def _run(harness: FakeHarness, text: str = "this file", messages=None, **k
     )
 
 
-# --- Layer 1: exact-path short-circuit ---
-
-
-def test_resolve_local_path_returns_existing_file(tmp_path):
-    (tmp_path / "README.md").write_text("hi")
-    assert resolve_local_path("README.md", str(tmp_path)) == "README.md"
-
-
-def test_resolve_local_path_returns_none_for_missing(tmp_path):
-    assert resolve_local_path("does-not-exist.md", str(tmp_path)) is None
-
-
-def test_resolve_local_path_rejects_escape(tmp_path):
-    (tmp_path.parent / "outside.txt").write_text("nope")
-    assert resolve_local_path("../outside.txt", str(tmp_path)) is None
-
-
-def test_resolve_local_path_handles_nested(tmp_path):
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "note.md").write_text("hi")
-    assert resolve_local_path("sub/note.md", str(tmp_path)) == "sub/note.md"
-
-
-def test_resolve_local_path_returns_none_for_empty_and_multiline(tmp_path):
-    assert resolve_local_path("", str(tmp_path)) is None
-    assert resolve_local_path("  ", str(tmp_path)) is None
-    assert resolve_local_path("a\nb", str(tmp_path)) is None
-
-
-@pytest.mark.asyncio
-async def test_exact_path_short_circuits_no_model_call(tmp_path):
-    (tmp_path / "README.md").write_text("hi")
-    harness = FakeHarness('{"path":"unrelated.md"}')
-    result = await _run(harness, text="README.md", working_dir=str(tmp_path))
-    assert result.path == "README.md"
-    # Critically: the model was NOT called.
-    assert harness.calls == []
-
-
-# --- Layer 2: robust JSON extraction ---
+# --- Robust JSON extraction ---
 
 
 def test_extract_json_bare_object():
@@ -133,7 +92,7 @@ async def test_prompt_contains_double_check_instruction():
     assert "double-check" in prompt
 
 
-# --- Layer 3: bare-path fallback ---
+# --- Bare-path fallback ---
 
 
 def test_bare_path_fallback_accepts_filename():

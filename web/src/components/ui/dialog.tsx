@@ -40,6 +40,7 @@ const DialogContent = React.forwardRef<
     >
       {children}
       <DialogPrimitive.Close
+        data-dialog-close=""
         className="absolute right-4 top-4 flex items-center justify-center size-8 rounded-md transition-colors text-muted-foreground hover:text-foreground hover:bg-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label="Close"
       >

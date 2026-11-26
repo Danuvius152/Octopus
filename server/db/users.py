@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..expiry import is_expired
 from .agents import create_default_agent
 from .base import DatabaseBase
 from .transaction import Transaction
@@ -42,6 +43,12 @@ async def owner_is_available(tx: Transaction, user_id: str | None) -> bool:
         return False
     row = await tx.fetch_one("SELECT disabled_at FROM users WHERE id=?", (user_id,))
     return row is not None and not row[0]
+
+
+def active_token_user(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None or row["revoked_at"] or is_expired(row["expires_at"]) or row["user"]["disabled_at"]:
+        return None
+    return row["user"]
 
 
 class UsersMixin(DatabaseBase):
@@ -299,18 +306,22 @@ class UsersMixin(DatabaseBase):
     async def get_token_user(self, token_hash: str, *, session_id: str | None = None) -> dict[str, Any] | None:
         """Read the bearer and its current account together, without a write."""
         async with self.transaction(write=False) as tx:
-            columns = ", ".join(f"u.{column.strip()}" for column in _USER_COLUMNS.split(","))
-            cursor = await tx.execute(
-                f"SELECT {columns}, t.revoked_at, t.expires_at, "
-                "(SELECT user_id FROM sessions WHERE id = ?) "
-                "FROM auth_tokens AS t JOIN users AS u ON u.id = t.user_id "
-                "WHERE t.token_hash = ?",
-                (session_id, token_hash),
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                return None
-            return {"user": _row_to_user(row), "revoked_at": row[8], "expires_at": row[9], "session_owner": row[10]}
+            return await self._get_token_user(tx, token_hash, session_id=session_id)
+
+    async def _get_token_user(
+        self, tx: Transaction, token_hash: str, *, session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        columns = ", ".join(f"u.{column.strip()}" for column in _USER_COLUMNS.split(","))
+        row = await tx.fetch_one(
+            f"SELECT {columns}, t.revoked_at, t.expires_at, "
+            "(SELECT user_id FROM sessions WHERE id = ?) "
+            "FROM auth_tokens AS t JOIN users AS u ON u.id = t.user_id "
+            "WHERE t.token_hash = ?",
+            (session_id, token_hash),
+        )
+        if row is None:
+            return None
+        return {"user": _row_to_user(row), "revoked_at": row[8], "expires_at": row[9], "session_owner": row[10]}
 
     async def list_tokens(self, user_id: str) -> list[dict[str, Any]]:
         async with self.transaction(write=False) as tx:

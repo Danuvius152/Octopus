@@ -23,6 +23,7 @@ straight through it.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import stat
 from dataclasses import dataclass
@@ -205,6 +206,17 @@ def _within(candidate: Path, root: Path) -> bool:
     `/home/archer-evil` for a root of `/home/archer`.
     """
     return candidate == root or candidate.is_relative_to(root)
+
+
+def decode_extra_roots(raw: str | None) -> list[str]:
+    """Read the directory grants already stored with an account."""
+    if not raw:
+        return []
+    try:
+        roots = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    return [str(root) for root in roots] if isinstance(roots, list) else []
 
 
 def allowed_roots(user_id: str | None, extra_roots: list[str] | None = None) -> list[Path]:

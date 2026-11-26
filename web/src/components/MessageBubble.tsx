@@ -9,7 +9,7 @@ import {
   IconRobot,
   IconHelpCircle,
 } from "@tabler/icons-react";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
 import "katex/dist/katex.min.css";
 import {
   useSessionStore,
@@ -32,6 +32,7 @@ import { ToolInputDetails } from "./ToolInputDetails";
 import { nativeWorkKey } from "../lib/nativeOutput";
 import { chatRehypePlugins, chatRemarkPlugins } from "./chatMarkdown";
 import { markdownImageOptions } from "./MarkdownImage";
+import { ChatLink, chatLinkUrl } from "./ChatFileLink";
 import {
   toolResultCardClass, toolResultHeaderClass, toolResultIconClass, toolResultLabelClass,
   toolResultPresentation, toolResultPreviewClass,
@@ -39,8 +40,13 @@ import {
 
 // Store and composer updates still render the card's controls and attribution.
 // Only unchanged completed prose skips the synchronous Markdown pipeline.
-const CompletedMarkdown = memo(function CompletedMarkdown({ source }: { source: string }) {
-  return <Markdown remarkPlugins={chatRemarkPlugins} rehypePlugins={chatRehypePlugins} {...markdownImageOptions}>
+const CompletedMarkdown = memo(function CompletedMarkdown({ source, sessionId }: { source: string; sessionId: string }) {
+  const components = useMemo<Components>(() => ({
+    ...markdownImageOptions.components,
+    a: (props) => <ChatLink {...props} sessionId={sessionId} />,
+  }), [sessionId]);
+  return <Markdown remarkPlugins={chatRemarkPlugins} rehypePlugins={chatRehypePlugins}
+    {...markdownImageOptions} components={components} urlTransform={chatLinkUrl}>
     {source}
   </Markdown>;
 });
@@ -316,7 +322,7 @@ function MessageBody({
             {plain ? (
               <StreamingMessageText text={message.content || ""} />
             ) : (
-              <CompletedMarkdown source={message.content || ""} />
+              <CompletedMarkdown source={message.content || ""} sessionId={sessionId} />
             )}
           </div>
         </div>

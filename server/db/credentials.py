@@ -28,12 +28,20 @@ class CredentialsMixin(DatabaseBase):
         async with self.transaction(write=False) as tx:
             if not await owner_is_available(tx, user_id):
                 raise ValueError("Account is unavailable")
-            if credential_id:
-                credential = await self._get_credential(tx, credential_id, user_id)
-                if (credential is None or credential.get("user_id") != user_id
-                        or credential["backend"] != backend or credential.get("needs_reconnect")
-                        or credential.get("status") != "active"):
-                    raise ValueError("Credential is unavailable. Reconnect it or choose an active credential before sending new work.")
+            await self._require_active_credential(tx, user_id, credential_id, backend)
+
+    async def _require_active_credential(
+        self, tx: Transaction, user_id: str | None, credential_id: str | None, backend: str,
+        *, use: CredentialUse | None = None,
+    ) -> None:
+        if credential_id:
+            credential = await self._get_credential(tx, credential_id, user_id)
+            if (credential is None or credential.get("user_id") != user_id
+                    or credential["backend"] != backend or credential.get("needs_reconnect")
+                    or credential.get("status") != "active"):
+                raise ValueError("Credential is unavailable. Reconnect it or choose an active credential before sending new work.")
+            if use is not None and (not credential["secret_encrypted"] or CredentialUse.from_row(credential) != use):
+                raise ValueError("Credential changed. Try the conversation search again.")
 
     def _row_to_credential(self, row: sqlite3.Row) -> dict[str, Any]:
         record = self._CREDENTIAL_COLS.read(row)

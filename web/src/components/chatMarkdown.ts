@@ -13,6 +13,7 @@ const mathmlClass = "katex-mathml";
 export const clippedMathmlSelector = `.${mathmlClass}`;
 export const formulaBodySelector = ".katex-html";
 export const formulaProbeOptions = { strict: "ignore", throwOnError: false, trust: false } as const;
+const tableStructure = new Set(["table", "thead", "tbody", "tfoot", "tr"]);
 
 interface TextSpan { start: number; end: number }
 interface SourceToken extends TextSpan { kind: string; text: string }
@@ -218,7 +219,11 @@ export function projectMarkdownOutput(source: string, added?: TextSpan, purpose:
           formulaCount++;
         }
         const region = position && renderedMath && math ? { ...math, position, glyphs: [] } : undefined;
-        for (const child of node.children) visit(child, position, childCode, region ?? formula, childClipped, childTransparent);
+        for (const child of node.children) {
+          // The React Markdown renderer discards inter-element table whitespace.
+          if (tableStructure.has(node.tagName) && child.type === "text" && /^[\t\n\f\r ]*$/.test(child.value)) continue;
+          visit(child, position, childCode, region ?? formula, childClipped, childTransparent);
+        }
         if (region && added && purpose === "selection" && region.glyphs.length) {
           tokens ??= markdownTokens(source, extensions);
           spans.push(...literalFormulaSpans(region, tokens, added));

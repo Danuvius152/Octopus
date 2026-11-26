@@ -126,6 +126,67 @@ async def test_request_captures_session_and_agent_after_coordinated_updates(conf
         manager.remove_broadcast("configuration-input")
 
 
+async def test_agent_archive_interrupts_an_admitted_turn_during_configuration_capture(configuration_host, monkeypatch):
+    _client, manager, session, _credential_ids, effects = configuration_host
+    reading, release_read = asyncio.Event(), asyncio.Event()
+    closing, release_archive = asyncio.Event(), asyncio.Event()
+    preparing, release_preparation = asyncio.Event(), asyncio.Event()
+    load_agent = manager._load_agent
+    load_connectors = manager._load_connectors
+    evict = manager.evict_agent_sessions
+    await_execution = manager.await_session_execution
+
+    async def hold_agent_read(original):
+        agent = await load_agent(original)
+        reading.set()
+        await release_read.wait()
+        return agent
+
+    async def hold_archive(agent_id):
+        closing.set()
+        await release_archive.wait()
+        await evict(agent_id)
+
+    async def hold_preparation(agent):
+        preparing.set()
+        await release_preparation.wait()
+        return await load_connectors(agent)
+
+    async def allow_preparation_to_unwind(session_id, **kwargs):
+        # Archiving joins the execution only after the Owner has selected interruption.
+        if session_id == session.id:
+            release_preparation.set()
+        return await await_execution(session_id, **kwargs)
+
+    monkeypatch.setattr(manager, "_load_agent", hold_agent_read)
+    monkeypatch.setattr(manager, "evict_agent_sessions", hold_archive)
+    monkeypatch.setattr(manager, "_load_connectors", hold_preparation)
+    monkeypatch.setattr(manager, "await_session_execution", allow_preparation_to_unwind)
+    receipt = await manager.start_message(session.id, "Archive while preparing this request")
+    completion = asyncio.create_task(receipt.wait())
+    next_preparation = asyncio.create_task(preparing.wait())
+    archive = None
+    try:
+        await asyncio.wait_for(reading.wait(), 3)
+        archive = asyncio.create_task(manager.archive_agent(session.agent_id))
+        await asyncio.wait_for(closing.wait(), 3)
+        release_read.set()
+        done, _ = await asyncio.wait({completion, next_preparation}, timeout=3, return_when=asyncio.FIRST_COMPLETED)
+        assert done, "configuration capture did not continue after Agent admission was closed"
+        release_archive.set()
+        result = await asyncio.wait_for(completion, 3)
+        assert result.outcome.status == "interrupted", result.outcome
+        assert not effects.exists()
+    finally:
+        release_read.set()
+        release_archive.set()
+        release_preparation.set()
+        next_preparation.cancel()
+        await asyncio.gather(next_preparation, return_exceptions=True)
+        if archive is not None:
+            await archive
+
+
 async def test_default_save_operation_waits_for_the_configuration_capture_boundary(configuration_host, monkeypatch):
     _client, manager, session, _credential_ids, _effects = configuration_host
     saving = asyncio.Event()

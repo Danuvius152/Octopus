@@ -431,7 +431,11 @@ call，留下原 attempt 内有界的精确清理凭证并确认 consumed；shut
 reference resolution and research reasoning use it without inheriting a full
 interactive agent session. The current Codex implementation uses a dedicated
 text worker; its authentication, failure and protocol boundaries are in
-[the Codex contract](codex-backend.md#single-call-text-contract).
+[the Codex contract](codex-backend.md#single-call-text-contract). Claude uses
+safe mode and an empty tool list. Normal login handling remains available
+while project hooks and MCP discovery stay disabled. A caller that owns
+process admission can supply an authorization callback with a checked working
+directory handle. The spawn uses that handle and does not create the directory.
 
 Login is exposed through profile login drivers rather than routed independently
 by every feature. Claude OAuth and Codex native device login keep their actual

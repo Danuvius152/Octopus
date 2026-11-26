@@ -4,7 +4,6 @@ Skipped unless the `claude` binary is on PATH (mirrors test_schedule_ai_real.py
 and test_backend_*_real.py). Exercises the full pipeline end-to-end against
 the live Claude CLI — proves that:
 
-  - exact-path short-circuit avoids the model call entirely;
   - the one-shot model call returns something the resolver can actually
     parse (this is the case the unit tests can't simulate — real claude's
     `--print --output-format=json` mode adds conversational context that
@@ -24,24 +23,6 @@ from server.harness import get_harness
 from server.showme_ai import resolve_showme_reference
 
 pytestmark = [pytest.mark.real, pytest.mark.real_claude]
-
-
-@pytest.mark.asyncio
-async def test_real_exact_path_resolves_without_calling_model(tmp_path):
-    (tmp_path / "README.md").write_text("# hello\n")
-
-    # If the short-circuit works, this resolves WITHOUT the harness ever
-    # spawning claude. The fastest possible path.
-    result = await resolve_showme_reference(
-        "README.md",
-        harness=get_harness("claude-code"),
-        model=None,
-        credential=None,
-        working_dir=str(tmp_path),
-        messages=[],
-        session_name="Showme Real Exact",
-    )
-    assert result.path == "README.md"
 
 
 @pytest.mark.asyncio

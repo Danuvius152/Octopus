@@ -62,6 +62,20 @@ class ConfigurationMixin(SessionManagerBase):
             return owner.runtime.configuration_boundary(lock)
         return lock
 
+    def require_independent_session_admission(self, session: Session) -> None:
+        """Recheck that an independent request can still start on its original session."""
+        if self.get_session(session.id, session.user_id) is not session:
+            raise SessionConfigurationError("Session not found", 404)
+        if session._archive_reservation is not None or self.session_owner_failed(session.id):
+            raise SessionOwnerUnavailable("Session owner is unavailable; retained input requires review")
+        if self._admission_closed or session._admission_closed or self.session_deleting(session.id):
+            raise SessionConfigurationError("Session admission is closed", 409)
+        if session.agent_id is not None and session.agent_id in self._closed_agents:
+            raise SessionConfigurationError("Agent admission is closed", 409)
+        owner = self._session_owners.get(id(session))
+        if owner is not None:
+            owner.require_available()
+
     async def capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
         """Read a consistent configuration without blocking the execution writer."""
         defaults = self.get_session(context.id, context.user_id)

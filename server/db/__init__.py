@@ -19,6 +19,9 @@ is an error rather than an AttributeError at runtime.
 
 from __future__ import annotations
 
+from typing import Any
+
+from ..credential_use import CredentialUse
 from .agents import AgentsMixin
 from .applications import ApplicationsMixin
 from .base import DatabaseBase
@@ -30,7 +33,7 @@ from .notifiers import NotifiersMixin
 from .research import ResearchMixin
 from .schedules import SchedulesMixin
 from .sessions import SessionsMixin
-from .users import UsersMixin
+from .users import UsersMixin, active_token_user
 from .wiki_jobs import WikiJobsMixin
 
 
@@ -55,6 +58,25 @@ class Database(
     `DatabaseBase` last so it sits at the end of the MRO — every mixin already
     inherits it, so this only fixes the order, it does not add a base.
     """
+
+    async def get_viewer_run_user(
+        self, user_id: str, credential_id: str | None, backend: str, *, token_hash: str | None,
+        credential_use: CredentialUse | None,
+    ) -> dict[str, Any] | None:
+        """Read viewer grants and captured model authority in one committed view.
+
+        Without a bearer digest, the caller must separately verify the runtime lease.
+        """
+        async with self.transaction(write=False) as tx:
+            if token_hash is None:
+                user = await self._get_user(tx, user_id)
+            else:
+                bearer = await self._get_token_user(tx, token_hash)
+                user = active_token_user(bearer)
+            if user is None or user["id"] != user_id or user["disabled_at"]:
+                return None
+            await self._require_active_credential(tx, user_id, credential_id, backend, use=credential_use)
+        return user if token_hash is None else active_token_user(bearer)
 
 
 __all__ = ["Database", "DatabaseBase"]

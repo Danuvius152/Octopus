@@ -1,11 +1,8 @@
 """In-app file viewer endpoint + `/showme` reference resolver.
 
-Streams a file from the session's working_dir to the browser modal.
-`/showme` is a client-only flow: the browser sends the user's reference to
-the resolver below (a one-shot model call interprets it in conversation
-context), receives a concrete path, then fetches bytes through the
-endpoints here. Security gates live in `server/file_viewer.py` so the read
-paths can't drift.
+Serves checked file bytes from the original session's authorized sources.
+`/showme` uses this file boundary for explicit paths and asks the session's
+model to interpret descriptions using recent conversation context.
 
 Auth: bearer header OR `?token=`. The query-param path exists because
 the dialog renders images/PDFs via `<img src>` / `<iframe src>`, and
@@ -16,34 +13,83 @@ no second weaker token to leak.
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, replace
+import os
+from collections.abc import Callable
+from contextlib import AbstractContextManager, ExitStack
+from dataclasses import replace
 from functools import partial
+from secrets import token_hex
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from anyio import create_task_group, from_thread
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.datastructures import MutableHeaders
+from starlette.types import Message, Receive, Scope, Send
 
-from ..deps import SessionMgr, ViewerUser
+from ..aio import complete_cleanup
+from ..credential_use import CredentialUse
+from ..deps import (
+    SessionMgr,
+    ViewerToken,
+    ViewerUser,
+    resolve_viewer_authority,
+    resolve_viewer_run_authority,
+)
 from ..file_viewer import (
     DocumentDirectoryChanged,
+    FileChanged,
     FileNotFound,
+    FilePickerResult,
+    FileSources,
     FileTooLarge,
+    FileViewerError,
     PathRejected,
     ResolvedFile,
     ResourceDirectory,
     UnsupportedType,
-    resolve_safe_path,
+    WorkingDirectoryUnavailable,
+    browse_files,
+    file_sources,
+    find_files,
+    load_safe_file,
+    open_session_working_directory,
 )
-from ..harness import HarnessOneshotError, get_harness
+from ..harness import HarnessOneshotError, OneShotContext, get_harness
 from ..harness.model_settings import effective_settings
-from ..models import ShowMeResolveRequest, ShowMeResolveResponse
+from ..models import (
+    FilePickerSources,
+    FileViewerMetadata,
+    ShowMeEditTarget,
+    ShowMeFileErrorResponse,
+    ShowMeResolveRequest,
+    ShowMeResolveResponse,
+)
 from ..sessions import SessionManager
 from ..sessions.configuration import SessionConfigurationError
-from ..showme_ai import resolve_local_path, resolve_showme_reference
+from ..sessions.runtime_types import SessionOwnerUnavailable
+from ..showme_ai import ShowMeTarget, explicit_showme_target, resolve_showme_reference
+from ..workspace import paths_for
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sessions", tags=["files"])
+_NO_STORE = {"Cache-Control": "no-store"}
+_FILE_ERRORS = {
+    DocumentDirectoryChanged: status.HTTP_409_CONFLICT,
+    FileChanged: status.HTTP_409_CONFLICT,
+    PathRejected: status.HTTP_403_FORBIDDEN,
+    FileNotFound: status.HTTP_404_NOT_FOUND,
+    FileTooLarge: status.HTTP_413_CONTENT_TOO_LARGE,
+    UnsupportedType: status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+}
+
+
+class _FileReadHTTPError(HTTPException):
+    def __init__(self, error: FileViewerError) -> None:
+        super().__init__(_FILE_ERRORS[type(error)], str(error), headers=_NO_STORE)
+        self.missing = isinstance(error, FileNotFound) and error.missing
 
 
 async def _working_dir_for(
@@ -62,11 +108,11 @@ async def _working_dir_for(
         session_id, user_id
     )
     if working_dir is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found", headers=_NO_STORE)
     return working_dir
 
 
-def _source_directory(
+async def _source_directory(
     source_directory: str | None = None, source_directory_id: str | None = None,
 ) -> ResourceDirectory | None:
     if source_directory is None and source_directory_id is None:
@@ -74,6 +120,7 @@ def _source_directory(
     if not source_directory or not source_directory_id:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "A source directory and its path ID are required.",
+            headers=_NO_STORE,
         )
     return ResourceDirectory(source_directory, source_directory_id)
 
@@ -81,153 +128,400 @@ def _source_directory(
 SourceDirectory = Annotated[ResourceDirectory | None, Depends(_source_directory)]
 
 
-def _resolve_or_raise(
-    working_dir: str,
+async def _with_viewer_sources[T](
+    session_manager: SessionManager,
+    session_id: str,
+    token: str,
+    operation: Callable[[FileSources], T],
+) -> T:
+    async def current_access() -> tuple[str | None, str, list[str]]:
+        authority = await resolve_viewer_authority(token)
+        if authority is None:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token", headers=_NO_STORE)
+        working_dir = await _working_dir_for(session_manager, session_id, authority.user_id)
+        return authority.user_id, working_dir, authority.extra_roots
+
+    def read() -> T:
+        # Authenticate and load grants after acquiring the worker slot. An
+        # admitted read may finish its bounded snapshot if authority later changes.
+        user_id, working_dir, extra_roots = from_thread.run(current_access)
+        workspace = paths_for(user_id).workspace if user_id is not None else None
+        return operation(file_sources(working_dir, workspace=workspace, extra_roots=extra_roots))
+
+    try:
+        return await run_in_threadpool(read)
+    except FileViewerError as error:
+        raise _FileReadHTTPError(error) from error
+
+
+async def _load_viewer_file(
+    session_manager: SessionManager,
+    session_id: str,
+    token: str,
     path: str,
     source_directory: ResourceDirectory | None,
     *,
-    canonical: bool = False,
-) -> ResolvedFile:
-    try:
-        return resolve_safe_path(working_dir, path, canonical=canonical, source_directory=source_directory)
-    except DocumentDirectoryChanged as e:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(e)) from e
-    except PathRejected as e:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e))
-    except FileNotFound as e:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
-    except FileTooLarge as e:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, str(e))
-    except UnsupportedType as e:
-        raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(e))
+    source: str | None = None,
+    read_content: bool = False,
+    canonical_path_id: str | None = None,
+    expected_cwd: os.stat_result | None = None,
+) -> tuple[ResolvedFile, bytes]:
+    return await _with_viewer_sources(session_manager, session_id, token, lambda sources: load_safe_file(
+        sources, path, source=source, read_content=read_content,
+        canonical_path_id=canonical_path_id, source_directory=source_directory, expected_cwd=expected_cwd,
+    ))
 
 
-@router.post("/{session_id}/showme/resolve", response_model=ShowMeResolveResponse)
+@router.get("/{session_id}/files/sources")
+async def viewer_sources(
+    session_manager: SessionMgr, session_id: str, token: ViewerToken, response: Response,
+) -> FilePickerSources:
+    response.headers.update(_NO_STORE)
+    return await _with_viewer_sources(session_manager, session_id, token, lambda sources: FilePickerSources(
+        str(sources.cwd) if sources.cwd is not None else None, list(map(str, sources.roots)),
+    ))
+
+
+async def _listing_until_disconnect(
+    request: Request, session_manager: SessionManager, session_id: str, token: str,
+    operation: Callable[[FileSources], FilePickerResult],
+) -> FilePickerResult:
+    result = failure = None
+    async with create_task_group() as tasks:
+        async def stop_on_disconnect() -> None:
+            while (await request.receive())["type"] != "http.disconnect":
+                pass
+            tasks.cancel_scope.cancel()
+
+        tasks.start_soon(stop_on_disconnect)
+        try:
+            result = await _with_viewer_sources(session_manager, session_id, token, operation)
+        except HTTPException as error:
+            failure = error
+        finally:
+            tasks.cancel_scope.cancel()
+    if failure is not None:
+        raise failure
+    if result is None:
+        raise HTTPException(499, "File listing cancelled.", headers=_NO_STORE)
+    return result
+
+
+@router.get("/{session_id}/files/browse")
+async def browse_viewer_source(
+    session_manager: SessionMgr, session_id: str, token: ViewerToken, request: Request, response: Response,
+    source: str = "", directory: str = "",
+) -> FilePickerResult:
+    response.headers.update(_NO_STORE)
+    return await _listing_until_disconnect(request, session_manager, session_id, token, partial(
+        browse_files, source=source, directory=directory, check_cancelled=from_thread.check_cancelled,
+    ))
+
+
+@router.get("/{session_id}/files/find")
+async def find_viewer_files(
+    session_manager: SessionMgr, session_id: str, token: ViewerToken, request: Request, response: Response,
+    source: str = "", query: str = "",
+) -> FilePickerResult:
+    response.headers.update(_NO_STORE)
+    return await _listing_until_disconnect(request, session_manager, session_id, token, partial(
+        find_files, source=source, query=query, check_cancelled=from_thread.check_cancelled,
+    ))
+
+
+class _SnapshotResponse(FileResponse):
+    """Serve checked bytes using FileResponse's validators and range dispatch."""
+
+    def __init__(self, metadata: ResolvedFile, content: bytes, *, preview: bool) -> None:
+        super().__init__(
+            "",  # Fail closed if FileResponse ever dispatches to a path reader.
+            media_type=metadata.mime_type,
+            filename=metadata.abs_path.name,
+            stat_result=metadata.stat_result,
+            content_disposition_type="inline" if preview and metadata.kind == "pdf" else "attachment",
+        )
+        self.content = content
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def send_no_store(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                MutableHeaders(scope=message)["Cache-Control"] = "no-store"
+            await send(message)
+
+        await super().__call__(scope, receive, send_no_store)
+
+    async def _handle_simple(self, send: Send, send_header_only: bool, send_pathsend: bool) -> None:
+        # Always send the snapshot body, including when the server advertises pathsend.
+        await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
+        await send({"type": "http.response.body", "body": b"" if send_header_only else self.content})
+
+    async def _handle_single_range(
+        self, send: Send, start: int, end: int, file_size: int, send_header_only: bool,
+    ) -> None:
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-range"] = f"bytes {start}-{end - 1}/{file_size}"
+        headers["content-length"] = str(end - start)
+        await send({"type": "http.response.start", "status": 206, "headers": headers.raw})
+        await send({"type": "http.response.body", "body": b"" if send_header_only else self.content[start:end]})
+
+    async def _handle_multiple_ranges(
+        self, send: Send, ranges: list[tuple[int, int]], file_size: int, send_header_only: bool,
+    ) -> None:
+        boundary = token_hex(13)
+        length, make_header = self.generate_multipart(ranges, boundary, file_size, self.headers["content-type"])
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers["content-type"] = f"multipart/byteranges; boundary={boundary}"
+        headers["content-length"] = str(length)
+        await send({"type": "http.response.start", "status": 206, "headers": headers.raw})
+        if send_header_only:
+            await send({"type": "http.response.body", "body": b""})
+            return
+        for start, end in ranges:
+            await send({"type": "http.response.body", "body": make_header(start, end), "more_body": True})
+            await send({"type": "http.response.body", "body": self.content[start:end], "more_body": True})
+            await send({"type": "http.response.body", "body": b"\r\n", "more_body": True})
+        await send({"type": "http.response.body", "body": f"--{boundary}--".encode("ascii")})
+
+
+@router.post(
+    "/{session_id}/showme/resolve", response_model=ShowMeResolveResponse, response_model_exclude_unset=True,
+    responses={
+        **{code: {"model": ShowMeFileErrorResponse} for code in {*_FILE_ERRORS.values(), 401, 502}},
+        422: {"description": "Invalid input or unavailable context search", "content": {"application/json": {"schema": {"oneOf": [
+            {"$ref": "#/components/schemas/HTTPValidationError"},
+            {"$ref": "#/components/schemas/ShowMeFileErrorResponse"},
+        ]}}}},
+    },
+)
 async def resolve_showme(
     session_manager: SessionMgr,
     session_id: str,
     req: ShowMeResolveRequest,
+    response: Response,
+    token: ViewerToken,
     user_id: ViewerUser = None,
-) -> ShowMeResolveResponse:
-    """Resolve a human file reference into a concrete viewer path."""
-    session = session_manager.get_session(session_id, user_id)
-    if session is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    if session.agent_id is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-
-    assert session_manager.db is not None
-    if await session_manager.db.get_agent_identity(session.agent_id, user_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-
-    direct = resolve_local_path(req.text, session.working_dir)
-    if direct is not None:
-        return ShowMeResolveResponse(path=direct)
-
+) -> ShowMeResolveResponse | JSONResponse:
+    """Check an explicit path or ask the session's model about a description."""
+    response.headers.update(_NO_STORE)
     try:
-        session, agent = await session_manager.capture_request_configuration(session)
-    except SessionConfigurationError as error:
-        raise HTTPException(error.status_code, str(error)) from error
+        req.text.encode("utf-8")
+        direct = None if req.mode == "description" else explicit_showme_target(req.text)
+    except ValueError as error:
+        # Keep malformed paths behind the same account and session gate.
+        await _working_dir_for(session_manager, session_id, user_id)
+        raise HTTPException(422, str(error), headers=_NO_STORE) from error
+    if direct is not None:
+        return await _resolve_showme_file(session_manager, session_id, token, direct)
+    return await _resolve_showme_description(session_manager, session_id, token, user_id, req.text)
+
+
+def _showme_error(status_code: int, failure: ShowMeFileErrorResponse) -> JSONResponse:
+    return JSONResponse(failure.model_dump(exclude_unset=True, exclude_none=True), status_code=status_code, headers=_NO_STORE)
+
+
+async def _resolve_showme_file(
+    session_manager: SessionManager, session_id: str, token: str, file: ShowMeTarget, *,
+    description: str | None = None, expected_cwd: os.stat_result | None = None,
+) -> ShowMeResolveResponse | JSONResponse:
+    target = ShowMeEditTarget(path=file.path)
+    if file.position is not None:
+        target.position = file.position
+    if file.source is not None:
+        target.source = file.source
+    try:
+        resolved, _ = await _load_viewer_file(
+            session_manager, session_id, token, file.requested_path, None, source=file.source, expected_cwd=expected_cwd,
+        )
+    except _FileReadHTTPError as error:
+        failure = ShowMeFileErrorResponse(detail=error.detail, description=description)
+        if description is None or error.status_code != 403:
+            failure.target = target
+        if file.ambiguous_filename and error.missing:
+            failure.can_search_description = True
+        return _showme_error(error.status_code, failure)
+    metadata = _file_metadata(resolved)
+    # Re-select the checked source when an older client opens the path.
+    # The canonical absolute path can instead select a narrower grant.
+    path = metadata.absolute_path if file.source is not None else file.requested_path
+    if resolved.is_cwd_source:
+        path = f"./{metadata.path}" if metadata.path.startswith("~") else metadata.path
+    result = ShowMeResolveResponse(path=path, message=None, metadata=metadata, target=target)
+    if description is not None:
+        result.description = description
+    return result
+
+
+async def _resolve_showme_description(
+    session_manager: SessionManager, session_id: str, token: str, user_id: str | None, description: str,
+) -> ShowMeResolveResponse | JSONResponse:
+    try:
+        return await _infer_showme_file(session_manager, session_id, token, user_id, description)
+    except WorkingDirectoryUnavailable as error:
+        return _showme_error(403, ShowMeFileErrorResponse(
+            detail=str(error), description=description, code="working_directory_unavailable",
+        ))
+    except HTTPException as error:
+        return _showme_error(error.status_code, ShowMeFileErrorResponse(detail=error.detail, description=description))
+    except (SessionConfigurationError, SessionOwnerUnavailable) as error:
+        return _showme_error(
+            error.status_code if isinstance(error, SessionConfigurationError) else 409,
+            ShowMeFileErrorResponse(detail=str(error), description=description),
+        )
+    except (ValueError, HarnessOneshotError) as error:
+        return _showme_error(422, ShowMeFileErrorResponse(detail=str(error), description=description))
+    except Exception:
+        logger.exception("showme resolve failed for session %s", session_id)
+        return _showme_error(502, ShowMeFileErrorResponse(
+            detail="Couldn't resolve the file reference.", description=description,
+        ))
+
+
+async def _infer_showme_file(
+    session_manager: SessionManager, session_id: str, token: str, user_id: str | None, description: str,
+) -> ShowMeResolveResponse | JSONResponse:
+    if not description.strip():
+        raise ValueError("Enter a file description.")
+    live = session_manager.get_session(session_id, user_id)
+    if live is None:
+        raise HTTPException(404, "Session not found")
+    session_manager.require_independent_session_admission(live)
+    assert session_manager.db is not None
+    db = session_manager.db
+    if live.agent_id is None or await db.get_agent_identity(live.agent_id, user_id) is None:
+        raise HTTPException(404, "Agent not found")
+
+    session, agent = await session_manager.capture_request_configuration(live)
     if agent is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-    harness = get_harness(session.backend)
+        raise HTTPException(404, "Agent not found")
+    working_dir = session.working_dir
+    if user_id is None:
+        raise HTTPException(401, "Invalid token")
+    workspace = paths_for(user_id).workspace
+    backend = session.backend
+    harness = get_harness(backend)
     effective = effective_settings(session, agent)
     cred_id = effective["credential_id"]
-    backend, db = session.backend, session_manager.db
 
-    async def run_resolver(ctx):
+    async def authorize_spawn(use: CredentialUse | None) -> AbstractContextManager[int]:
+        authority = await resolve_viewer_run_authority(token, user_id, cred_id, backend, use)
+        if authority is None or authority.user_id is None:
+            raise HTTPException(401, "Invalid token")
+        try:
+            session_manager.require_independent_session_admission(live)
+        except SessionConfigurationError as error:
+            raise HTTPException(error.status_code, str(error)) from error
+        if live.working_dir != working_dir:
+            raise WorkingDirectoryUnavailable()
+        return open_session_working_directory(working_dir, workspace, authority.extra_roots, expected=expected_cwd)
+
+    async def run_resolver(ctx: OneShotContext) -> str:
         credential = await session_manager.resolve_credential_by_id(
             cred_id, backend=backend, context=f"showme resolver for session {session_id}",
             user_id=user_id,
         )
         return await harness.run_oneshot(replace(
-            ctx, credential=credential,
-            authorize_spawn=partial(db.require_run_authority, user_id, cred_id, backend),
+            ctx, credential=credential, authorize_spawn=partial(authorize_spawn, credential.use if credential else None),
         ))
 
-    try:
+    # Keep the original directory alive through candidate validation so its
+    # inode cannot be reused. The spawn owns its separately authorized handle.
+    with ExitStack() as retained_directory:
+        def pin_initial_directory() -> os.stat_result:
+            authority = from_thread.run(resolve_viewer_authority, token)
+            if authority is None or authority.user_id != user_id:
+                raise HTTPException(401, "Invalid token")
+            fd = retained_directory.enter_context(open_session_working_directory(working_dir, workspace, authority.extra_roots))
+            return os.fstat(fd)
+
+        # Join the worker before closing the stack, including when the request is cancelled.
+        expected_cwd = await complete_cleanup(run_in_threadpool(pin_initial_directory))
         result = await resolve_showme_reference(
-            req.text,
+            description,
             harness=harness,
             model=effective["model"],
             reasoning_effort=effective["reasoning_effort"],
             service_tier=effective["service_tier"],
             credential=None,
             runner=run_resolver,
-            working_dir=session.working_dir,
-            messages=await session_manager.db.load_messages(session_id, limit=12, newest_first=True),
+            working_dir=working_dir,
+            messages=await db.load_messages(session_id, limit=12, newest_first=True),
             session_name=session.name,
         )
-    except (ValueError, HarnessOneshotError) as error:
-        raise HTTPException(422, str(error)) from error
-    except Exception:
-        # Don't leak raw model/harness errors (paths, credential labels,
-        # tracebacks) to the client; log them for the operator.
-        logger.exception("showme resolve failed for session %s", session_id)
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "Couldn't resolve the file reference.",
+        if result.path is None:
+            return ShowMeResolveResponse(path=None, message=result.message, description=description)
+        result.path.encode("utf-8")
+        return await _resolve_showme_file(
+            session_manager, session_id, token, ShowMeTarget(result.path, quoted=True),
+            description=description, expected_cwd=expected_cwd,
         )
-    return ShowMeResolveResponse(path=result.path, message=result.message)
+
+
+async def _viewer_metadata(
+    session_manager: SessionMgr,
+    session_id: str,
+    source_directory: SourceDirectory,
+    token: ViewerToken,
+    path: str = Query(...),
+    source: str | None = None,
+) -> ResolvedFile:
+    resolved, _ = await _load_viewer_file(session_manager, session_id, token, path, source_directory, source=source)
+    return resolved
+
+
+async def _viewer_snapshot(
+    session_manager: SessionMgr,
+    session_id: str,
+    source_directory: SourceDirectory,
+    token: ViewerToken,
+    path: str = Query(...),
+    source: str | None = None,
+    canonical_path_id: str | None = None,
+    preview: bool = False,
+    frame: bool = False,
+) -> Response:
+    try:
+        resolved, content = await _load_viewer_file(
+            session_manager, session_id, token, path, source_directory,
+            source=source, read_content=True, canonical_path_id=canonical_path_id,
+        )
+    except HTTPException as error:
+        if not (preview and frame):
+            raise
+        # An iframe load event cannot expose its navigation's HTTP status.
+        return JSONResponse(
+            {"detail": error.detail, "status": error.status_code},
+            status_code=error.status_code, headers=error.headers,
+        )
+    return _SnapshotResponse(resolved, content, preview=preview)
 
 
 @router.get("/{session_id}/files/meta")
 async def file_meta(
-    session_manager: SessionMgr,
-    session_id: str,
-    source_directory: SourceDirectory,
-    path: str = Query(...),
-    user_id: ViewerUser = None,
-) -> JSONResponse:
+    resolved: Annotated[ResolvedFile, Depends(_viewer_metadata)],
+    response: Response,
+) -> FileViewerMetadata:
     """Metadata-only sibling of /files.
 
-    The dialog hits this first to decide which renderer to mount and
-    whether to skip the bytes fetch entirely (e.g. for an oversized
-    file, we show the error inline rather than streaming kilobytes
-    that will never render). Same security path as /files.
+    Supplies the renderer and the source binding before any byte request.
+    Explicit /showme commands receive the same metadata in their response.
     """
-    working_dir = await _working_dir_for(session_manager, session_id, user_id)
-    resolved = _resolve_or_raise(working_dir, path, source_directory)
-    return JSONResponse(
-        {
-            "path": resolved.relative_path,
-            "canonical_path_id": resolved.canonical_path_id,
-            "canonical_directory": asdict(resolved.canonical_directory),
-            "kind": resolved.kind,
-            "mime_type": resolved.mime_type,
-            "size": resolved.size,
-        }
+    response.headers.update(_NO_STORE)
+    return _file_metadata(resolved)
+
+
+def _file_metadata(resolved: ResolvedFile) -> FileViewerMetadata:
+    return FileViewerMetadata(
+        source=str(resolved.source_root),
+        path=resolved.relative_path,
+        absolute_path=str(resolved.abs_path),
+        canonical_path_id=resolved.canonical_path_id,
+        canonical_directory=resolved.canonical_directory,
+        kind=resolved.kind,
+        mime_type=resolved.mime_type,
+        size=resolved.size,
     )
 
 
 @router.get("/{session_id}/files")
-async def get_file(
-    session_manager: SessionMgr,
-    session_id: str,
-    source_directory: SourceDirectory,
-    path: str = Query(...),
-    preview: bool = False,
-    canonical_path_id: str | None = None,
-    user_id: ViewerUser = None,
-) -> FileResponse:
-    working_dir = await _working_dir_for(session_manager, session_id, user_id)
-    resolved = _resolve_or_raise(
-        working_dir, path, source_directory, canonical=canonical_path_id is not None,
-    )
-    if canonical_path_id is not None and (
-        resolved.relative_path != path or resolved.canonical_path_id != canonical_path_id
-    ):
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "The file path changed. Reopen the file to read it.",
-        )
-    # FileResponse handles streaming + ETag + Range. We override
-    # media_type so e.g. .md is delivered as text/markdown rather
-    # than the default application/octet-stream.
-    return FileResponse(
-        resolved.abs_path,
-        media_type=resolved.mime_type,
-        headers={"Cache-Control": "no-store"} if source_directory is not None else None,
-        filename=resolved.abs_path.name,
-        content_disposition_type="inline" if preview and resolved.kind == "pdf" else "attachment",
-    )
+async def get_file(snapshot: Annotated[Response, Depends(_viewer_snapshot)]) -> Response:
+    return snapshot

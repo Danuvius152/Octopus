@@ -280,6 +280,40 @@ fallback; failure is a directory-editor error, never an account-page render
 exception. The persisted roots, account export and path validation remain the
 authorities for actual directory access.
 
+### Viewer file access
+
+The viewer accepts the original session's authorized working directory, the
+active account's workspace, and its current extra roots. A relative path uses
+the original working directory by default. A relative path with an explicit
+source, as in the file picker, uses that source. A relative document reference
+uses the document's checked parent directory within its source. Without an
+explicit source, an absolute path selects the working directory when it
+contains the path, then the most specific available grant. A working directory
+outside the account root requires a current extra-root grant. Saved roots
+must still be real directories. An unavailable root replaced by an alias
+cannot be reselected implicitly through an overlapping grant.
+
+The server rechecks the original session binding, account and source when
+listing, reading metadata or serving bytes. Directory browsing lists the
+selected directory. Filename search bounds the scan and results within the
+source. The metadata binds the selected source, canonical file path and parent
+directory identity.
+Markdown body and relative resources carry the applicable binding back to the
+server. File responses revalidate path, type and size and snapshot bytes from
+the same checked, opened file. Revocation applies to later admissions, while
+an admitted bounded read can finish. File and metadata responses use
+`Cache-Control: no-store`. The [viewer interaction](frontend-interaction-state.md#文件查看意图)
+owns rendering, navigation and recovery.
+
+Context search reads at most the latest twelve saved messages from the live
+session and asks its configured model for one candidate or clarification.
+At process admission it rechecks the session and agent, account authorization,
+selected credential, and the identity of the original working directory. The
+process uses the checked directory handle. A returned candidate goes through
+the same file admission check. Candidates that use the original working
+directory must still match its identity. The viewer can offer another source
+if that directory has become unavailable. Context search adds no chat messages.
+
 ### Attachment storage limits
 
 Attachment storage owns filename sanitization and the final UTF-8 byte budget.

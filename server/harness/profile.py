@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine, Iterable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -129,7 +130,8 @@ class OneShotContext:
     working_dir: str | None = None
     reasoning_effort: str | None = None
     service_tier: str | None = None
-    authorize_spawn: Callable[[], Awaitable[None]] | None = None
+    # An admission that binds cwd supplies the open directory for the child's chdir.
+    authorize_spawn: Callable[[], Awaitable[AbstractContextManager[int] | None]] | None = None
 
 
 @dataclass

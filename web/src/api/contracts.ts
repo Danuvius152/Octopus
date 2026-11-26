@@ -1038,6 +1038,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/files/sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Viewer Sources */
+        get: operations["viewer_sources_api_sessions__session_id__files_sources_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/files/browse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Browse Viewer Source */
+        get: operations["browse_viewer_source_api_sessions__session_id__files_browse_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/files/find": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Find Viewer Files */
+        get: operations["find_viewer_files_api_sessions__session_id__files_find_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/showme/resolve": {
         parameters: {
             query?: never;
@@ -1049,7 +1100,7 @@ export interface paths {
         put?: never;
         /**
          * Resolve Showme
-         * @description Resolve a human file reference into a concrete viewer path.
+         * @description Check an explicit path or ask the session's model about a description.
          */
         post: operations["resolve_showme_api_sessions__session_id__showme_resolve_post"];
         delete?: never;
@@ -1069,10 +1120,8 @@ export interface paths {
          * File Meta
          * @description Metadata-only sibling of /files.
          *
-         *     The dialog hits this first to decide which renderer to mount and
-         *     whether to skip the bytes fetch entirely (e.g. for an oversized
-         *     file, we show the error inline rather than streaming kilobytes
-         *     that will never render). Same security path as /files.
+         *     Supplies the renderer and the source binding before any byte request.
+         *     Explicit /showme commands receive the same metadata in their response.
          */
         get: operations["file_meta_api_sessions__session_id__files_meta_get"];
         put?: never;
@@ -4897,6 +4946,80 @@ export interface components {
             /** Extra Roots */
             extra_roots: string[];
         };
+        /** FileHeadingPosition */
+        FileHeadingPosition: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "heading";
+            /** Slug */
+            slug: string;
+        };
+        /** FileLinePosition */
+        FileLinePosition: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "lines";
+            /** Start */
+            start: number;
+            /** End */
+            end?: number | null;
+        };
+        /** FilePickerEntry */
+        FilePickerEntry: {
+            /** Path */
+            path: string;
+            /** Name */
+            name: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "directory" | "file";
+        };
+        /** FilePickerResult */
+        FilePickerResult: {
+            /** Entries */
+            entries: components["schemas"]["FilePickerEntry"][];
+            /** Skipped */
+            skipped: boolean;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /** FilePickerSources */
+        FilePickerSources: {
+            /** Cwd */
+            cwd: string | null;
+            /** Roots */
+            roots: string[];
+        };
+        /** FileViewerMetadata */
+        FileViewerMetadata: {
+            /** Source */
+            source: string;
+            /** Path */
+            path: string;
+            /** Absolute Path */
+            absolute_path: string;
+            /** Canonical Path Id */
+            canonical_path_id: string;
+            canonical_directory: components["schemas"]["ResourceDirectory"];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "markdown" | "code" | "text" | "image" | "pdf";
+            /** Mime Type */
+            mime_type: string;
+            /** Size */
+            size: number;
+        };
         /**
          * FinalAnswerRef
          * @description Ordered original message rows selected from one bound native root.
@@ -5033,6 +5156,16 @@ export interface components {
              * @default []
              */
             messages: components["schemas"]["MessageContent"][];
+        };
+        /** InvalidFilePosition */
+        InvalidFilePosition: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "invalid";
+            /** Suffix */
+            suffix: string;
         };
         /** InviteCreateRequest */
         InviteCreateRequest: {
@@ -5943,6 +6076,13 @@ export interface components {
              */
             intent_id: string;
         };
+        /** ResourceDirectory */
+        ResourceDirectory: {
+            /** Path */
+            path: string;
+            /** Path Id */
+            path_id: string;
+        };
         /** Restore */
         Restore: {
             /** Change Id */
@@ -6492,10 +6632,33 @@ export interface components {
             /** Password */
             password: string;
         };
+        /** ShowMeEditTarget */
+        ShowMeEditTarget: {
+            /** Path */
+            path: string;
+            /** Position */
+            position?: (components["schemas"]["FileLinePosition"] | components["schemas"]["FileHeadingPosition"] | components["schemas"]["InvalidFilePosition"]) | null;
+            /** Source */
+            source?: string | null;
+        };
+        /** ShowMeFileErrorResponse */
+        ShowMeFileErrorResponse: {
+            /** Detail */
+            detail: string;
+            target?: components["schemas"]["ShowMeEditTarget"] | null;
+            /** Description */
+            description?: string | null;
+            /** Can Search Description */
+            can_search_description?: true | null;
+            /** Code */
+            code?: "working_directory_unavailable" | null;
+        };
         /** ShowMeResolveRequest */
         ShowMeResolveRequest: {
             /** Text */
             text: string;
+            /** Mode */
+            mode?: ("command" | "description") | null;
         };
         /** ShowMeResolveResponse */
         ShowMeResolveResponse: {
@@ -6503,6 +6666,10 @@ export interface components {
             path?: string | null;
             /** Message */
             message?: string | null;
+            metadata?: components["schemas"]["FileViewerMetadata"] | null;
+            target?: components["schemas"]["ShowMeEditTarget"] | null;
+            /** Description */
+            description?: string | null;
         };
         /** SnapshotRestore */
         SnapshotRestore: {
@@ -9230,6 +9397,109 @@ export interface operations {
             };
         };
     };
+    viewer_sources_api_sessions__session_id__files_sources_get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FilePickerSources"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    browse_viewer_source_api_sessions__session_id__files_browse_get: {
+        parameters: {
+            query?: {
+                source?: string;
+                directory?: string;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FilePickerResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    find_viewer_files_api_sessions__session_id__files_find_get: {
+        parameters: {
+            query?: {
+                source?: string;
+                query?: string;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FilePickerResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     resolve_showme_api_sessions__session_id__showme_resolve_post: {
         parameters: {
             query?: {
@@ -9256,13 +9526,76 @@ export interface operations {
                     "application/json": components["schemas"]["ShowMeResolveResponse"];
                 };
             };
-            /** @description Validation Error */
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
+            /** @description Content Too Large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
+            /** @description Invalid input or unavailable context search */
             422: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["HTTPValidationError"] | components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
                 };
             };
         };
@@ -9271,6 +9604,7 @@ export interface operations {
         parameters: {
             query: {
                 path: string;
+                source?: string | null;
                 source_directory?: string | null;
                 source_directory_id?: string | null;
                 token?: string | null;
@@ -9289,7 +9623,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["FileViewerMetadata"];
                 };
             };
             /** @description Validation Error */
@@ -9307,8 +9641,10 @@ export interface operations {
         parameters: {
             query: {
                 path: string;
-                preview?: boolean;
+                source?: string | null;
                 canonical_path_id?: string | null;
+                preview?: boolean;
+                frame?: boolean;
                 source_directory?: string | null;
                 source_directory_id?: string | null;
                 token?: string | null;

@@ -22,6 +22,7 @@ from fastapi.routing import APIRoute
 from server import deps
 from server.auth import verify_token
 from server.main import app
+from server.routers import files
 
 ROUTERS = pathlib.Path(__file__).resolve().parent.parent / "server" / "routers"
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "websocket"}
@@ -45,6 +46,9 @@ SCOPE_MARKERS = (
 SCOPE_GUARDS = (
     deps.scope_user_id, deps.authenticated_account, deps.current_user, deps.require_admin,
     deps.viewer_user_id,
+    # These resolve the original session and current file sources inside the worker.
+    files._viewer_metadata, files._viewer_snapshot,
+    files.viewer_sources, files.browse_viewer_source, files.find_viewer_files,
 )
 
 # (method, path) -> why this one carries no account scope.
@@ -208,6 +212,14 @@ def test_authentication_alone_is_not_an_account_scope():
         return {"authenticated": bool(token)}
 
     route = APIRoute("/authentication", endpoint)
+    assert not _dependency_has_scope(route.dependant)
+
+
+def test_viewer_credential_extraction_alone_is_not_an_account_scope():
+    async def endpoint(token: deps.ViewerToken):
+        return {"credential_present": bool(token)}
+
+    route = APIRoute("/viewer-credential", endpoint)
     assert not _dependency_has_scope(route.dependant)
 
 

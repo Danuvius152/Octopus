@@ -1,6 +1,7 @@
 """Explicit offline-only ASGI entrypoint. Never imported by the real bucket."""
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,6 +28,21 @@ def offline_argv(ctx):
     return list(OFFLINE_ARGV), {"cwd": ctx.working_dir, "env": {"OCTOPUS_E2E_OFFLINE": "1"}}
 
 
+def offline_oneshot_argv(ctx):
+    argv, kwargs = offline_argv(ctx)
+    # The producer receives only canned text selected by the test references.
+    replies = {
+        "请打开 plan.md": {"message": "Which plan did you mean?"},
+        "the implementation plan.md": {"path": "plan.md"},
+        "the report from v1.2": {"path": "plan.md"},
+    }
+    reference = next((line.removeprefix("User reference: ") for line in ctx.prompt.splitlines()
+                      if line.startswith("User reference: ")), "")
+    reply = replies.get(reference)
+    kwargs["env"]["OCTOPUS_E2E_ONESHOT_REPLY"] = json.dumps(reply) if reply is not None else "Offline UI"
+    return argv, kwargs
+
+
 async def offline_git(*args, **kwargs):
     # The UI fixture is a non-Git workspace. Do not execute repository hooks
     # or other child programs while collecting an optional turn/fork anchor.
@@ -42,8 +58,8 @@ for backend in all_backends():
         harness.profile,
         binary=OFFLINE_ARGV[0],
         build_turn_argv=offline_argv,
-        build_oneshot_argv=offline_argv,
-        parse_oneshot_stdout=lambda _stdout: "Offline UI",
+        build_oneshot_argv=offline_oneshot_argv,
+        parse_oneshot_stdout=str.strip,
         new_event_parser=CLAUDE_CODE.new_event_parser,
         new_driver=ArgvDriver,
         premature_exit_recovery=False,

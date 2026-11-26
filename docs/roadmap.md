@@ -7,7 +7,6 @@
 | 待决主题 | 当前缺口 |
 | --- | --- |
 | [Agent 协作许可与人工控制](plans/agent-collaboration-controls.md) | 调用许可、进度展示与人工接管的待决范围。 |
-| [聊天文件链接与预览](plans/chat-file-preview.md) | 会话内打开本地文件及定位行号，复用 `/showme` 的文件查看器。 |
 | [跨会话工作视图与外部输入](plans/agent-router-and-channels.md) | 统一工作查询和外部渠道分派尚未定义。 |
 | [Research 证据、阅读与复现](plans/ai-research-workflow.md) | 原问点覆盖、来源独立性、完整阅读和可复现实验的缺口。 |
 | [App 配置与交互能力](plans/application-evolution.md) | App secret、问题交互、版本恢复和 [SmartReader 阅读上下文覆盖](plans/application-evolution.md#smartreader-阅读上下文覆盖)。 |

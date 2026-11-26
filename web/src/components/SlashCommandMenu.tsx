@@ -47,8 +47,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   },
   {
     name: "/showme",
-    hint: "<path>",
-    description: "Open a file in the in-app viewer",
+    hint: "[path]",
+    description: "Choose a file or enter its path",
     Icon: IconFile,
   },
   {
