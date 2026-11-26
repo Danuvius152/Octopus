@@ -7,9 +7,10 @@ import weakref
 
 import pytest
 
-from server import bg_tasks
+from server import bg_tasks, deps
 from server import delegations as delegation_module
 from server.delegations import DelegationError
+from server.mcp_identity import mint
 from server.sessions.runtime_types import SessionAdmissionClosed
 from server.sessions.submission import (
     ReturnRefused,
@@ -20,7 +21,17 @@ from tests.test_delegation_work import work_runtime as work_runtime
 
 
 async def test_archived_deletion_retries_after_a_postcommit_hook_fails(work_runtime, monkeypatch):
+    from server.routers.sessions import router
+
     manager, delegations, parent, _ = work_runtime
+    manager.work_test_app.include_router(router)
+    client = manager.work_test_client
+    path = f"/api/sessions/{parent.id}"
+    params = {"archived_only": "true"}
+    users = deps.get_user_manager()
+    stranger = await users.create_user(username="archive-stranger", password="stranger-test-password")
+    foreign = {"Authorization": f"Bearer {await users.issue_token(stranger['id'])}"}
+    mcp = {"Authorization": f"Bearer {mint(parent.id, user_id=parent.user_id)}"}
     monkeypatch.setattr(delegation_module, "delegation_manager", delegations)
     await manager.db.create_fork_session(
         fork_id="retainedfork", name="Retained fork", working_dir=parent.working_dir, created_at=parent.created_at,
@@ -48,15 +59,26 @@ async def test_archived_deletion_retries_after_a_postcommit_hook_fails(work_runt
     manager.on_broadcast("archive-delete-other", other_observed, user_id="other-user")
     db = manager.db
     monkeypatch.setattr(db, "_session_delete_hooks", [fail_once, *db._session_delete_hooks])
+    assert (await client.delete(path, params=params, headers=foreign)).status_code == 404
+    assert (await client.delete(path, params=params, headers=mcp)).status_code == 403
+    assert (await client.delete(path)).status_code == 404
     with pytest.raises(OSError, match="deletion hook failed"):
-        await manager.delete_session(parent.id)
-    assert await manager.db.get_session_binding(parent.id) is None
+        await client.delete(path, params=params)
+    presence = await client.get(path + "/presence")
+    assert presence.headers["cache-control"] == "private, no-store"
+    assert presence.json() == {"archived": None, "deletion_pending": True}
+    assert (await client.get(path + "/presence", headers=foreign)).json() == {"archived": None, "deletion_pending": False}
+    assert (await client.get(path + "/presence", headers=mcp)).status_code == 401
+    assert (await client.delete(path, params=params, headers=foreign)).status_code == 404
+    assert (await client.delete(path, params=params, headers=mcp)).status_code == 403
+    assert calls == [parent.id]
     assert owner_events == other_events == []
-    assert await manager.delete_session(parent.id)
+    assert (await client.delete(path, params=params)).status_code == 204
     assert calls == [parent.id, parent.id]
     assert owner_events == [parent.id] and not other_events
     assert await manager.db.get_session_binding("retainedfork") is not None
-    assert not await manager.delete_session(parent.id)
+    assert (await client.get(path + "/presence")).json() == {"archived": None, "deletion_pending": False}
+    assert (await client.delete(path, params=params)).status_code == 404
 
 
 async def test_background_restore_subscriber_can_permanently_delete_the_session(work_runtime, monkeypatch, tmp_path):
@@ -77,8 +99,14 @@ async def test_background_restore_subscriber_can_permanently_delete_the_session(
         if event["type"] == "session_unarchived" and event["session_id"] == parent.id:
             try:
                 async with asyncio.timeout(3):
-                    response = await manager.work_test_client.delete(f"/api/sessions/{parent.id}")
-            except TimeoutError as error:
+                    client = manager.work_test_client
+                    path = f"/api/sessions/{parent.id}"
+                    assert (await client.delete(path, params={"archived_only": "true"})).status_code == 404
+                    assert (await client.get(path + "/presence")).json()["archived"] is False
+                    # Runtime authorization on the original live DELETE remains available.
+                    mcp = {"Authorization": f"Bearer {mint(parent.id, user_id=parent.user_id)}"}
+                    response = await client.delete(path, headers=mcp)
+            except (AssertionError, TimeoutError) as error:
                 deleted.set_exception(error)
             else:
                 deleted.set_result(response.status_code)
@@ -147,7 +175,10 @@ async def test_delegation_terminal_waits_for_real_parent_archive_and_admits_once
 
 
 async def test_archived_deletion_and_original_background_return_can_both_finish(work_runtime, monkeypatch, tmp_path):
+    from server.routers.sessions import router
+
     manager, _, parent, _ = work_runtime
+    manager.work_test_app.include_router(router)
     bg = manager.work_test_bg
     monkeypatch.setattr(bg_tasks, "bg_task_manager", bg)
     ready_to_return, retiring = asyncio.Event(), asyncio.Event()
@@ -175,7 +206,10 @@ async def test_archived_deletion_and_original_background_return_can_both_finish(
         await bg.start_task(session_id=parent.id, command="true", working_dir=str(tmp_path))
         await asyncio.wait_for(ready_to_return.wait(), 3)
         await manager.archive_session(parent.id, replace=False)
-        assert await asyncio.wait_for(manager.delete_session(parent.id), 3)
+        deleted = await asyncio.wait_for(manager.work_test_client.delete(
+            f"/api/sessions/{parent.id}", params={"archived_only": "true"},
+        ), 3)
+        assert deleted.status_code == 204
         assert len(observed) == 1 and isinstance(observed[0], ReturnRefused), observed
         assert observed[0].reason in {"admission_closed", "destination_unavailable"}
         assert manager.get_session(parent.id) is None

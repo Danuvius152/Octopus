@@ -5,6 +5,7 @@ import { ArchiveDeadline } from "./sessionArchive";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
 const row = (id = "old", status = "running") => ({ id, name: id, status, archived: false } as SessionInfo);
+const absentPresence = () => Response.json({ archived: null, deletion_pending: false });
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 let list: SessionList;
 let calls: ReturnType<typeof deferred<Response>>[];
@@ -147,6 +148,33 @@ it("keeps another consumer's GET alive while confirming an unknown archive from 
   tracked.finish();
 });
 
+it("replaces a pre-confirmation projection even while its unrelated presence check is hung", async () => {
+  const archived = { ...row(), archived: true };
+  const other = row("other");
+  list.row(other);
+  const reading = list.refresh(true);
+  calls[0].resolve(Response.json([archived])); await flush();
+  const oldProbe = vi.mocked(fetch).mock.calls[1][1]!.signal!;
+  await vi.advanceTimersByTimeAsync(1_000);
+  const tracked = list.observe("old", useSessionStore.getState(), "archive");
+  const confirming = list.confirmArchive("old", tracked.observation);
+  const settled = vi.fn();
+  void confirming.then(settled);
+  await flush();
+  expect(settled).not.toHaveBeenCalled();
+  expect(calls).toHaveLength(3);
+  expect(oldProbe.aborted).toBe(true);
+  expect(await reading).toEqual({ state: "pending" }); await flush();
+  await vi.advanceTimersByTimeAsync(29_000);
+  expect(settled).not.toHaveBeenCalled();
+  calls[2].resolve(Response.json([archived, other]));
+  expect(await confirming).toEqual({ archived: true, successor: null });
+  calls[1].resolve(absentPresence()); await flush();
+  expect(useSessionStore.getState().sessions).toEqual([other]);
+  expect(useSessionStore.getState().sessionRead.error).toBeNull();
+  tracked.finish();
+});
+
 it.each(["reconnect", "reconnect with link", "new service", "new successor", "restored", "ended"] as const)(
   "confirms a known archive receipt after %s only within its original authority", async (boundary) => {
     const original = list.observe("old", useSessionStore.getState(), "archive");
@@ -244,6 +272,10 @@ it.each(["archived", "deleted"])("confirms a missing selected session after reco
   expect(deleted).not.toHaveBeenCalled();
   expect(calls).toHaveLength(2);
   calls[1].resolve(Response.json(outcome === "archived" ? [{ ...row(), archived: true }] : [])); await flush();
+  if (outcome === "deleted") {
+    expect(useSessionStore.getState().activeSessionId).toBe("old");
+    calls[2].resolve(absentPresence()); await flush();
+  }
   expect(useSessionStore.getState().activeSessionId).toBe(outcome === "archived" ? "old" : null);
   expect(deleted.mock.calls).toEqual(outcome === "deleted" ? [["old", true]] : []);
   unsubscribe();
@@ -254,15 +286,119 @@ it.each([false, true])("confirms every missing session for draft cleanup through
   useSessionStore.setState({ activeSessionId: "selected", messages: { old: [{ role: "user", type: "text", content: "retained" }] } });
   const deleted = vi.fn(); list.onDeleted(deleted);
   const reading = list.refresh(inclusive);
-  calls[0].resolve(Response.json([row("selected")])); await reading; await flush();
+  calls[0].resolve(Response.json([row("selected")])); await flush();
   if (!inclusive) {
     expect(deleted).not.toHaveBeenCalled();
     expect(calls).toHaveLength(2);
     calls[1].resolve(Response.json([row("selected")])); await flush();
   }
+  expect(deleted).not.toHaveBeenCalled();
+  calls[inclusive ? 1 : 2].resolve(absentPresence()); await reading; await flush();
   expect(deleted.mock.calls).toEqual([["old", false]]);
   expect(useSessionStore.getState().messages.old).toBeUndefined();
   expect(useSessionStore.getState().activeSessionId).toBe("selected");
+});
+
+it.each(["refresh", "reconnect"] as const)("keeps a selected archived session omitted by a %s until its delayed restoration event", async (path) => {
+  const archived = { ...row(), archived: true };
+  list.row(archived);
+  const messages = [{ role: "user", type: "text", content: "retained" }] as const;
+  useSessionStore.setState({ activeSessionId: archived.id, messages: { old: [...messages] } });
+  const deleted = vi.fn();
+  list.onDeleted(deleted);
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  const initial = list.refresh(true);
+  calls[0].resolve(Response.json([archived]));
+  await initial;
+  if (path === "refresh") void list.refresh();
+  else { list.connect(source); await flush(); }
+
+  calls[1].resolve(Response.json([]));
+  await flush();
+  expect(useSessionStore.getState()).toMatchObject({ archivedSessions: [archived], activeSessionId: archived.id, messages: { old: messages } });
+  expect(String(vi.mocked(fetch).mock.calls[2][0])).toMatch(/\/old\/presence$/);
+  calls[2].resolve(Response.json({ archived: false, deletion_pending: false }));
+  await flush();
+  expect(deleted).not.toHaveBeenCalled();
+  expect(useSessionStore.getState()).toMatchObject({ archivedSessions: [archived], activeSessionId: archived.id, messages: { old: messages } });
+
+  const live = { ...archived, archived: false };
+  list.restored(live);
+  expect(useSessionStore.getState()).toMatchObject({ sessions: [live], archivedSessions: [], activeSessionId: live.id, messages: { old: messages } });
+  expect(deleted).not.toHaveBeenCalled();
+});
+
+it.each(["account", "connection", "service"] as const)("ignores an old absence confirmation after a %s change", async (boundary) => {
+  const archived = { ...row(), archived: true };
+  list.row(archived);
+  useSessionStore.setState({ activeSessionId: archived.id });
+  const deleted = vi.fn();
+  list.onDeleted(deleted);
+  const reading = list.refresh(true);
+  calls[0].resolve(Response.json([])); await flush();
+  expect(calls).toHaveLength(2);
+
+  if (boundary === "account") useSessionStore.getState().setToken("different-account");
+  if (boundary === "connection") list.connect({ socket: {}, accountGeneration: useSessionStore.getState().accountGeneration });
+  if (boundary === "service") useSessionStore.setState({ dispatchGeneration: "replacement-service" });
+  expect(await reading).toEqual({ state: "obsolete" });
+  const next = list.refresh(true);
+  calls[2].resolve(Response.json([archived]));
+  await next;
+  useSessionStore.setState({ activeSessionId: archived.id });
+  calls[1].resolve(absentPresence()); await flush();
+  expect(useSessionStore.getState()).toMatchObject({ archivedSessions: [archived], activeSessionId: archived.id });
+  expect(deleted).not.toHaveBeenCalled();
+});
+
+it("retains membership and cached input when a missing-row confirmation fails", async () => {
+  const archived = { ...row(), archived: true };
+  list.row(archived);
+  const messages = [{ role: "user", type: "text", content: "retained" }] as const;
+  useSessionStore.setState({ activeSessionId: archived.id, messages: { old: [...messages] } });
+  const read = list.refresh(true);
+  calls[0].resolve(Response.json([])); await flush();
+  calls[1].resolve(new Response(null, { status: 503 }));
+  expect(await read).toMatchObject({ state: "failed" });
+  expect(useSessionStore.getState()).toMatchObject({ archivedSessions: [archived], activeSessionId: archived.id, messages: { old: messages } });
+  const retry = list.refresh(true);
+  calls[2].resolve(Response.json([archived]));
+  expect(await retry).toEqual({ state: "applied" });
+});
+
+it.each([false, true])("settles a deletion retry on a later list when the restored row is omitted=%s", async (omitted) => {
+  const live = row(), archived = { ...live, archived: true };
+  list.row(archived);
+  const deletion = list.deleteArchived(archived);
+  calls[0].reject(new Error("Lost DELETE response")); await flush();
+  expect(String(vi.mocked(fetch).mock.calls[1][0])).toMatch(/\/old\/presence$/);
+  calls[1].resolve(Response.json({ archived: true, deletion_pending: false }));
+  expect(await deletion).toBe("retry"); await flush();
+  const reading = list.refresh(true);
+  expect(String(vi.mocked(fetch).mock.calls[2][0])).toMatch(/\/sessions\?include_archived=true$/);
+  calls[2].resolve(Response.json(omitted ? [] : [live])); await flush();
+  if (omitted) {
+    calls[3].resolve(Response.json({ archived: false, deletion_pending: false }));
+    await flush();
+  }
+  await reading;
+  if (omitted) list.restored(live);
+  expect(useSessionStore.getState().sessions).toEqual([live]);
+  expect(list.deletions.getState()).toEqual({});
+});
+
+it.each(["refused", "lost"])("does not retry a %s delete after the restoration event even if presence fails", async (reply) => {
+  const live = row(), archived = { ...live, archived: true };
+  list.row(archived);
+  const deletion = list.deleteArchived(archived);
+  list.restored(live);
+  if (reply === "refused") calls[0].resolve(new Response(null, { status: 404 }));
+  else calls[0].reject(new Error("Lost DELETE response"));
+  await flush();
+  calls[1].resolve(new Response(null, { status: 503 }));
+  expect(await deletion).toBe("restored");
+  expect(list.deletions.getState()).toEqual({});
+  expect(useSessionStore.getState().sessions).toEqual([live]);
 });
 
 it("rejects an old detail without overriding the newer status and confirms through one list read", async () => {
@@ -285,10 +421,12 @@ it("rejects reversed reconnect responses and confirms missing members through on
   calls[1].resolve(Response.json([row("new", "idle")])); await flush();
   expect(calls).toHaveLength(3);
   calls[2].resolve(Response.json([row("new", "idle")])); await flush();
+  expect(calls).toHaveLength(4);
+  calls[3].resolve(absentPresence()); await flush();
   calls[0].resolve(Response.json([row()])); await flush();
   expect(list.row(row(), detail)).toBe(false); await flush();
   expect(useSessionStore.getState().sessions.map((item) => item.id)).toEqual(["new"]);
-  expect(calls).toHaveLength(3);
+  expect(calls).toHaveLength(4);
 });
 
 it.each(["account", "token", "service", "dispose"])("retires reads and details across %s changes", async (kind) => {
@@ -310,7 +448,8 @@ it("preserves rows and exposes errors until a successful explicit refresh", asyn
   expect(useSessionStore.getState().sessions[0].id).toBe("old");
   expect(useSessionStore.getState().sessionRead).toMatchObject({ stale: true, error: "offline" });
   await vi.advanceTimersByTimeAsync(60_000); expect(calls).toHaveLength(1);
-  const refresh = list.refresh(true); calls[1].resolve(Response.json([])); await refresh;
+  const refresh = list.refresh(true); calls[1].resolve(Response.json([])); await flush();
+  calls[2].resolve(absentPresence()); await refresh;
   expect(useSessionStore.getState().sessionRead).toMatchObject({ loaded: true, stale: false, error: null });
 });
 
@@ -323,8 +462,8 @@ it.each(["created", "patch", "archive", "remove"] as const)("confirms a late %s 
   expect(applied).toBe(false); await flush();
   expect(useSessionStore.getState().sessions).toEqual([row("old", "idle")]);
   expect(calls).toHaveLength(2);
-  calls[1].resolve(Response.json([row("confirmed", "idle")])); await flush();
-  expect(useSessionStore.getState().sessions).toEqual([row("confirmed", "idle")]);
+  calls[1].resolve(Response.json([row("old", "idle"), row("confirmed", "idle")])); await flush();
+  expect(useSessionStore.getState().sessions).toEqual([row("old", "idle"), row("confirmed", "idle")]);
 });
 
 it.each(["account", "token", "dispose"])("does not confirm an obsolete write after %s changes", async (kind) => {
@@ -344,6 +483,21 @@ it("a creation receipt can follow an already observed live identity without repl
   expect(useSessionStore.getState().sessions.find((item) => item.id === "new")?.status).toBe("idle");
 });
 
+it("confirms a listed creation while an unrelated presence check is still pending", async () => {
+  const original = list.capture();
+  list.patch("old", { status: "idle" });
+  const created = row("new", "idle");
+  const confirming = list.created(created, original, { includeArchived: true });
+  let accepted: boolean | undefined;
+  void confirming.then(result => { accepted = result; });
+  calls[0].resolve(Response.json([created])); await flush();
+  expect(String(vi.mocked(fetch).mock.calls[1][0])).toMatch(/\/old\/presence$/);
+  expect(accepted).toBe(true);
+  expect(useSessionStore.getState().sessionRead.loading).toBe(true);
+  calls[1].resolve(absentPresence()); await flush();
+  expect(await confirming).toBe(true);
+});
+
 it.each([0, 11_000])("waits for a valid snapshot after creation with %i ms between list changes", async (delay) => {
   const oldRead = list.refresh(true), original = list.capture();
   list.patch("old", { status: "idle" });
@@ -358,8 +512,11 @@ it.each([0, 11_000])("waits for a valid snapshot after creation with %i ms betwe
   expect(calls).toHaveLength(3);
   expect(useSessionStore.getState().sessions.some((item) => item.id === "new")).toBe(false);
   await vi.advanceTimersByTimeAsync(delay);
-  calls[2].resolve(Response.json([row("new", "idle")]));
+  calls[2].resolve(Response.json([row("new", "idle")])); await flush();
+  const settled = list.refresh(true);
+  calls[3].resolve(absentPresence());
   expect(await confirmed).toBe(true);
+  expect(await settled).toEqual({ state: "applied" });
   expect(useSessionStore.getState().sessions).toEqual([row("new", "idle")]);
 });
 
@@ -403,10 +560,10 @@ it("confirms concurrent creation receipts after the read begun before their last
   const second = list.created(row("two"), original);
   let confirmed = 0;
   void first.then(() => confirmed++); void second.then(() => confirmed++);
-  calls[0].resolve(Response.json([row("one")])); await flush();
+  calls[0].resolve(Response.json([row(), row("one")])); await flush();
   expect(confirmed).toBe(0);
   expect(calls).toHaveLength(2);
-  calls[1].resolve(Response.json([row("one"), row("two")]));
+  calls[1].resolve(Response.json([row(), row("one"), row("two")]));
   expect(await Promise.all([first, second])).toEqual([true, true]);
   expect(calls).toHaveLength(2);
 });

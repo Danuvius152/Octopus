@@ -1,3 +1,4 @@
+import { createStore } from "zustand/vanilla";
 import { accountFetch } from "./accountFetch";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import type { ListEventSource } from "./applicationList";
@@ -6,7 +7,8 @@ import type { DispatchState } from "./sessionDispatch";
 import { SessionRestorations } from "./sessionRestorations";
 import { ArchiveDeadline } from "./sessionArchive";
 import { AgentChatCreations } from "./agentChatCreations";
-import type { SessionArchiveResult } from "../api";
+import { RequestDeadline } from "./requestDeadline";
+import type { SessionArchiveResult, SessionPresence } from "../api";
 
 type ArchiveFields = Partial<Pick<SessionInfo, "name" | "model" | "reasoning_effort" | "service_tier">>;
 
@@ -21,6 +23,14 @@ export interface SessionObservation {
 interface Read extends SessionObservation {
   archived: boolean; controller: AbortController; timer: ReturnType<typeof setTimeout>;
   promise: Promise<RefreshResult>; finish: (result: RefreshResult) => void;
+  projection: Promise<RefreshResult>; publish: (result: RefreshResult) => void;
+  checkingMissing?: boolean;
+}
+interface ReadMembership {
+  observation: SessionObservation;
+  rows: ReadonlyMap<string, SessionInfo>;
+  checked: ReadonlyMap<string, SessionPresence | null>;
+  awaitingPresence?: true;
 }
 interface ObservationTarget {
   id: string | undefined;
@@ -35,6 +45,9 @@ interface CreatedOptions {
 }
 export type LiveRowEvidence = "listed" | "confirmed";
 type LiveRowObservation = { observation: SessionObservation; evidence: LiveRowEvidence };
+type DeletionTarget = Pick<SessionInfo, "id" | "name">;
+type DeletionEntry = DeletionTarget & { phase: "deleting" | "retry"; batch?: symbol };
+export type ArchiveDeletion = "deleted" | "restored" | "retry" | "obsolete";
 
 export function isSelectedChat(sessionId: string | null, state: Pick<ReturnType<typeof useSessionStore.getState>, "activeSessionId" | "mainView">): boolean {
   return state.activeSessionId === sessionId && state.mainView === "chat";
@@ -47,6 +60,11 @@ export function isSelectedChat(sessionId: string | null, state: Pick<ReturnType<
 export class SessionList {
   readonly restorations = new SessionRestorations(this);
   readonly agentChats = new AgentChatCreations(this);
+  readonly deletions = createStore<Record<string, DeletionEntry>>(() => ({}));
+  // The identity stays with the result so late retries can still contribute.
+  readonly archiveBatch = createStore<{ id: symbol | null; running: boolean; restored: number }>(
+    () => ({ id: null, running: false, restored: 0 }),
+  );
   private socket: object | null = null;
   private connection = 0;
   private change = 0;
@@ -59,6 +77,9 @@ export class SessionList {
   private closed = false;
   // Evidence follows projected rows without retaining rows that leave the list.
   private liveRowObservations = new WeakMap<SessionInfo, LiveRowObservation>();
+  // Membership evidence lives only as long as a consumer holds the read result.
+  private readMembership = new WeakMap<RefreshResult, ReadMembership>();
+  private deletionLiveObservations = new WeakMap<DeletionEntry, SessionObservation>();
   // Only outstanding reads are retained, including targets not yet in a list.
   private observations = new Map<SessionObservation, ObservationTarget>();
   private deletionListeners = new Set<(id: string, wasActive: boolean) => void>();
@@ -79,6 +100,8 @@ export class SessionList {
       if (account) {
         this.restorations.retire();
         this.agentChats.retire();
+        this.deletions.setState({}, true);
+        this.archiveBatch.setState(this.archiveBatch.getInitialState());
         this.unconfirmedMissing.clear();
         this.socket = null; this.connection++; this.engaged = false; this.archivedRequested = false;
         useSessionStore.setState({ sessions: [], archivedSessions: [], sessionSuccessors: {}, sessionRead: unreadList() });
@@ -164,84 +187,140 @@ export class SessionList {
     void Promise.resolve().then(() => { this.scheduled = false; this.start(); });
   }
   refresh(includeArchived = false): Promise<RefreshResult> {
-    if (this.closed || !this.scope().token) return Promise.resolve({ state: "obsolete" });
+    return this.requestRead(includeArchived)?.promise ?? Promise.resolve({ state: "obsolete" });
+  }
+  private requestRead(includeArchived: boolean): Read | null {
+    if (this.closed || !this.scope().token) return null;
     this.engaged = true;
     if (includeArchived && !this.archivedRequested) {
       this.archivedRequested = true; this.dirty = true;
     }
-    if (this.active) return this.active.promise;
+    if (this.active) return this.active;
     this.dirty = true;
-    return this.start()!.promise;
+    return this.start();
   }
-  refreshAfterRestoration(): Promise<RefreshResult> {
-    this.retire({ state: "pending" });
-    this.dirty = true;
-    return this.refresh(true);
+  async refreshAfterRestoration(id: string, restart = false): Promise<RefreshResult> {
+    if (restart) this.retire({ state: "pending" });
+    return this.readForTargets(true, result => this.membershipFromRead(result, id)?.listed === true);
+  }
+  private async readForTargets(includeArchived: boolean, accepts: (result: RefreshResult) => boolean): Promise<RefreshResult> {
+    const read = this.requestRead(includeArchived);
+    if (!read) return { state: "obsolete" };
+    const result = await read.projection;
+    if (read.checkingMissing && this.active !== read) return read.promise;
+    if ((!includeArchived || read.archived) && accepts(result)) return result;
+    return read.promise;
+  }
+  needsFollowup(result: RefreshResult): boolean {
+    return result.state === "pending" || result.state === "applied" &&
+      !this.readMembership.get(result)?.awaitingPresence && useSessionStore.getState().sessionRead.stale;
+  }
+  membershipFromRead(result: RefreshResult, id: string): { archived: boolean | null; listed: boolean } | undefined {
+    const read = this.readMembership.get(result);
+    if (!read || !this.current(read.observation)) return;
+    const row = read.rows.get(id);
+    if (row) {
+      const state = useSessionStore.getState();
+      const current = row.archived ? state.archivedSessions : state.sessions;
+      return current.includes(row) ? { archived: !!row.archived, listed: true } : undefined;
+    }
+    if (read.observation.change !== this.change) return;
+    const presence = read.checked.get(id);
+    if (presence) return { archived: presence.archived, listed: false };
   }
   private start(): Read | null {
     if (this.closed || this.active || !this.dirty || !this.scope().token) return this.active;
     this.dirty = false;
-    let finish!: Read["finish"];
+    let finish!: Read["finish"], publish!: Read["publish"];
     const promise = new Promise<RefreshResult>((resolve) => { finish = resolve; });
-    const read: Read = { ...this.capture(), archived: this.archivedRequested, controller: new AbortController(), promise, finish,
-      timer: setTimeout(() => this.fail(read, new Error("Session list timed out after 30 seconds")), 30_000) };
+    const projection = new Promise<RefreshResult>((resolve) => { publish = resolve; });
+    const read: Read = { ...this.capture(), archived: this.archivedRequested, controller: new AbortController(), promise, finish, projection, publish,
+      timer: setTimeout(() => this.fail(read, new Error(read.checkingMissing
+        ? "Could not confirm missing sessions: the read timed out after 30 seconds."
+        : "Session list timed out after 30 seconds")), 30_000) };
     this.active = read; this.state({ loading: true, stale: true, error: null });
     void accountFetch(`${window.location.origin}/api/sessions${read.archived ? "?include_archived=true" : ""}`, {
       headers: { Authorization: `Bearer ${read.scope.token}` }, signal: read.controller.signal,
     }).then(async (response) => {
       if (!response.ok) throw new Error(`Could not load sessions (HTTP ${response.status}).`);
       return await response.json() as SessionInfo[];
-    }).then((rows) => {
+    }).then(async (rows) => {
       if (this.active !== read) return;
       if (!this.current(read)) { this.retire({ state: "obsolete" }); return; }
       if (!Array.isArray(rows)) { this.fail(read, new Error("Invalid session list response")); return; }
-      if (read.change !== this.change) {
-        this.retire({ state: "pending" }); this.dirty = true;
-      } else {
-        const store = useSessionStore.getState();
-        const observed = new Set([...store.sessions, ...store.archivedSessions].map((row) => row.id));
-        for (const id of this.restorations.pendingIds()) observed.add(id);
-        for (const [from, to] of Object.entries(store.sessionSuccessors)) { observed.add(from); observed.add(to); }
-        if (store.activeSessionId) observed.add(store.activeSessionId);
-        for (const id of this.unconfirmedMissing) observed.add(id);
-        const absent = [...observed].filter((id) => !rows.some((row) => row.id === id));
-        // The inclusive endpoint reads live membership before awaiting archived
-        // rows. A session archived between those reads can appear in both.
-        const observedArchived = rows.filter((row) => row.archived);
-        const archivedIds = new Set(observedArchived.map((row) => row.id));
-        const live = rows.filter((row) => !row.archived && !archivedIds.has(row.id));
-        const archived = read.archived ? observedArchived :
-          useSessionStore.getState().archivedSessions.filter((row) => !live.some((item) => item.id === row.id));
-        const observation = this.capture(store);
-        this.commit(live, archived);
-        if (this.active !== read || !this.current(observation)) return;
-        // Only a complete list can distinguish archive from deletion. Every
-        // missing known identity can still own cached inputs or late receipts.
-        if (read.archived) {
-          this.lastInclusiveRead = this.change;
-          this.unconfirmedMissing.clear();
-          for (const id of absent) this.forget(id);
-        } else {
-          for (const id of absent) this.unconfirmedMissing.add(id);
-          for (const row of rows) this.unconfirmedMissing.delete(row.id);
-          if (this.unconfirmedMissing.size) { this.archivedRequested = true; this.dirty = true; }
+      if (read.change !== this.change) { this.retryRead(); return; }
+      const store = useSessionStore.getState();
+      const observed = new Set([...store.sessions, ...store.archivedSessions].map((row) => row.id));
+      for (const id of this.restorations.pendingIds()) observed.add(id);
+      for (const [from, to] of Object.entries(store.sessionSuccessors)) { observed.add(from); observed.add(to); }
+      if (store.activeSessionId) observed.add(store.activeSessionId);
+      for (const id of this.unconfirmedMissing) observed.add(id);
+      if (read.archived) {
+        for (const entry of Object.values(this.deletions.getState())) {
+          if (entry.phase === "retry") observed.add(entry.id);
         }
-        // Live membership can support navigation before the queued reads
-        // that confirm a write have finished.
-        this.publishChatRows(live, this.dirty ? "listed" : "confirmed", observation);
-        if (read.archived) this.publishChatRows(observedArchived, "confirmed", observation);
-        if (this.active !== read) return;
-        this.retire({ state: "applied" }); this.state({ loaded: true, stale: this.dirty, error: null });
       }
+      const listed = new Set(rows.map((row) => row.id));
+      const absent = [...observed].filter((id) => !listed.has(id));
+      // A concurrent archive can list the ID twice. A restore can omit it,
+      // so keep older rows on display until their own membership is checked.
+      const observedArchived = rows.filter((row) => row.archived);
+      const archivedIds = new Set(observedArchived.map((row) => row.id));
+      const observedLive = rows.filter((row) => !row.archived && !archivedIds.has(row.id));
+      const projectedRows = new Map([...observedLive, ...observedArchived].map(row => [row.id, row]));
+      const retain = (row: SessionInfo) => !listed.has(row.id);
+      const live = read.archived ? [...observedLive, ...store.sessions.filter(retain)] : observedLive;
+      const archived = [...observedArchived, ...store.archivedSessions.filter(retain)];
+      this.commit(live, archived);
+      if (this.active !== read || !this.current(read)) return;
+      const projection = this.capture();
+      for (const id of listed) this.unconfirmedMissing.delete(id);
+      for (const id of absent) this.unconfirmedMissing.add(id);
+      if (read.archived) this.lastInclusiveRead = projection.change;
+      if (!read.archived && this.unconfirmedMissing.size) { this.archivedRequested = true; this.dirty = true; }
+      this.publishChatRows(observedLive, this.dirty ? "listed" : "confirmed", projection);
+      if (read.archived) this.publishChatRows(observedArchived, "confirmed", projection);
+      if (this.active !== read) return;
+
+      const presences = new Map<string, SessionPresence | null>();
+      if (read.archived && absent.length > 0) {
+        read.checkingMissing = true;
+        const result: RefreshResult = { state: "applied" };
+        this.readMembership.set(result, { observation: projection, rows: projectedRows, checked: new Map(), awaitingPresence: true });
+        this.state({ loaded: true });
+        read.publish(result);
+        await Promise.all(absent.map(async (id) => {
+          presences.set(id, await this.readPresence(id, read, read.controller.signal));
+        }));
+        if (this.active !== read || !this.current(read)) return;
+        if (projection.change !== this.change) { this.retryRead(); return; }
+        for (const id of absent) {
+          if (this.active !== read || !this.current(projection)) return;
+          const presence = presences.get(id);
+          if (presence?.archived === null) this.remove(id, undefined, presence.deletion_pending);
+          if (presence?.archived === false) this.observeLiveDeletionTarget(id, projection);
+        }
+      }
+      if (this.active !== read) return;
+      const error = [...presences.values()].includes(null) ? "Could not confirm missing sessions." : null;
+      const result: RefreshResult = error ? { state: "failed", message: error } : { state: "applied" };
+      this.readMembership.set(result, { observation: this.capture(), rows: projectedRows, checked: presences });
+      this.retire(result);
+      this.state({ loaded: true, stale: this.dirty || !!error, error });
       this.kick();
     }).catch((error: unknown) => this.fail(read, error));
     return read;
+  }
+  private retryRead(): void {
+    this.retire({ state: "pending" });
+    this.dirty = true;
+    this.kick();
   }
   private retire(result: RefreshResult): void {
     const read = this.active;
     if (!read) return;
     this.active = null; clearTimeout(read.timer); read.controller.abort();
-    this.state({ loading: false, stale: true }); read.finish(result);
+    this.state({ loading: false, stale: true }); read.publish(result); read.finish(result);
   }
   private fail(read: Read, error: unknown): void {
     if (this.active !== read) return;
@@ -255,7 +334,9 @@ export class SessionList {
   private publishChatRows(rows: SessionInfo[], evidence: LiveRowEvidence, observation: SessionObservation): void {
     if (!this.current(observation)) return;
     for (const row of rows) {
-      if (row.archived || this.hasCurrentLiveObservation(row, "confirmed")) continue;
+      if (row.archived) continue;
+      this.observeLiveDeletionTarget(row.id, observation);
+      if (this.hasCurrentLiveObservation(row, "confirmed")) continue;
       this.liveRowObservations.set(row, { observation, evidence });
     }
     this.agentChats.observeRows(rows);
@@ -321,27 +402,32 @@ export class SessionList {
     return false;
   }
   /** Follow coalesced reads while the caller still owns this confirmation. */
-  async settledRead(includeArchived: boolean, current: () => boolean, deadline?: ArchiveDeadline): Promise<SessionObservation | null> {
+  async settledRead(includeArchived: boolean, current: () => boolean, deadline?: ArchiveDeadline,
+    accepts?: (result: RefreshResult) => boolean,
+  ): Promise<SessionObservation | null> {
     while (current() && (!deadline || deadline.active)) {
       const observation = this.capture();
-      const read = this.refresh(includeArchived);
+      const read = accepts ? this.readForTargets(includeArchived, accepts) : this.refresh(includeArchived);
       const result = await (deadline ? deadline.wait(read) : read);
       if (!result || !current()) return null;
-      if (!this.current(observation) || result.state === "pending" ||
-          result.state === "applied" && useSessionStore.getState().sessionRead.stale) continue;
-      return result.state === "applied" ? observation : null;
+      if (!this.current(observation) || this.needsFollowup(result)) continue;
+      return (accepts ? accepts(result) : result.state === "applied") ? observation : null;
     }
     return null;
   }
-  private async confirmLive(id: string, observation: SessionObservation, includeArchived: boolean,
-    deadline?: ArchiveDeadline, active?: () => boolean,
+  private async confirmLive(id: string, observation: SessionObservation,
+    { includeArchived = false, archivedId, deadline, active }: CreatedOptions,
   ): Promise<boolean> {
     const state = useSessionStore.getState();
     if (state.archivedSessions.some((row) => row.id === id) || state.sessionSuccessors[id]) return false;
     const target = this.observe(id, state);
     const current = () => (active?.() ?? true) && this.current(observation) && this.current(target.observation);
     try {
-      const accepted = await this.settledRead(includeArchived, current, deadline);
+      const accepted = await this.settledRead(includeArchived, current, deadline, result => {
+        const membership = this.membershipFromRead(result, id);
+        return membership?.listed === true && membership.archived === false &&
+          (!archivedId || this.membershipFromRead(result, archivedId)?.archived === true);
+      });
       return !!accepted && current() && useSessionStore.getState().sessions.some((row) => row.id === id);
     } finally {
       target.finish();
@@ -356,7 +442,7 @@ export class SessionList {
       return false;
     }
     const adopted = this.adoptCreated(info, observation, includeArchived, archivedId);
-    const accepted = adopted || await this.confirmLive(info.id, observation, includeArchived, deadline, active);
+    const accepted = adopted || await this.confirmLive(info.id, observation, { includeArchived, archivedId, deadline, active });
     if (!accepted || !this.current(observation) || !useSessionStore.getState().sessions.some((row) => row.id === info.id)) return false;
     if (archivedId) {
       if (!this.archiveObservationCurrent(archivedId, observation)) return false;
@@ -489,13 +575,15 @@ export class SessionList {
     const linked = () => this.current(observation) && this.current(successor.observation) &&
       useSessionStore.getState().sessionSuccessors[id] === target &&
       useSessionStore.getState().archivedSessions.some((row) => row.id === id);
+    const accepts = (result: RefreshResult) => this.membershipFromRead(result, id)?.archived === true &&
+      this.membershipFromRead(result, target)?.listed === true;
     try {
       while (linked() && budget.active) {
-        const result = await budget.wait(this.refresh(true));
+        const result = await budget.wait(this.readForTargets(true, accepts));
         if (!result) return null;
         if (!linked()) return null;
-        if (result.state === "pending" || result.state === "applied" && useSessionStore.getState().sessionRead.stale) continue;
-        if (result.state !== "applied") return null;
+        if (this.needsFollowup(result)) continue;
+        if (!accepts(result)) return null;
         const store = useSessionStore.getState();
         return [...store.sessions, ...store.archivedSessions].find((row) => row.id === target) ?? null;
       }
@@ -531,37 +619,47 @@ export class SessionList {
     try {
       if (!current()) { this.canConfirm(observation, true); return null; }
       const continuous = receipt && this.archiveObservationCurrent(id, receipt.original);
-      // A GET already in flight may predate the effect. Let its shared transport
-      // finish, reject that snapshot at the normal change boundary, and coalesce
-      // a subsequent read. This command owns its wait, not another reader's GET.
+      const successorTarget = (linked: string | undefined) => {
+        if (!receipt) return linked;
+        const { original, successorId } = receipt;
+        if (!this.archiveReceiptCurrent(original) || linked && linked !== successorId) return;
+        if (linked || continuous && this.archiveObservationCurrent(id, original)) return successorId;
+      };
+      const accepts = (result: RefreshResult) => {
+        const membership = this.membershipFromRead(result, id);
+        if (!membership?.listed) return false;
+        const target = successorTarget(useSessionStore.getState().sessionSuccessors[id]);
+        return !membership.archived || !target || target === id || this.membershipFromRead(result, target)?.listed === true;
+      };
+      // A list started before this confirmation cannot prove its effect.
+      // Keep an in-flight list fetch, but retire probes whose list was already
+      // published and whose membership baseline this confirmation invalidates.
       if (observation.archiveConfirmation !== budget) {
         observation.archiveConfirmation = budget;
         this.change++;
+        if (this.active?.checkingMissing) this.retire({ state: "pending" });
         this.invalidate();
       }
       while (current() && budget.active) {
-        const result = await budget.wait(this.refresh(true));
+        const result = await budget.wait(this.readForTargets(true, accepts));
         if (!result) return null;
         if (!current()) return null;
         const state = useSessionStore.getState();
-        if (result.state === "pending" || result.state === "applied" && state.sessionRead.stale ||
+        if (this.needsFollowup(result) ||
             result.state === "obsolete" && this.initialGenerationCurrent(observation)) continue;
-        if (result.state !== "applied") return null;
-        const archived = state.archivedSessions.some((row) => row.id === id);
+        const membership = this.membershipFromRead(result, id);
+        if (!membership || membership.archived === null) return null;
+        const archived = membership.archived;
         const linked = state.sessionSuccessors[id];
-        let target = linked;
-        if (receipt) {
+        if (receipt && !archived) {
           const { original, successorId } = receipt;
-          if (!this.archiveReceiptCurrent(original) || linked && linked !== successorId) return { archived, successor: null };
-          if (!archived) {
+          if (this.archiveReceiptCurrent(original) && (!linked || linked === successorId)) {
             original.invalidated = true;
             this.observations.delete(original);
-            return { archived, successor: null };
           }
-          if (!linked && (!continuous || !this.archiveObservationCurrent(id, original))) return { archived, successor: null };
-          target = successorId;
         }
-        const successor = archived && target && target !== id
+        const target = successorTarget(linked);
+        const successor = archived && target && target !== id && this.membershipFromRead(result, target)?.listed
           ? [...state.sessions, ...state.archivedSessions].find((row) => row.id === target) ?? null : null;
         if (successor && !linked) {
           this.commit(state.sessions, state.archivedSessions, { ...state.sessionSuccessors, [id]: successor.id });
@@ -571,10 +669,120 @@ export class SessionList {
       return null;
     } finally { if (!deadline) budget.finish(); }
   }
-  remove(id: string, observation?: SessionObservation): boolean {
+  private async readPresence(id: string, observation: SessionObservation, signal: AbortSignal): Promise<SessionPresence | null> {
+    try {
+      const response = await accountFetch(`${window.location.origin}/api/sessions/${encodeURIComponent(id)}/presence`, {
+        headers: { Authorization: `Bearer ${observation.scope.token}` }, signal,
+      });
+      if (!response.ok) return null;
+      const presence = await response.json() as Partial<SessionPresence> | null;
+      if (!presence || typeof presence.deletion_pending !== "boolean" ||
+          presence.archived !== null && typeof presence.archived !== "boolean") return null;
+      return { archived: presence.archived, deletion_pending: presence.deletion_pending };
+    } catch {
+      return null;
+    }
+  }
+
+  async deleteArchived(target: DeletionTarget, batch?: symbol): Promise<ArchiveDeletion | "restored-in-batch"> {
+    const { id, name } = target;
+    const original = this.capture();
+    const previous = this.deletions.getState()[id];
+    if (this.closed || !original.scope.token || previous?.phase === "deleting") return "obsolete";
+    const entry: DeletionEntry = { id, name, phase: "deleting", batch: batch ?? previous?.batch };
+    this.deletions.setState({ [id]: entry });
+    const outcome = await this.requestArchivedDeletion(id, original, entry);
+    if (this.deletions.getState()[id] === entry) {
+      if (outcome === "retry") this.deletions.setState({ [id]: { ...entry, phase: "retry" } });
+      else if (this.finishDeletion(id, outcome)) return "restored-in-batch";
+    }
+    return outcome;
+  }
+
+  async deleteArchivedBatch(targets: readonly DeletionTarget[], confirmation: SessionObservation): Promise<void> {
+    if (!this.accountCurrent(confirmation) || this.archiveBatch.getState().running) return;
+    const batch = Symbol();
+    this.archiveBatch.setState({ id: batch, running: true, restored: 0 });
+    try {
+      // Finish each target's presence check before the next deletion can change the list.
+      for (const target of targets) {
+        if (!this.accountCurrent(confirmation)) break;
+        await this.deleteArchived(target, batch);
+      }
+    } finally {
+      if (this.archiveBatch.getState().id === batch) this.archiveBatch.setState({ running: false });
+    }
+  }
+
+  private async requestArchivedDeletion(id: string, original: SessionObservation, entry: DeletionEntry): Promise<ArchiveDeletion> {
+    const deadline = new RequestDeadline();
+    let reply: Response | null = null;
+    try {
+      reply = await deadline.wait(accountFetch(`${window.location.origin}/api/sessions/${encodeURIComponent(id)}?archived_only=true`, {
+        method: "DELETE", headers: { Authorization: `Bearer ${original.scope.token}` }, signal: deadline.signal,
+      }));
+    } catch {
+      // The server can finish after the observer loses the response.
+    } finally { deadline.finish(); }
+    if (!this.accountCurrent(original)) return "obsolete";
+    if (this.deletions.getState()[id] !== entry) return "deleted";
+    if (reply?.status === 204 && this.current(original)) {
+      this.remove(id);
+      return "deleted";
+    }
+
+    const observation = this.capture();
+    const confirmation = new RequestDeadline();
+    try {
+      const presence = await confirmation.wait(this.readPresence(id, observation, confirmation.signal));
+      if (!this.accountCurrent(observation)) return "obsolete";
+      if (this.deletions.getState()[id] !== entry) return "deleted";
+      const current = this.current(observation) && observation.change === this.change;
+      const live = this.deletionLiveObservations.get(entry);
+      if ((!current || !presence) && live && this.current(live)) return "restored";
+      if (!current) {
+        this.unconfirmedMissing.add(id);
+        this.archivedRequested = true;
+        this.engaged = true;
+        this.invalidate();
+        return "retry";
+      }
+      if (presence?.archived === null) {
+        this.remove(id, undefined, presence.deletion_pending);
+        return presence.deletion_pending ? "retry" : "deleted";
+      }
+      if (presence?.archived === false) {
+        void this.refresh(true);
+        return "restored";
+      }
+      return "retry";
+    } finally { confirmation.finish(); }
+  }
+
+  private finishDeletion(id: string, outcome?: ArchiveDeletion): boolean {
+    const state = this.deletions.getState();
+    if (!Object.hasOwn(state, id)) return false;
+    const { batch } = state[id];
+    const next = { ...state };
+    delete next[id];
+    this.deletions.setState(next, true);
+    const currentBatch = this.archiveBatch.getState();
+    if (outcome !== "restored" || !batch || batch !== currentBatch.id) return false;
+    this.archiveBatch.setState({ restored: currentBatch.restored + 1 });
+    return true;
+  }
+
+  private observeLiveDeletionTarget(id: string, observation: SessionObservation): void {
+    const entry = this.deletions.getState()[id];
+    if (entry?.phase === "retry") this.finishDeletion(id, "restored");
+    if (entry?.phase === "deleting") this.deletionLiveObservations.set(entry, observation);
+  }
+
+  remove(id: string, observation?: SessionObservation, deletionPending = false): boolean {
     if (!this.canConfirm(observation)) return false;
     this.agentChats.observeClosed(id);
     this.forget(id);
+    if (!deletionPending) this.finishDeletion(id);
     return true;
   }
   private forget(id: string): void {
@@ -591,6 +799,8 @@ export class SessionList {
   dispose(): void {
     this.restorations.retire();
     this.agentChats.retire();
+    this.deletions.setState({}, true);
+    this.archiveBatch.setState(this.archiveBatch.getInitialState());
     this.unconfirmedMissing.clear();
     this.deletionListeners.clear();
     this.observations.clear();

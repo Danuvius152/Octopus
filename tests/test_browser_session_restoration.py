@@ -18,6 +18,86 @@ from server.session_manager import SessionManager
 from server.users import UserManager
 
 
+async def test_presence_sees_a_restored_session_omitted_by_both_list_reads(restoration, monkeypatch):
+    client, manager, users, user_id, sid = restoration
+    path = f"/api/sessions/{sid}"
+    generation = (await client.get(path + "/restoration")).json()["service_generation"]
+    identity = {"operation_id": uuid.uuid4().hex, "service_generation": generation}
+    archive_read, allow_archive_read = asyncio.Event(), asyncio.Event()
+    notice, allow_notice = asyncio.Event(), asyncio.Event()
+    read_archived = manager.db.load_archived_sessions
+
+    async def delayed_archive_read(*, user_id=None, session_id=None):
+        if session_id is None:
+            archive_read.set()
+            await allow_archive_read.wait()
+        return await read_archived(user_id=user_id, session_id=session_id)
+
+    async def delayed_notice(event):
+        if event["type"] == "session_unarchived" and event["session_id"] == sid:
+            notice.set()
+            await allow_notice.wait()
+
+    monkeypatch.setattr(manager.db, "load_archived_sessions", delayed_archive_read)
+    manager.on_broadcast("late-restore-notice", delayed_notice, user_id=user_id, required=True)
+    stranger = await users.create_user(username="restore-stranger", password="restore-stranger-password")
+    foreign = {"Authorization": f"Bearer {await users.issue_token(stranger['id'])}"}
+    listing = asyncio.create_task(client.get("/api/sessions", params={"include_archived": "true"}))
+    restoring = None
+    try:
+        await asyncio.wait_for(archive_read.wait(), 3)
+        restoring = asyncio.create_task(client.post(path + "/unarchive", json=identity))
+        await asyncio.wait_for(notice.wait(), 3)
+        allow_archive_read.set()
+        listed = await asyncio.wait_for(listing, 3)
+        assert all(row["id"] != sid for row in listed.json())
+        assert not restoring.done()
+        assert (await client.get(path + "/presence")).json() == {"archived": False, "deletion_pending": False}
+        params = {"archived_only": "true"}
+        live = manager.get_session(sid, user_id)
+        assert live is not None
+        monkeypatch.setattr(live, "_forking", True)
+        unknown = await client.delete("/api/sessions/unknown", params=params, headers=foreign)
+        for headers in (None, foreign):
+            attempted = await client.delete(path, params=params, headers=headers)
+            assert attempted.status_code == unknown.status_code == 404
+            assert attempted.json() == unknown.json()
+    finally:
+        allow_archive_read.set()
+        allow_notice.set()
+        await asyncio.gather(*(task for task in (listing, restoring) if task is not None))
+        manager.remove_broadcast("late-restore-notice")
+    assert (await client.get(path + "/info")).json()["archived"] is False
+
+
+async def test_registered_archive_delete_refuses_later_browser_restoration(restoration, monkeypatch):
+    client, manager, _users, _user_id, sid = restoration
+    path = f"/api/sessions/{sid}"
+    generation = (await client.get(path + "/restoration")).json()["service_generation"]
+    entered, release = asyncio.Event(), asyncio.Event()
+    delete_row = manager.db.delete_session
+
+    async def delayed_delete(session_id):
+        entered.set()
+        await release.wait()
+        await delete_row(session_id)
+
+    monkeypatch.setattr(manager.db, "delete_session", delayed_delete)
+    deletion = asyncio.create_task(client.delete(path, params={"archived_only": "true"}))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        presence = await client.get(path + "/presence")
+        assert presence.json() == {"archived": True, "deletion_pending": True}
+        attempt = await client.post(path + "/unarchive", json={
+            "operation_id": uuid.uuid4().hex, "service_generation": generation,
+        })
+        assert attempt.json()["status_code"] == 404
+        assert "being deleted" in attempt.json()["message"]
+    finally:
+        release.set()
+        assert (await asyncio.wait_for(deletion, 3)).status_code == 204
+
+
 @pytest.fixture
 async def restoration():
     db = Database(":memory:")

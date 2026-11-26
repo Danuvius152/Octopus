@@ -13,6 +13,7 @@ const auditDir = process.env.OCTOPUS_E2E_AUDIT_DIR;
 if (offline && !auditDir) throw new Error("Offline E2E requires a fresh runner audit directory");
 const backendApp = offline ? "tests.e2e_backend:app" : "server.main:app";
 const backendLoop = offline ? " --loop asyncio" : "";
+const leasedService = "cd .. && .venv/bin/python -m scripts.targeted_check serve-playwright";
 
 // Isolate the e2e backend's per-agent state (canonical memory/ + claude-home/)
 // under a temp dir so runs never litter the developer's real
@@ -118,7 +119,7 @@ export default defineConfig({
   webServer: [ ...(scope === "accounts" ? [] : [
     {
       command:
-        `cd .. && .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port 8765`,
+        `${leasedService} . -- .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port 8765`,
       port: 8765,
       reuseExistingServer: false,
       timeout: 10_000,
@@ -162,7 +163,7 @@ export default defineConfig({
       },
     },
     {
-      command: "bun dev --port 5174",
+      command: `${leasedService} web -- bun dev --port 5174`,
       port: 5174,
       reuseExistingServer: false,
       timeout: 10_000,
@@ -174,7 +175,7 @@ export default defineConfig({
   ]), ...(scope !== "accounts" ? [] : [
     {
       command:
-        `cd .. && .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port ` +
+        `${leasedService} . -- .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port ` +
         `${E2E_ACCOUNTS_PORT}`,
       port: E2E_ACCOUNTS_PORT,
       reuseExistingServer: false,
@@ -214,7 +215,7 @@ export default defineConfig({
       },
     },
     {
-      command: `bun dev --port ${E2E_ACCOUNTS_WEB_PORT}`,
+      command: `${leasedService} web -- bun dev --port ${E2E_ACCOUNTS_WEB_PORT}`,
       port: E2E_ACCOUNTS_WEB_PORT,
       reuseExistingServer: false,
       timeout: 10_000,

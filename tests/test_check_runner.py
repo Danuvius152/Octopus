@@ -3,6 +3,7 @@
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -52,7 +53,7 @@ def test_cli_release_runs_independent_offline_and_live_gates(monkeypatch, tmp_pa
     _, gates, output = execute.call_args.args
     assert [gate.id for gate in gates[-4:]] == ["supervisor", "offline-e2e", "codex-live-pytest", "codex-live-browser"]
     assert output == tmp_path
-    assert next(gate for gate in gates if gate.id == "pytest").pytest_context
+    assert next(gate for gate in gates if gate.id == "pytest").pytest_context == "required"
 
 
 def test_cli_release_targeted_load_probe_records_parallel_arguments(monkeypatch, tmp_path):
@@ -62,7 +63,7 @@ def test_cli_release_targeted_load_probe_records_parallel_arguments(monkeypatch,
         "--pytest-target", "tests/test_bg_tasks.py", "--pytest-target", "tests/test_check_hooks.py", "--pytest-workers", "8"])
     assert runner.main() == 0
     [focused] = execute.call_args.args[1]
-    assert focused.id == "pytest-focused" and focused.pytest_context
+    assert focused.id == "pytest-focused" and focused.pytest_context == "required"
     assert focused.argv[-5:] == ("-n", "8", "--dist=loadfile", "--max-worker-restart=0", "-q")
 
 
@@ -81,6 +82,7 @@ def test_cli_records_focused_pytest_as_a_separate_selection(monkeypatch, tmp_pat
     assert [gate.id for gate in gates[:-1]] == (["ruff"] if include_ruff else [])
     focused = gates[-1]
     assert focused.id == "pytest-focused" and focused.report == "pytest"
+    assert focused.pytest_context == "diagnostic"
     assert focused.argv[1:] == (node, module, "-m", "not real and not knowledge_eval and not wiki_perf", "-q")
     assert node in focused.scope and module in focused.scope
     assert output == destination
@@ -118,10 +120,15 @@ def test_edit(value):
     subprocess.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                     "commit", "--allow-empty", "-qm", "baseline"], cwd=root, check=True)
     subprocess.run(["git", "check-ignore", "-q", str(folder / edited)], cwd=root, check=True)
-    pytest_bin = root / ".venv/bin/pytest"
-    pytest_bin.parent.mkdir(parents=True)
-    pytest_bin.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m pytest "$@"\n')
-    pytest_bin.chmod(0o700)
+    python = root / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o700)
+    project_scripts = Path(runner.__file__).parent
+    scripts = root / "scripts"
+    scripts.mkdir()
+    for filename in ("check_runner.py", "pytest_diagnostics.py", "pytest_evidence.py", "python_environment.py"):
+        shutil.copy2(project_scripts / filename, scripts / filename)
     monkeypatch.setattr(runner, "__file__", str(root / "scripts/check_runner.py"))
     monkeypatch.setattr(runner, "environment_identity", lambda root: {})
     monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
@@ -296,9 +303,9 @@ def test_pytest_evidence_distinguishes_xdist_failure_from_serial_pass(tmp_path, 
     output = tmp_path / "execution"
     assert runner.run_checks(root, [
         runner.Gate("parallel", "parallel", (*base, "-n", "2", "--dist=loadfile", str(failing), str(other)),
-                    root, "two files", "pytest", pytest_context=True),
+                    root, "two files", "pytest", pytest_context="required"),
         runner.Gate("serial", "serial", (*base, "-n", "0", str(failing)),
-                    root, "one file", "pytest", pytest_context=True),
+                    root, "one file", "pytest", pytest_context="required"),
     ], output) == 1
     parallel, serial = json.loads((output / "results.json").read_text())["gates"]
     observed = parallel["execution"]
@@ -320,7 +327,7 @@ def test_pytest_evidence_identifies_the_crashed_worker(tmp_path, fixed_inputs):
     config.write_text("[pytest]\n")
     argv = (sys.executable, "-m", "pytest", "-c", str(config), "-q", "-n", "2", "--dist=loadfile",
             "--max-worker-restart=0", str(crashing), str(neighbor))
-    probe = runner.Gate("crash", "crash", argv, root, "two files", "pytest", pytest_context=True)
+    probe = runner.Gate("crash", "crash", argv, root, "two files", "pytest", pytest_context="required")
     output = tmp_path / "evidence"
     assert runner.run_checks(root, [probe], output) == 1
     [observed] = json.loads((output / "results.json").read_text())["gates"]
@@ -361,7 +368,7 @@ def pytest_collection_modifyitems(config, items):
     config.write_text("[pytest]\n")
     argv = (sys.executable, "-m", "pytest", "-c", str(config), "-q", "-n", "2", "--dist=loadfile",
             "--max-worker-restart=0", str(crashing))
-    probe = runner.Gate("crash", "crash", argv, root, "one file", "pytest", pytest_context=True)
+    probe = runner.Gate("crash", "crash", argv, root, "one file", "pytest", pytest_context="required")
     output = tmp_path / "evidence"
     assert runner.run_checks(root, [probe], output) == 1
     [observed] = json.loads((output / "results.json").read_text())["gates"]
@@ -381,12 +388,14 @@ def test_pytest_evidence_attributes_collection_errors_to_the_reporting_worker(tm
     config = tmp_path / "pytest.ini"
     config.write_text("[pytest]\n")
     argv = (sys.executable, "-m", "pytest", "-c", str(config), "-q", "-n", "2", "--dist=loadfile", str(source))
-    probe = runner.Gate("collect", "collect", argv, root, "one file", "pytest", pytest_context=True)
+    probe = runner.Gate("collect", "collect", argv, root, "one file", "pytest", pytest_context="required")
     output = tmp_path / "evidence"
     assert runner.run_checks(root, [probe], output) == 1
     [observed] = json.loads((output / "results.json").read_text())["gates"]
     [failure] = [item for item in observed["execution"]["failures"] if item["nodeid"].endswith(source.name)]
     assert failure["phase"] == "collection" and failure["worker"] == "gw0"
+    assert "RuntimeError: collection error" in failure["error"]
+    assert Path(failure["location"]["file"]).name == source.name
 
 
 def test_existing_evidence_is_never_overwritten_or_executed(tmp_path, fixed_inputs):
@@ -434,7 +443,8 @@ def test_native_report_counts_are_from_same_failed_execution(tmp_path, fixed_inp
         program = "import sys; from pathlib import Path; p=sys.argv[-1].split('=', 1)[1]; "
     else:
         native = json.dumps({"numTotalTests": 3, "numPassedTests": 1, "numFailedTests": 1, "numPendingTests": 1, "numTodoTests": 0})
-        program = "import sys; from pathlib import Path; p=sys.argv[-1].split('=', 1)[1]; "
+        program = ("import os, sys; from pathlib import Path; p=sys.argv[-1].split('=', 1)[1]; "
+                   "Path(os.environ['OCTOPUS_VITEST_EVIDENCE_DIR']).mkdir(); ")
     program += f"Path(p).write_text({native!r}); print('real execution'); sys.exit(9)"
     output = tmp_path / "evidence"
     assert runner.run_checks(tmp_path, [gate(tmp_path, "tests", program, report=kind)], output) == 1
@@ -442,6 +452,15 @@ def test_native_report_counts_are_from_same_failed_execution(tmp_path, fixed_inp
     assert row["returncode"] == 9 and row["counts"]["total"] == 3
     assert row["counts"]["failed"] == 1 and row["counts"]["skipped"] == 1
     assert row["status"] == "failed" and row["evidence_error"] is None
+    if kind == "vitest":
+        assert row["diagnostics"] == str(output / "tests-diagnostics")
+        assert (output / "tests-diagnostics").is_dir()
+
+
+def test_terminal_vitest_does_not_inherit_a_diagnostics_destination(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCTOPUS_VITEST_EVIDENCE_DIR", str(tmp_path / "unexpected"))
+    program = "import os; assert not os.environ.get('OCTOPUS_VITEST_EVIDENCE_DIR')"
+    assert runner.run_checks(tmp_path, [gate(tmp_path, "vitest", program, report="vitest")]) == 0
 
 
 @pytest.mark.parametrize("content", [None, "broken report"])
@@ -530,7 +549,7 @@ def test_release_focused_pytest_refuses_plugin_overrides(tmp_path, fixed_inputs,
     marker = tmp_path / "started"
     selection = runner.Gate("pytest-focused", "pytest", (
         sys.executable, "-c", f"open({str(marker)!r}, 'w').close()",
-    ), tmp_path, "test scope", "pytest", pytest_context=True)
+    ), tmp_path, "test scope", "pytest", pytest_context="required")
     output = tmp_path / "evidence"
     assert runner.run_checks(tmp_path, [selection], output) == 1
     [row] = json.loads((output / "results.json").read_text())["gates"]

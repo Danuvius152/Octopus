@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 
+import fileChange from "../../../tests/fixtures/codex-file-change-result.json";
 import { MessageBubble } from "./MessageBubble";
 import { useSessionStore } from "../stores/sessionStore";
 
@@ -17,6 +18,90 @@ afterEach(cleanup);
 
 const nativeRuntime = (item_id: string) => ({ request_id: "request", attempt_id: "attempt", native: {
   thread_id: "root", turn_id: "turn", root_thread_id: "root", root_turn_id: "turn", item_id } });
+
+const fileChangeResult = {
+  changes: [
+    { path: "a.py", diff: "+native patch", kind: "update", move_path: "moved.py" },
+    { path: "added.py", diff: "+added line", kind: "add" },
+    { path: "deleted.py", diff: "-deleted line", kind: "delete" },
+  ],
+  status: "completed",
+};
+
+it("puts paths and diffs first in a live native file change without a tool name", async () => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const sessionId = "live-patch";
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "tool_result", session_id: sessionId, seq: 1, tool_use_id: fileChange.item.id,
+    runtime_metadata: nativeRuntime(fileChange.item.id), tool_input: { native_item: fileChange.item },
+    output: JSON.stringify(fileChange), is_error: false });
+  const message = useSessionStore.getState().messages[sessionId][0];
+  expect(message.tool_name).toBeUndefined();
+  const view = render(<MessageBubble sessionId={sessionId} message={message} />);
+  expect(view.container.querySelector(".tool-preview")).toHaveTextContent('"path": "a.py", "diff": "+native patch"');
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  expect(view.container.querySelector(".tool-detail")?.textContent).toBe(JSON.stringify(fileChangeResult, null, 2));
+  expect(message.content).toBe(JSON.stringify(fileChange));
+});
+
+it("uses the same preview in live and saved results when the original item ID is large", async () => {
+  const { handleWsMessage } = await import("../hooks/useWebSocket");
+  const sessionId = "long-item-id";
+  const item = { ...fileChange.item, id: `patch-${"x".repeat(16 * 1024)}` };
+  const output = JSON.stringify({ ...fileChange, item });
+  const runtime_metadata = nativeRuntime(item.id);
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  handleWsMessage({ type: "tool_result", session_id: sessionId, seq: 1, tool_use_id: item.id,
+    runtime_metadata, native_item_type: "fileChange", output, is_error: false, body_state: "preview" });
+  const live = useSessionStore.getState().messages[sessionId][0];
+  const view = render(<MessageBubble sessionId={sessionId} message={live} />);
+  const preview = view.container.querySelector(".tool-preview")!.textContent;
+  expect(JSON.parse(preview!)).toEqual({ path: "a.py", diff: "+native patch" });
+
+  view.rerender(<MessageBubble sessionId="saved-long-item-id" message={{ ...live, tool_name: "fileChange" }} />);
+  expect(view.container.querySelector(".tool-preview")!.textContent).toBe(preview);
+
+  view.rerender(<MessageBubble sessionId={sessionId} message={{ ...live,
+    content: JSON.stringify({ ...fileChange, turnId: "different-turn", item }),
+  }} />);
+  expect(view.container.querySelector(".tool-preview")!.textContent).toContain('"turnId":"different-turn"');
+});
+
+it("keeps a readable diff beside a long absolute path in the collapsed file change", () => {
+  const path = `/home/user/${'workspace"\\segment/'.repeat(6)}file.py`;
+  const diff = "+native patch with a visible start".repeat(10);
+  const item = { ...fileChange.item, changes: [{ ...fileChange.item.changes[0], path, diff }] };
+  const view = render(<MessageBubble sessionId="long-patch" message={{ role: "tool", type: "tool_result",
+    runtime_metadata: nativeRuntime(item.id), tool_input: { native_item: item },
+    content: JSON.stringify({ ...fileChange, item }),
+  }} />);
+  const preview = view.container.querySelector(".tool-preview")!.textContent!;
+  expect(preview.length).toBeLessThanOrEqual(120);
+  expect(JSON.parse(preview)).toMatchObject({ path: expect.stringMatching(/^\/home\/user\/.+…$/),
+    diff: expect.stringMatching(/^\+native patch.+…$/) });
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  expect(JSON.parse(view.container.querySelector(".tool-detail")!.textContent!).changes[0]).toMatchObject({ path, diff });
+});
+
+it.each(["failed", "declined"])("shows %s from a saved file-change body with matching native identity", (status) => {
+  const content = JSON.stringify({ ...fileChange, item: { ...fileChange.item, status } });
+  const view = render(<MessageBubble sessionId="saved-patch" message={{ role: "tool", type: "tool_result",
+    tool_name: "fileChange", content, is_error: true, runtime_metadata: nativeRuntime(fileChange.item.id) }} />);
+  expect(view.getByText("Error")).toBeVisible();
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  expect(view.container.querySelector(".tool-detail")?.textContent).toBe(JSON.stringify({ ...fileChangeResult, status }, null, 2));
+});
+
+it.each([
+  { tool_input: { native_item: { id: fileChange.item.id, type: "mcpToolCall" } }, runtime_metadata: nativeRuntime(fileChange.item.id) },
+  { runtime_metadata: nativeRuntime(fileChange.item.id) },
+  { tool_name: "fileChange", runtime_metadata: nativeRuntime("different-item") },
+])("keeps the original result when its file-change JSON has no matching producer", (identity) => {
+  const content = JSON.stringify(fileChange);
+  const view = render(<MessageBubble sessionId="ordinary-result" message={{ role: "tool", type: "tool_result", content, ...identity }} />);
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  expect(view.container.querySelector(".tool-detail")?.textContent).toBe(content);
+});
 
 it.each(["completed", "failed", "declined"])("keeps the actual %s tool result without a native status caption", (status) => {
   const content = `Tool ${status}: actual output and reason`;

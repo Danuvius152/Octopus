@@ -30,6 +30,7 @@ from ..models import (
     SessionDefaultsSource,
     SessionDetail,
     SessionInfo,
+    SessionPresence,
     SessionRestoreRequest,
     SessionRestoreStatus,
 )
@@ -1146,8 +1147,19 @@ class LifecycleMixin(SessionManagerBase):
         context = receive_return(owned, session_id=session.id, user_id=session.user_id, work_id=binding.work_id)
         return (session, context) if context is not None else None
 
+    async def session_presence(self, session_id: str, user_id: str) -> SessionPresence:
+        binding = await self.input_database().get_session_binding(session_id)
+        # A post-commit hook can fail after the row disappears. Read the
+        # registration after SQLite so absence cannot hide such an operation.
+        deletion = self._archived_deletions.get(session_id)
+        return SessionPresence(
+            archived=binding["archived"] if binding is not None and binding["user_id"] == user_id else None,
+            deletion_pending=deletion is not None and deletion[0] == user_id,
+        )
+
     async def delete_session(
         self, session_id: str, *, only_empty_application: str | None = None, expected_session: Session | None = None,
+        archived_user_id: str | None = None,
     ) -> bool:
         session = self.sessions.get(session_id)
         if only_empty_application is not None:
@@ -1159,7 +1171,7 @@ class LifecycleMixin(SessionManagerBase):
             )
             self._own_task(conditional)
             return await asyncio.shield(conditional)
-        if session is not None and (session._archive_reservation is not None or session._forking):
+        if archived_user_id is None and session is not None and (session._archive_reservation is not None or session._forking):
             raise self._session_deletion_busy()
         async with self._session_lifecycle_lock(session_id):
             session = self.sessions.get(session_id)
@@ -1167,6 +1179,8 @@ class LifecycleMixin(SessionManagerBase):
                 return False
             audience: str | None
             if session is not None:
+                if archived_user_id is not None:
+                    return False
                 if session._forking or session._archive_reservation is not None:
                     raise self._session_deletion_busy()
                 audience, task = session.user_id, session._deletion_task
@@ -1177,6 +1191,8 @@ class LifecycleMixin(SessionManagerBase):
                 if binding is None or not binding["archived"]:
                     return False
                 audience, task = binding["user_id"], None
+            if archived_user_id is not None and audience != archived_user_id:
+                return False
             if task is None or task.done():
                 if audience is None:
                     raise ValueError("The session has no attachment owner")

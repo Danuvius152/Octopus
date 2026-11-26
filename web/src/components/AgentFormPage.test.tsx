@@ -1425,11 +1425,12 @@ describe("AgentFormPage", () => {
     expect(writes).toHaveLength(1);
   });
 
-  it.each(["list first", "restore event first"] as const)("preserves the 201 ID through reconnect and inferred removal: %s", async (order) => {
+  it.each(["list first", "restore event first"] as const)("preserves the 201 ID and selection through a reconnect list gap: %s", async (order) => {
     vi.useFakeTimers();
     Socket.reset();
     vi.stubGlobal("WebSocket", Socket);
-    const { reads, writes } = controlChatHttp();
+    const original = session({ id: "original-created-chat" });
+    const { reads, writes, presences } = controlChatHttp(original.id);
     mount(null, [agent()], "all");
     renderHook(() => useWebSocket());
     const first = Socket.instances[0];
@@ -1438,26 +1439,29 @@ describe("AgentFormPage", () => {
     await clickChat();
     const second = await reconnectSocket(first);
     await act(async () => reads[1].reply.resolve(json([])));
-    const original = session({ id: "original-created-chat" });
     act(() => {
-      // A known selection can be absent from both lists. It exercises the
-      // inferred removal while the restore broadcast is still outstanding.
+      // The restore broadcast has yet to fill the gap in the list.
       showSession(original.id, original.agent_id);
       openAllAgents();
     });
     await act(async () => writes[0].reply.resolve(json(original, 201)));
     expect(reads.map(({ archived }) => archived)).toEqual([false, false, true]);
     await act(async () => reads[2].reply.resolve(json([])));
-    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    expect(presences.map(({ id }) => id)).toEqual([original.id]);
+    expect(useSessionStore.getState().activeSessionId).toBe(original.id);
+    await act(async () => presences[0].reply.resolve(json({ archived: false, deletion_pending: false })));
+    expect(useSessionStore.getState().activeSessionId).toBe(original.id);
     expect(useSessionStore.getState().sessions).toEqual([]);
 
     await clickChat();
     await clickChat();
     expect(writes).toHaveLength(1);
+    expect(useSessionStore.getState().mainView).toBe("agent-form");
     expect(reads.map(({ archived }) => archived)).toEqual([false, false, true, true]);
     const restore = { type: "session_unarchived", session_id: original.id, session: original };
     if (order === "list first") await act(async () => reads[3].reply.resolve(json([original])));
     else await act(async () => sendSocket(second, restore));
+    expect(useSessionStore.getState().mainView).toBe("chat");
     expect(useSessionStore.getState().activeSessionId).toBe(original.id);
     expect(writes).toHaveLength(1);
     if (order === "list first") await act(async () => sendSocket(second, restore));
@@ -1465,6 +1469,8 @@ describe("AgentFormPage", () => {
       await act(async () => reads[3].reply.resolve(json([original])));
       await act(async () => reads[4].reply.resolve(json([original])));
     }
+    expect(useSessionStore.getState().sessions.map(({ id }) => id)).toEqual([original.id]);
+    expect(writes).toHaveLength(1);
   });
 
   it("waits for current list evidence when a late 201 matches a row retained from the old socket", async () => {
@@ -1503,7 +1509,8 @@ describe("AgentFormPage", () => {
     vi.useFakeTimers();
     Socket.reset();
     vi.stubGlobal("WebSocket", Socket);
-    const { reads, writes } = controlChatHttp();
+    const original = session({ id: "interim-list-chat" });
+    const { reads, writes, presences } = controlChatHttp(original.id);
     mount(null, [agent()], "all");
     renderHook(() => useWebSocket());
     const first = Socket.instances[0];
@@ -1511,7 +1518,6 @@ describe("AgentFormPage", () => {
     await act(async () => reads[0].reply.resolve(json([])));
     await clickChat();
     const second = await reconnectSocket(first);
-    const original = session({ id: "interim-list-chat" });
     await act(async () => writes[0].reply.resolve(json(original, 201)));
     expect(reads.map(({ archived }) => archived)).toEqual([false, false]);
     await act(async () => reads[1].reply.resolve(json([original])));
@@ -1523,9 +1529,12 @@ describe("AgentFormPage", () => {
     // The inclusive response misses the session because it was restored
     // between the live and archived reads. Its event has not arrived yet.
     await act(async () => reads[2].reply.resolve(json([])));
-    expect(useSessionStore.getState().sessions).toEqual([]);
+    expect(presences.map(({ id }) => id)).toEqual([original.id]);
+    expect(useSessionStore.getState().sessions).toEqual([original]);
+    await act(async () => presences[0].reply.resolve(json({ archived: false, deletion_pending: false })));
     await clickChat();
     expect(writes).toHaveLength(1);
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
     expect(interimNavigation).toBeNull();
     expect(reads.map(({ archived }) => archived)).toEqual([false, false, true, true]);
     await act(async () => reads[3].reply.resolve(json([original])));
@@ -1678,16 +1687,19 @@ describe("AgentFormPage", () => {
     expect(useSessionStore.getState().activeSessionId).toBe("replacement");
   });
 
-  it("preserves a received archive row for a late 201 even after a later snapshot removes the row", async () => {
-    const { reads, writes } = controlChatHttp();
-    mount(null, [agent()], "all");
+  it("does not reopen a late 201 after an observed archive and confirmed deletion", async () => {
     const original = session({ id: "archived-before-receipt" });
+    const { reads, writes, presences } = controlChatHttp(original.id);
+    mount(null, [agent()], "all");
     await clickChat();
     await act(async () => handleWsMessage({ type: "session_archived", old_session_id: "other-1", new_session_id: null }));
     await act(async () => reads[0].reply.resolve(json([{ ...original, archived: true }])));
     expect(useSessionStore.getState().archivedSessions.map(({ id }) => id)).toContain(original.id);
     await act(async () => handleWsMessage({ type: "session_archived", old_session_id: "other-2", new_session_id: null }));
     await act(async () => reads[1].reply.resolve(json([])));
+    expect(useSessionStore.getState().archivedSessions.map(({ id }) => id)).toContain(original.id);
+    expect(presences.map(({ id }) => id)).toEqual([original.id]);
+    await act(async () => presences[0].reply.resolve(json({ archived: null, deletion_pending: false })));
     expect(useSessionStore.getState().archivedSessions).toEqual([]);
     await act(async () => writes[0].reply.resolve(json(original, 201)));
     expect(useSessionStore.getState().sessions).toEqual([]);
@@ -1820,9 +1832,10 @@ function emptyRead(url: unknown): Response {
   return json(/\/api\/agents\/[^/]+\/connectors$/.test(String(url)) ? { installation_ids: [] } : []);
 }
 
-function controlChatHttp() {
+function controlChatHttp(presenceId?: string) {
   const writes: { agentId: string; body: Record<string, unknown>; reply: ReturnType<typeof deferred<Response>> }[] = [];
   const reads: { archived: boolean; reply: ReturnType<typeof deferred<Response>> }[] = [];
+  const presences: { id: string; reply: ReturnType<typeof deferred<Response>> }[] = [];
   fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
     const address = new URL(String(url), window.location.origin);
     const agentId = /^\/api\/agents\/([^/]+)\/sessions$/.exec(address.pathname)?.[1];
@@ -1836,12 +1849,17 @@ function controlChatHttp() {
       reads.push({ archived: address.searchParams.has("include_archived"), reply });
       return reply.promise;
     }
+    if (presenceId && address.pathname === `/api/sessions/${encodeURIComponent(presenceId)}/presence`) {
+      const reply = deferred<Response>();
+      presences.push({ id: presenceId, reply });
+      return reply.promise;
+    }
     if (address.pathname === "/api/agents" && !address.searchParams.has("include_archived")) {
       return json(useSessionStore.getState().agents);
     }
     return emptyRead(url);
   });
-  return { reads, writes };
+  return { reads, writes, presences };
 }
 
 async function clickChat(name?: string) {

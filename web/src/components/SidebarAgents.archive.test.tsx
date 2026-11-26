@@ -18,7 +18,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); useSessionStore.getState().setToken(""); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-function mockServer(post: () => Promise<Response>, archived = false, confirm?: () => Promise<Response>) {
+function mockServer(post: () => Promise<Response>, archived = false, confirm?: () => Promise<Response>, presence?: () => Response | Promise<Response>) {
   let posted = false;
   const fetcher = vi.fn(async (url: RequestInfo | URL) => {
     const parsed = new URL(String(url), window.location.origin), path = parsed.pathname;
@@ -28,6 +28,7 @@ function mockServer(post: () => Promise<Response>, archived = false, confirm?: (
       Response.json([{ ...session, archived: posted && archived }]);
     if (path.endsWith("/api/sessions/s1")) return Response.json({ ...session, archived, messages: [],
       dispatch_state: archived ? null : dispatch, active_attempt: null, pending_questions: [], subagents: [] });
+    if (path.endsWith("/presence") && presence) return presence();
     if (path.endsWith("/api/backends")) return Response.json(backendCatalogFixture(["codex"]));
     return Response.json([]);
   });
@@ -174,6 +175,45 @@ it("confirms a successful 204 silently after a preceding archive event", async (
   expect(useSessionStore.getState().archivedSessions).toEqual([{ ...session, archived: true }]);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(fetcher.mock.calls.filter(([url]) => String(url).includes("/archive?"))).toHaveLength(1);
+});
+
+it("keeps the selection when a confirmed archive was restored between list reads", async () => {
+  const reply = deferred<Response>(), list = deferred<Response>();
+  const presence = vi.fn(() => Response.json({ archived: false, deletion_pending: false }));
+  const confirm = vi.fn(() => list.promise);
+  mockServer(() => reply.promise, true, confirm, presence);
+  await archive();
+  await act(async () => {
+    sessionList.archive(session.id, undefined, null);
+    reply.resolve(new Response(null, { status: 204 }));
+  });
+  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
+  await act(async () => list.resolve(Response.json([])));
+  expect(presence).toHaveBeenCalledOnce();
+  expect(useSessionStore.getState().activeSessionId).toBe(session.id);
+  expect(useSessionStore.getState().archivedSessions.map(row => row.id)).toEqual([session.id]);
+  await act(async () => sessionList.restored(session));
+  expect(useSessionStore.getState().activeSessionId).toBe(session.id);
+  expect(useSessionStore.getState().sessions).toEqual([session]);
+});
+
+it("confirms a listed archive without waiting on an unrelated presence check", async () => {
+  const reply = deferred<Response>(), list = deferred<Response>(), missing = deferred<Response>();
+  const presence = vi.fn(() => missing.promise);
+  const confirm = vi.fn(() => list.promise);
+  mockServer(() => reply.promise, true, confirm, presence);
+  await archive();
+  await act(async () => {
+    sessionList.row({ ...session, id: "other", name: "Other" });
+    sessionList.archive(session.id, undefined, null);
+    reply.resolve(new Response(null, { status: 204 }));
+  });
+  await waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+  await act(async () => { list.resolve(Response.json([{ ...session, archived: true }])); });
+  expect(presence).toHaveBeenCalledOnce();
+  expect(useSessionStore.getState().activeSessionId).toBeNull();
+  expect(useSessionStore.getState().sessionRead.loading).toBe(true);
+  await act(async () => { missing.resolve(new Response(null, { status: 503 })); });
 });
 
 it("does not change another account after a late successful response", async () => {

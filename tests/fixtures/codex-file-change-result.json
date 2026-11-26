@@ -1,0 +1,14 @@
+{
+  "threadId": "root",
+  "turnId": "turn",
+  "item": {
+    "id": "patch",
+    "type": "fileChange",
+    "changes": [
+      { "path": "a.py", "kind": { "type": "update", "move_path": "moved.py" }, "diff": "+native patch" },
+      { "path": "added.py", "kind": { "type": "add" }, "diff": "+added line" },
+      { "path": "deleted.py", "kind": { "type": "delete" }, "diff": "-deleted line" }
+    ],
+    "status": "completed"
+  }
+}

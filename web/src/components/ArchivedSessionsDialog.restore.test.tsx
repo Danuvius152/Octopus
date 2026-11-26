@@ -20,6 +20,7 @@ let states: Map<string, Proof>;
 let queries: { identity: Identity; bearer: string }[], seals: Identity[];
 let lists: (() => Promise<Response>) | undefined;
 let query: ((identity: Identity) => Promise<Response>) | undefined;
+let presence: ((id: string) => Response | Promise<Response>) | undefined;
 let heldLists: ReturnType<typeof deferred<Response>>[];
 function Page() {
   const [open, setOpen] = useState(true);
@@ -32,6 +33,7 @@ beforeEach(() => {
   useSessionStore.setState({ identity: { user_id: user, label: "Restorer", is_admin: false }, dispatchGeneration: "service" });
   sessionStorage.clear();
   rows = [archived("A"), archived("B")]; writes = []; states = new Map(); queries = []; seals = []; lists = undefined; query = undefined; heldLists = [];
+  presence = undefined;
   vi.stubGlobal("fetch", vi.fn(async (url: unknown, init?: RequestInit) => {
     const target = new URL(String(url)), path = target.pathname;
     const id = path.split("/")[3];
@@ -57,6 +59,7 @@ beforeEach(() => {
       return result.promise;
     }
     if (path === "/api/sessions") return lists ? lists() : Response.json(rows);
+    if (path.endsWith("/presence")) return presence?.(id) ?? Response.json({ archived: rows.find(row => row.id === id)?.archived ?? null, deletion_pending: false });
     if (target.searchParams.get("view") === "browser") return Response.json({ ...rows.find(row => row.id === id), messages: [],
       active_attempt: null, dispatch_state: { generation: "service", revision: 0, paused: false, active_request_id: null, active_operation: null, items: [] } });
     return Response.json([]);
@@ -68,6 +71,7 @@ afterEach(async () => {
   await act(async () => {
     for (const response of [...writes.map(write => write.result), ...heldLists]) response.reject(new Error("Test request retired"));
   });
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 const row = (id: string) => within(screen.getByText(`Conversation ${id}`).closest(".archived-session-row")! as HTMLElement);
@@ -381,6 +385,51 @@ it("retries only confirmation after the finished proof's list read fails", async
   expect(writes).toHaveLength(1);
   expect(queries[0].identity).toEqual(writes[0].identity);
   expect(useSessionStore.getState().activeSessionId).toBe("A");
+});
+
+it("opens a confirmed restoration when another row's presence read fails", async () => {
+  render(<Page />); await click("A");
+  lists = async () => Response.json(rows.filter(item => item.id !== "B"));
+  presence = vi.fn(() => new Response(null, { status: 503 }));
+  await finish(0);
+  expect(presence).toHaveBeenCalledWith("B");
+  expect(useSessionStore.getState().archivedSessions).toEqual([archived("B")]);
+  expect(useSessionStore.getState().sessionRead.error).toMatch(/Could not confirm missing sessions/);
+  expect(useSessionStore.getState().activeSessionId).toBe("A");
+  expect(sessionStorage.getItem(`octopus.session-restore.v1:${JSON.stringify([user, "A"])}`)).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it.each([false, true])("opens the restored row before an unrelated presence times out, with an unrelated update=%s", async (update) => {
+  render(<Page />); await click("A");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const pending = deferred<Response>();
+  heldLists.push(pending);
+  lists = async () => Response.json(rows.filter(item => item.id !== "B"));
+  const other = { ...archived("B"), ...(update && { name: "Updated conversation B" }) };
+  presence = vi.fn(() => {
+    if (update) sessions.row(other);
+    return pending.promise;
+  });
+  const messages = [{ role: "user", type: "text", content: "Saved B history" }] as const;
+  const draft = {
+    sessionId: "B", accountGeneration: useSessionStore.getState().accountGeneration,
+    question: { question_id: "q-b", questions: [{ question: "An unanswered question" }] },
+    answers: [{ text: "Keep this draft" }],
+  };
+  act(() => useSessionStore.setState({ messages: { B: [...messages] }, questionDrafts: { b: draft } }));
+  await finish(0);
+  expect(presence).toHaveBeenCalledWith("B");
+  expect(useSessionStore.getState().activeSessionId).toBe("A");
+  expect(sessionStorage.getItem(`octopus.session-restore.v1:${JSON.stringify([user, "A"])}`)).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(useSessionStore.getState()).toMatchObject({
+    activeSessionId: "A", archivedSessions: [other], messages: { B: messages }, questionDrafts: { b: draft },
+    sessionRead: { loaded: true, stale: true, error: expect.stringMatching(/confirm missing sessions/) },
+  });
+  await act(async () => { pending.resolve(Response.json({ archived: null, deletion_pending: false })); });
+  expect(useSessionStore.getState().questionDrafts.b).toEqual(draft);
 });
 
 it("does not send a restore whose identity cannot be saved across reload", async () => {

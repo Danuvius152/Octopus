@@ -5,7 +5,14 @@ from enum import Enum
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 from .config import settings
 from .context_models import ContextState
@@ -26,6 +33,11 @@ class SessionArchiveResult(BaseModel):
     new_session_id: str | None
     failure_stage: SessionArchiveFailureStage
     message: str
+
+
+class SessionPresence(BaseModel):
+    archived: bool | None
+    deletion_pending: bool
 
 
 class SessionRestoreRequest(BaseModel):
@@ -313,6 +325,15 @@ class BrowserMessageContent(MessageContent):
     body_state: Literal["inline", "preview"]
     detail_ref: str | None = None
     identity_unavailable: bool = False
+    native_item_type: Literal["fileChange"] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler):
+        # Keep the model's field schema and omit only the absent browser hint.
+        result = handler(self)
+        if self.native_item_type is None:
+            result.pop("native_item_type", None)
+        return result
 
 
 class PendingQuestionInfo(BaseModel):

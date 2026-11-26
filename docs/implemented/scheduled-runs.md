@@ -191,7 +191,10 @@ requested external effect.
 
 `last_run_session_id` links the schedule row to its latest session. Temporary
 runs remain readable through that link after automatic archival; origin runs
-link to the continuing origin session.
+link to the continuing origin session. Permanently deleting an archived run
+leaves Last run pointing to the same ID until a later run updates it. The
+deleted session's detail request returns `404`. The schedule definition keeps
+its enabled or paused setting.
 
 <a id="5-what-this-defers"></a>
 ## Current limits

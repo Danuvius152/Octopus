@@ -39,6 +39,9 @@ function text(value: unknown): string | undefined {
 }
 
 export function normalizeMessage(message: MessageInput): Message {
+  // A result with text already has the UI shape. Preserve its identity so the
+  // card and the viewport can share its preview without reparsing the body.
+  if (message.type === "tool_result" && typeof message.content === "string") return message as Message;
   const data = record(message.content);
   if (message.type === "result") {
     const valid = data.kind === "outcome" && (data.operation === undefined || data.operation === "message" || data.operation === "compact") &&

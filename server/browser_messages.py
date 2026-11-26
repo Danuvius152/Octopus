@@ -177,6 +177,13 @@ def message_view(session_id: str, message: MessageContent) -> BrowserMessageCont
                 compared["tool_input"].pop(derived, None)
     preview = compared != source
     values.update(body_state="preview" if preview else "inline", detail_ref=None)
+    native = message.runtime_metadata.native if message.runtime_metadata else None
+    item = message.tool_input.get("native_item") if message.tool_input else None
+    if (message.type == "tool_result" and native and native.item_id and isinstance(item, dict)
+            and item.get("type") == "fileChange" and item.get("id") == native.item_id):
+        # Preserve the verified producer type independently of the display
+        # budget for tool_input. The original ID stays in runtime_metadata.
+        values["native_item_type"] = "fileChange"
     if preview and message.seq is not None:
         values["detail_ref"] = f"/api/sessions/{quote(session_id, safe='')}/messages/{message.seq}"
     view = BrowserMessageContent.model_validate(values)
@@ -316,6 +323,11 @@ def _event_view(event: dict[str, Any]) -> dict[str, Any]:
     ))
     if view.identity_unavailable:
         return unavailable_event(event, view.detail_ref)
-    return {**event, body_field: view.content, input_field: view.tool_input,
+    projected = {**event, body_field: view.content, input_field: view.tool_input,
         "runtime_metadata": view.runtime_metadata.model_dump() if view.runtime_metadata else None,
         "body_state": view.body_state, "detail_ref": view.detail_ref, "identity_unavailable": view.identity_unavailable}
+    if view.native_item_type is None:
+        projected.pop("native_item_type", None)
+    else:
+        projected["native_item_type"] = view.native_item_type
+    return projected

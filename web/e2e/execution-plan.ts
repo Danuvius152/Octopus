@@ -1,6 +1,9 @@
 import { spawnSync } from "node:child_process";
+import { closeSync, existsSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 export interface Partition { project: string; scope: "main" | "accounts"; args: string[] }
+interface CollectionEvidence { directory: string; reporter: string }
 interface Selection { project: string; file: string }
 interface Suite {
   specs?: { file: string; tests: { projectName: string }[] }[];
@@ -45,18 +48,44 @@ export function uiModeArgs(args: string[]): { collectionArgs: string[]; interact
 /** Ask Playwright to resolve its own single/multi/wildcard project selection
  * and file/grep filters. Unknown projects and empty selections still fail in
  * Playwright. No second project selector is added to this authoritative read. */
-export function collectExecutionPlan(args: string[], environment: NodeJS.ProcessEnv): Partition[] {
+export function collectExecutionPlan(args: string[], environment: NodeJS.ProcessEnv, evidence?: CollectionEvidence): Partition[] {
   const { collectionArgs } = uiModeArgs(args);
-  const child = spawnSync("./node_modules/.bin/playwright", ["test", ...playwrightArgs(collectionArgs, ["--list", "--reporter=json"])], {
-    encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
-    env: { ...environment, OCTOPUS_E2E_SCOPE: undefined, OCTOPUS_E2E_UI_PROJECT: undefined,
-      // Internal collection must not replace the caller's execution report.
-      PLAYWRIGHT_JSON_OUTPUT_FILE: undefined, PLAYWRIGHT_JSON_OUTPUT_DIR: undefined, PLAYWRIGHT_JSON_OUTPUT_NAME: undefined },
-  });
+  const evidenceDir = evidence?.directory;
+  const command = ["./node_modules/.bin/playwright", "test", ...playwrightArgs(collectionArgs, ["--list", "--reporter=json"])];
+  const nativeReport = evidenceDir ? path.join(evidenceDir, "playwright.json") : undefined;
+  const stdout = evidenceDir ? path.join(evidenceDir, "stdout.log") : undefined;
+  const stderr = evidenceDir ? path.join(evidenceDir, "stderr.log") : undefined;
+  const logs: number[] = [];
+  let child;
+  try {
+    if (evidenceDir) {
+      writeFileSync(path.join(evidenceDir, "argv.json"), JSON.stringify(command) + "\n", { mode: 0o600, flush: true });
+    }
+    // Also retain CLI/config errors emitted before Playwright loads reporters.
+    if (stdout && stderr) {
+      logs.push(openSync(stdout, "wx", 0o600));
+      logs.push(openSync(stderr, "wx", 0o600));
+    }
+    child = spawnSync(command[0], command.slice(1), {
+      encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+      stdio: logs.length ? ["ignore", ...logs] : undefined,
+      env: { ...environment, OCTOPUS_E2E_SCOPE: undefined, OCTOPUS_E2E_UI_PROJECT: undefined,
+        OCTOPUS_E2E_EVENTS_FILE: evidenceDir && path.join(evidenceDir, "events.jsonl"),
+        OCTOPUS_E2E_EVIDENCE_PHASE: evidenceDir && "collection",
+        ...(evidence && { PW_TEST_REPORTER: evidence.reporter }),
+        // Internal collection must not replace the caller's execution report.
+        PLAYWRIGHT_JSON_OUTPUT_FILE: nativeReport, PLAYWRIGHT_JSON_OUTPUT_DIR: undefined, PLAYWRIGHT_JSON_OUTPUT_NAME: undefined },
+    });
+  } finally {
+    for (const descriptor of logs) closeSync(descriptor);
+  }
   if (child.error) throw child.error;
-  const report = child.stdout ? JSON.parse(child.stdout) as { suites: Suite[]; errors: { message: string }[] } : undefined;
+  const reportText = nativeReport ? (existsSync(nativeReport) ? readFileSync(nativeReport, "utf8") : "") : child.stdout;
+  const report = reportText ? JSON.parse(reportText) as { suites: Suite[]; errors: { message?: string; value?: string }[] } : undefined;
   if (child.status !== 0 || !report || report.errors.length) {
-    throw new Error(report?.errors.map((error) => error.message).join("\n") || child.stderr || "Playwright collection failed");
+    const errors = report?.errors.map((error) => error.message ?? error.value).filter(Boolean).join("\n");
+    throw new Error(errors || (stderr ? readFileSync(stderr, "utf8") : child.stderr)
+      || (stdout && readFileSync(stdout, "utf8")) || "Playwright collection failed");
   }
   return executionPlan(args, collectedTests(report.suites));
 }

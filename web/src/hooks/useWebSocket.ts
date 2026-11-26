@@ -222,6 +222,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
         role: "tool",
         type: "tool_result",
         content: data.output,
+        native_item_type: data.native_item_type,
         tool_input: data.tool_input ?? undefined,
         tool_use_id: data.tool_use_id ?? undefined,
         is_error: data.is_error,

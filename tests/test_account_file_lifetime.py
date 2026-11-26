@@ -15,7 +15,8 @@ from tests.test_service_layout import account_installation as account_installati
 
 
 @pytest.mark.parametrize("resource", ["attachment", "spill"])
-async def test_native_fork_original_file_pointers_survive_parent_deletion(managed_files, resource):
+@pytest.mark.parametrize("archived", [False, True])
+async def test_native_fork_original_file_pointers_survive_parent_deletion(managed_files, resource, archived):
     _config, account, _profile, parent, client, manager = managed_files
     uploaded = await client.post(f"/api/sessions/{parent.id}/attachments",
                                  files={"file": ("retained.txt", b"Native attachment bytes", "text/plain")})
@@ -55,7 +56,13 @@ async def test_native_fork_original_file_pointers_survive_parent_deletion(manage
     assert copied_records[1]["payload"]["text"] == native_text
     expected = attachment.read_bytes() if resource == "attachment" else original_prompt.encode("utf-8")
     source = attachment if resource == "attachment" else spills[0]
-    assert await manager.delete_session(parent.id)
+    work_file = Path(parent.working_dir) / "kept-after-delete.txt"
+    work_file.write_text("Keep the original working directory")
+    path = f"/api/sessions/{parent.id}"
+    if archived:
+        assert (await client.post(path + "/archive", params={"replace": "false"})).status_code == 204
+    assert (await client.delete(path, params={"archived_only": str(archived).lower()})).status_code == 204
+    assert work_file.read_text() == "Keep the original working directory"
     assert await manager.db.get_session_owner(parent.id) is None
     assert copied[0].read_bytes() == before
     assert source.read_bytes() == expected

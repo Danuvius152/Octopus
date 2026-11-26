@@ -123,6 +123,7 @@ function server() {
   let holdList = false;
   const finishLists: (() => void)[] = [];
   let rows: SessionInfo[] | undefined;
+  let presence: ((id: string) => Promise<Response>) | undefined;
   let listFailure = false;
   let heldDetail: string | undefined;
   let finishDetail: (() => void) | undefined;
@@ -144,6 +145,12 @@ function server() {
       const snapshot = rows ?? (saved ? [b, result, { ...a, archived: true }] : [a, b]);
       return Response.json(url.searchParams.has("include_archived") ? snapshot : snapshot.filter((row) => !row.archived));
     }
+    const id = url.pathname.match(/^\/api\/sessions\/([^/]+)\/presence$/)?.[1];
+    if (id) {
+      if (presence) return presence(id);
+      const snapshot = rows ?? (saved ? [b, result, { ...a, archived: true }] : [a, b]);
+      return Response.json({ archived: snapshot.find(row => row.id === id)?.archived ?? null, deletion_pending: false });
+    }
     const info = rows?.find((row) => url.pathname === `/api/sessions/${row.id}`) ??
       (url.pathname.includes("/child") ? result : url.pathname.includes("/b") ? b : a);
     if (url.pathname === `/api/sessions/${heldDetail}`) await new Promise<void>((resolve) => { finishDetail = resolve; });
@@ -154,6 +161,7 @@ function server() {
   return {
     fetcher,
     setRows: (next: SessionInfo[]) => { rows = next; },
+    setPresence: (read: (id: string) => Promise<Response>) => { presence = read; },
     commit: () => { saved = true; },
     failList: (fail: boolean) => { listFailure = fail; },
     complete: async (response?: Response) => { saved = true; await act(async () => finish(response ?? Response.json(result))); },
@@ -1167,6 +1175,24 @@ it("confirms and opens a known successor through normal selection", async () => 
   await waitFor(() => expect(useSessionStore.getState().messages.child?.[0].content).toBe("Result original message"));
   expect(api.fetcher.mock.calls.some(([url]) => new URL(url).searchParams.get("include_archived") === "true")).toBe(true);
   expect(api.fetcher.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
+
+it("opens a listed successor while an unrelated presence check is still pending", async () => {
+  const api = server();
+  const archived = { ...a, archived: true };
+  api.setRows([child, archived]);
+  const reply = deferred<Response>();
+  const presence = vi.fn(() => reply.promise);
+  api.setPresence(presence);
+  useSessionStore.setState({ sessions: [child, b], archivedSessions: [archived], sessionSuccessors: { a: child.id } });
+  mount();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open successor" })); });
+  expect(presence).toHaveBeenCalledWith(b.id);
+  expect(useSessionStore.getState().activeSessionId).toBe(child.id);
+  expect(useSessionStore.getState().sessionRead.loading).toBe(true);
+  expect(useSessionStore.getState().sessions.map(row => row.id)).toContain(b.id);
+  await act(async () => { reply.resolve(new Response(null, { status: 503 })); });
+  expect(useSessionStore.getState().activeSessionId).toBe(child.id);
 });
 
 it.each((["archive", "rewind"] as const).flatMap((mode) =>

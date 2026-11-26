@@ -63,6 +63,8 @@ pre-commit:
         - "web/*.{ts,js,json}"
         - "web/release-entry-assets.mjs"
         - "web/bun.lock"
+        - "web/patches/*.patch"
+        - "tests/fixtures/codex-file-change-result.json"
         - "tests/fixtures/wiki-command-cases.json"
         - "server/app_agent_client.js"
         - "lefthook.yml"

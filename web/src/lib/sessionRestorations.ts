@@ -135,7 +135,7 @@ export class SessionRestorations {
     // A list that started before the closing proof cannot settle this POST.
     const { observation, finish } = this.list.observe();
     try {
-      let reading = this.list.refreshAfterRestoration();
+      let reading = this.list.refreshAfterRestoration(record.sessionId, true);
       let adoptedInitialGeneration = false;
       while (this.current(record, observer)) {
         const result = await reading;
@@ -143,22 +143,25 @@ export class SessionRestorations {
         const firstGenerationCurrent = this.list.initialGenerationCurrent(observation);
         if (result.state === "obsolete" && !adoptedInitialGeneration && firstGenerationCurrent) {
           adoptedInitialGeneration = true;
-          reading = this.list.refresh(true);
+          reading = this.list.refreshAfterRestoration(record.sessionId);
           continue;
         }
         // A shared read may have settled as pending before the scope retired.
         // Recheck the adopted scope before either retrying or using its result.
         const scopeCurrent = adoptedInitialGeneration ? firstGenerationCurrent : this.list.current(observation);
-        if (!scopeCurrent || result.state === "obsolete" || result.state === "failed") {
+        if (!scopeCurrent || result.state === "obsolete") {
           throw new Error("Could not synchronize restored sessions. Retry confirmation.");
         }
         const state = useSessionStore.getState();
-        if (result.state === "pending" || state.sessionRead.stale) {
-          reading = this.list.refresh(true); continue;
+        const membership = this.list.membershipFromRead(result, record.sessionId);
+        if (this.list.needsFollowup(result)) {
+          reading = this.list.refreshAfterRestoration(record.sessionId); continue;
         }
-        const session = state.sessions.find(row => row.id === record.sessionId) ?? null;
-        // Inclusive absence is processed through SessionList's deletion owner.
-        if (!session && !state.archivedSessions.some(row => row.id === record.sessionId)) return { session: null };
+        const session = membership?.listed && membership.archived === false
+          ? state.sessions.find(row => row.id === record.sessionId) ?? null : null;
+        if (!session && membership?.archived !== true) {
+          throw new Error("Could not synchronize restored sessions. Retry confirmation.");
+        }
         sessionStorage.removeItem(key(record.owner, record.sessionId));
         record.identity = null; record.active = null;
         this.records.delete(key(record.owner, record.sessionId));

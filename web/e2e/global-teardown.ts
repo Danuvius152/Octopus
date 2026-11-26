@@ -12,6 +12,8 @@ import {
 // claude-home/ per test agent), so e2e runs never accumulate state — or stray
 // copied Claude credentials — on disk.
 export default function globalTeardown(): void {
+  // Only the targeted check owner can prove all service descendants are gone.
+  if (process.env.OCTOPUS_TARGETED_CHECK_DIR) return;
   rmSync(E2E_AGENTS_DIR, { recursive: true, force: true });
   // Same for the application directories agents built during the run
   // (docs/implemented/applications.md §8).

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from "react";
 import { useStore } from "zustand";
-import { IconEye, IconRestore } from "@tabler/icons-react";
+import { IconEye, IconRestore, IconTrash } from "@tabler/icons-react";
 import {
   useSessionStore,
   type Agent,
@@ -38,6 +38,10 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
   const live = useSessionStore((s) => s.sessions);
   const restoring = useStore(sessionList.restorations.store, state => state.entries);
   const restoreError = useStore(sessionList.restorations.store, state => state.error);
+  const deletions = useStore(sessionList.deletions);
+  const deletingAll = useStore(sessionList.archiveBatch, state => state.running);
+  const batchRestored = useStore(sessionList.archiveBatch, state => state.restored);
+  const [deleteFeedback, setDeleteFeedback] = useState("");
   const [errors, setErrors] = useState<{ [id: string]: string }>({});
   const feedback = useRef(new Map<string, object>());
   const navigation = useRef<object | null>(null);
@@ -104,6 +108,29 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
   const unsettled = Object.keys(restoring).filter(id => !archived.some(row => row.id === id) &&
     ["writing", "unknown", "confirming"].includes(restoring[id].phase));
 
+  const deleteArchived = async (target: Pick<SessionInfo, "id" | "name">, retry = false) => {
+    if (!retry) {
+      if (!window.confirm(`Permanently delete "${target.name}"?`)) return;
+      setDeleteFeedback("");
+    }
+    if (await sessionList.deleteArchived(target) === "restored" && foreground.current) {
+      setDeleteFeedback(`"${target.name}" was restored and has been kept.`);
+    }
+  };
+
+  const deleteAll = () => {
+    const confirmation = sessionList.capture();
+    const targets = archived.map(({ id, name }) => ({ id, name }));
+    const noun = targets.length === 1 ? "session" : "sessions";
+    if (!window.confirm(`Permanently delete ${targets.length} archived ${noun}?`)) return;
+    setDeleteFeedback("");
+    void sessionList.deleteArchivedBatch(targets, confirmation);
+  };
+
+  const batchFeedback = batchRestored === 1
+    ? "1 session was restored and has been kept."
+    : `${batchRestored} sessions were restored and have been kept.`;
+
   const groups: { agent: Agent | null; items: SessionInfo[] }[] = agents
     .map((a) => ({
       agent: a as Agent | null,
@@ -131,6 +158,24 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
             unarchive it to continue the conversation as a live session.
           </DialogDescription>
         </DialogHeader>
+
+        {(archived.length > 0 || deletingAll) && <button
+          type="button"
+          className="inline-flex items-center gap-1 justify-self-start rounded-md px-2 py-1 text-sm text-destructive hover:bg-destructive/10 disabled:opacity-50"
+          onClick={deleteAll}
+          disabled={deletingAll || Object.values(deletions).some(entry => entry.phase === "deleting")}
+        >
+          <IconTrash size={15} />
+          {deletingAll ? "Deleting all…" : "Delete all"}
+        </button>}
+        {deleteFeedback && <p role="status" className="text-sm">{deleteFeedback}</p>}
+        {!deletingAll && batchRestored > 0 && <p role="status" className="text-sm">{batchFeedback}</p>}
+        {Object.values(deletions).filter(entry => entry.phase === "retry").map(entry => (
+          <div key={entry.id} className="text-sm">
+            <p role="alert">Deletion of "{entry.name}" could not be confirmed.</p>
+            <button type="button" className="underline disabled:opacity-50" disabled={deletingAll} onClick={() => void deleteArchived(entry, true)}>Retry deletion</button>
+          </div>
+        ))}
 
         {unsettled.map(id => <div key={id} className="restoration-pending text-sm">
           <p>Restoration of {live.find(row => row.id === id)?.name ?? id} is unconfirmed.</p>
@@ -184,6 +229,15 @@ function ArchiveOpening({ open, onOpenChange }: Props) {
                       >
                         <IconRestore size={13} />
                         Unarchive
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:opacity-50"
+                        onClick={() => void deleteArchived(s)}
+                        disabled={deletingAll || !!deletions[s.id]}
+                      >
+                        <IconTrash size={13} />
+                        {deletions[s.id]?.phase === "deleting" ? "Deleting…" : "Delete"}
                       </button>
                       {restoring[s.id] && ["writing", "unknown", "confirming"].includes(restoring[s.id].phase) && <button
                         onClick={() => unarchive(s, true)} disabled={restoring[s.id].phase === "confirming"}>

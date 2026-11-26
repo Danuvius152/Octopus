@@ -5,8 +5,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -70,8 +72,8 @@ def staged_checks(hooks, path):
 @pytest.mark.parametrize("path", [
     "web/src/components/ChatView.tsx", "web/e2e/run.ts", "web/tests/e2eSelection.test.ts",
     "web/vite.config.ts", "web/playwright.config.ts", "web/eslint.config.js", "web/tsconfig.e2e.json",
-    "web/package.json", "web/bun.lock", "web/src/lib/recordingReplay.json",
-    "tests/fixtures/wiki-command-cases.json", "server/app_agent_client.js",
+    "web/package.json", "web/bun.lock", "web/patches/vitest@4.1.12.patch", "web/src/lib/recordingReplay.json",
+    "tests/fixtures/codex-file-change-result.json", "tests/fixtures/wiki-command-cases.json", "server/app_agent_client.js",
     "lefthook.yml", "scripts/toolchain-env.sh",
 ])
 def test_frontend_inputs_trigger_all_existing_frontend_checks(hooks, path):
@@ -135,7 +137,9 @@ def pytest_checkout(tmp_path, hook_env):
     env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = "1"
     git(root, env, "init", "-q")
     for path in (".gitignore", "lefthook.yml", "pyproject.toml", "scripts/check.sh",
-                 "scripts/check_runner.py", "scripts/python_environment.py", "scripts/toolchain-env.sh"):
+                 "scripts/check_runner.py", "scripts/pytest_diagnostics.py", "scripts/pytest_evidence.py",
+                 "scripts/python_environment.py",
+                 "scripts/toolchain-env.sh"):
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(PROJECT / path, target)
@@ -225,6 +229,469 @@ def test_combined_cli_certifies_only_the_explicit_pytest_target(pytest_checkout,
     [focused] = evidence["gates"]
     assert evidence["success"] and focused["id"] == "pytest-focused"
     assert target in focused["scope"] and focused["counts"]["passed"] == 1
+
+
+def test_focused_pytest_output_preserves_console_import_resolution(pytest_checkout, tmp_path):
+    root, env = pytest_checkout
+    output = tmp_path / "focused evidence"
+    target = "tests/test_gate.py"
+    (root / "httpx.py").write_text("raise RuntimeError('loaded the shadow module')\n")
+    (root / target).write_text("import httpx\n\ndef test_import(): assert httpx.Client\n")
+    command = ["./scripts/check.sh", "--pytest-target", target]
+
+    for options in ([], ["--output", str(output)]):
+        result = subprocess.run([*command, *options], cwd=root, env=env, text=True,
+                                capture_output=True, timeout=15)
+        assert result.returncode == 0, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["counts"]["passed"] == 1 and Path(gate["execution_context"]).is_file()
+
+
+def test_focused_pytest_output_preserves_inherited_xdist_context(pytest_checkout, tmp_path):
+    root, env = pytest_checkout
+    output = tmp_path / "focused evidence"
+    target = "tests/test_gate.py"
+    env.update(PYTEST_XDIST_WORKER="gw-parent", PYTEST_XDIST_TESTRUNUID="parent-run", PYTEST_XDIST_WORKER_COUNT="3")
+    (root / target).write_text("""
+import os
+
+def test_inherited_context():
+    assert os.environ['PYTEST_XDIST_WORKER'] == 'gw-parent'
+    assert os.environ['PYTEST_XDIST_TESTRUNUID'] == 'parent-run'
+    assert os.environ['PYTEST_XDIST_WORKER_COUNT'] == '3'
+""")
+
+    result = subprocess.run(["./scripts/check.sh", "--pytest-target", target, "--output", str(output)],
+                            cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["counts"]["passed"] == 1
+    assert json.loads(Path(gate["execution_context"]).read_text())["workers_started"] == 0
+
+
+def test_focused_pytest_accepts_an_unrelated_plugin_named_dsession(pytest_checkout, tmp_path):
+    root, env = pytest_checkout
+    output = tmp_path / "focused evidence"
+    target = "tests/test_gate.py"
+    env.update(PYTEST_PLUGINS="dsession", PYTHONPATH=str(root))
+    (root / "dsession.py").write_text("def pytest_configure(config): config.fixture_plugin_loaded = True\n")
+    (root / target).write_text("def test_plugin(pytestconfig): assert pytestconfig.fixture_plugin_loaded\n")
+
+    result = subprocess.run(["./scripts/check.sh", "--pytest-target", target, "--output", str(output)],
+                            cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["returncode"] == 0 and gate["counts"]["passed"] == 1
+    assert json.loads(Path(gate["execution_context"]).read_text())["workers_started"] == 0
+
+
+@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
+@pytest.mark.parametrize(("representation", "line"), [
+    ("BrokenRenderer()", 1), ("TerminalOnly()", 1), ("WithLocation(item.path, 2)", 2),
+    ("WithLocation(7, True)", 1),
+], ids=["broken-renderer", "terminal-only", "structured-location", "invalid-location"])
+def test_focused_pytest_keeps_plugin_failure_text_and_location(pytest_checkout, tmp_path, release, representation, line):
+    root, env = pytest_checkout
+    output = tmp_path / "focused evidence"
+    target = "tests/test_gate.py"
+    config = root / "pyproject.toml"
+    config.write_text(config.read_text().replace('addopts = "--strict-markers"', 'addopts = "--strict-markers --tb=no -rN"'))
+    (root / target).write_text("def test_a():\n    assert False\n\ndef test_b(): pass\n")
+    (root / "tests/conftest.py").write_text(f"""from types import SimpleNamespace
+
+import pytest
+
+class BrokenRenderer:
+    def __str__(self):
+        return 'original failure text'
+
+    def toterminal(self, writer):
+        raise RuntimeError('renderer failure')
+
+class TerminalOnly:
+    def toterminal(self, writer):
+        writer.line('original failure text')
+
+class WithLocation(TerminalOnly):
+    def __init__(self, path, line):
+        self.reprcrash = SimpleNamespace(path=path, lineno=line, message='original failure text')
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item):
+    report = yield
+    if report.failed:
+        report.longrepr = {representation}
+    return report
+""")
+    command = ["./scripts/check.sh", "--pytest-target", target, "--output", str(output)]
+    if release:
+        command.append("--release")
+
+    result = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["returncode"] == 1
+    assert gate["counts"] == {"passed": 1, "failed": 1, "errors": 0, "skipped": 0, "total": 2}
+    [failure] = json.loads(Path(gate["execution_context"]).read_text())["failures"]
+    assert failure["nodeid"] == f"{target}::test_a"
+    assert failure["error"] == "original failure text"
+    assert root / failure["location"]["file"] == root / target and failure["location"]["line"] == line
+
+
+def test_focused_pytest_retains_surrogate_failure_and_executes_next_test(pytest_checkout, tmp_path):
+    root, env = pytest_checkout
+    output = tmp_path / "focused evidence"
+    target = "tests/test_gate.py"
+    (root / target).write_text("def test_a(): raise ValueError(chr(0xdcff))\ndef test_b(): pass\n")
+
+    result = subprocess.run(["./scripts/check.sh", "--pytest-target", target, "--output", str(output)],
+                            cwd=root, env=env, errors="surrogateescape", capture_output=True, timeout=15)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["returncode"] == 1
+    assert gate["counts"] == {"passed": 1, "failed": 1, "errors": 0, "skipped": 0, "total": 2}
+    [failure] = json.loads(Path(gate["execution_context"]).read_text())["failures"]
+    assert failure["nodeid"] == f"{target}::test_a"
+    assert f"ValueError: {chr(0xdcff)}" in failure["error"]
+
+
+@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
+@pytest.mark.parametrize("wrapper", [False, True], ids=["hook", "wrapper"])
+def test_focused_pytest_saves_failure_before_a_report_consumer_raises(pytest_checkout, tmp_path, release, wrapper):
+    root, env = pytest_checkout
+    output = tmp_path / "report consumer evidence"
+    target = "tests/test_gate.py"
+    decorator = "    @pytest.hookimpl(wrapper=True, tryfirst=True)\n" if wrapper else ""
+    tail = "        return (yield)\n" if wrapper else ""
+    (root / "tests/conftest.py").write_text(f"""
+import pytest
+
+class BrokenReporter:
+{decorator}    def pytest_runtest_logreport(self, report):
+        if report.failed:
+            raise OSError('report consumer failed')
+{tail}
+def pytest_configure(config):
+    config.pluginmanager.register(BrokenReporter())
+""")
+    command = ["./scripts/check.sh", "--pytest-target", target, "--output", str(output)]
+    if release:
+        command.append("--release")
+
+    result = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["returncode"] == 3
+    original, consumer = json.loads(Path(gate["execution_context"]).read_text())["failures"]
+    assert original["nodeid"] == f"{target}::test_failure" and original["phase"] == "call"
+    assert "AssertionError: expected fixture failure" in original["error"]
+    assert consumer["phase"] == "internal" and "OSError: report consumer failed" in consumer["error"]
+
+
+@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
+def test_focused_pytest_reports_an_unwritable_execution_artifact(pytest_checkout, tmp_path, release):
+    root, env = pytest_checkout
+    output = tmp_path / "focused evidence"
+    execution = output / "pytest-focused-execution.json"
+    (root / "tests/conftest.py").write_text(f"""
+from pathlib import Path
+
+def pytest_sessionstart():
+    Path({str(execution)!r}).mkdir()
+""")
+    command = ["./scripts/check.sh", "--pytest-target", "tests/test_gate.py::test_pass_only", "--output", str(output)]
+    if release:
+        command.append("--release")
+    result = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == int(release), result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["returncode"] == 0 and gate["counts"]["passed"] == 1
+    assert bool(gate["evidence_error"]) == release
+    assert "Cannot save pytest diagnostic evidence" in (output / "pytest-focused.log").read_text()
+
+
+def test_focused_pytest_keeps_observed_failure_after_interruption(pytest_checkout, tmp_path):
+    root, env = pytest_checkout
+    output = tmp_path / "interrupted pytest evidence"
+    target = "tests/test_gate.py"
+    running = tmp_path / "second-test-pid"
+    (root / target).write_text(f"""
+import os
+import time
+from pathlib import Path
+
+
+def test_a():
+    raise ValueError('failure before interruption')
+
+
+def test_b():
+    Path({str(running)!r}).write_text(str(os.getpid()))
+    time.sleep(60)
+""")
+    command = ["./scripts/check.sh", "--pytest-target", target, "--output", str(output)]
+    manifest = output / "results.json"
+    execution = output / "pytest-focused-execution.json"
+    with (tmp_path / "runner.log").open("w+") as log, subprocess.Popen(
+        command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT,
+    ) as process:
+        try:
+            deadline = time.monotonic() + 15
+            while not (running.is_file() and running.stat().st_size and execution.is_file()):
+                if process.poll() is not None or time.monotonic() >= deadline:
+                    log.seek(0)
+                    pytest.fail(f"Failure evidence and the running test did not overlap:\n{log.read()}")
+                time.sleep(0.02)
+
+            test_pid = int(running.read_text())
+            os.kill(test_pid, 0)
+            observed = json.loads(execution.read_text())
+            [failure] = observed["failures"]
+            assert failure["nodeid"] == f"{target}::test_a"
+            assert failure["phase"] == "call" and failure["worker"] is None
+            assert "ValueError: failure before interruption" in failure["error"]
+            assert "raise ValueError" in failure["error"]
+            assert root / failure["location"]["file"] == root / target
+            assert failure["location"]["line"] == 8
+            assert observed["targets"] == [target] and observed["exit_code"] is None
+
+            report = json.loads(manifest.read_text())
+            assert report["inputs_before"]["source"]["head"]
+            [gate] = report["gates"]
+            assert gate["status"] == "incomplete" and target in gate["argv"]
+            assert gate["execution_context"] == str(execution)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=15)
+
+    assert process.returncode == 128 + signal.SIGTERM
+    assert not Path(f"/proc/{test_pid}").exists()
+    assert json.loads(execution.read_text()) == observed
+    report = json.loads(manifest.read_text())
+    assert report["state"] == "interrupted" and not report["success"]
+    [gate] = report["gates"]
+    assert gate["status"] == "interrupted" and gate["counts"] is None
+    assert not Path(gate["report"]).exists()
+
+
+@pytest.mark.parametrize("source", [
+    "test-module", "conftest", "conftest-plugin", "plugin-runtime", "plugin-syntax", "environment-plugin",
+])
+def test_focused_pytest_records_the_original_import_error(pytest_checkout, tmp_path, source):
+    root, env = pytest_checkout
+    output = tmp_path / "import evidence"
+    target = "tests/test_gate.py"
+    broken = target if source == "test-module" else "tests/conftest.py"
+    if source == "environment-plugin":
+        env["PYTEST_PLUGINS"] = "missing_octopus_environment_plugin"
+    elif source in ("plugin-runtime", "plugin-syntax"):
+        (root / broken).write_text("pytest_plugins = ['octopus_fixture_plugin']\n")
+        (root / "tests/octopus_fixture_plugin.py").write_text(
+            "raise RuntimeError('intentional plugin failure')\n" if source == "plugin-runtime" else "def :\n"
+        )
+    elif source == "conftest-plugin":
+        (root / broken).write_text("pytest_plugins = ['missing_octopus_fixture_plugin']\n")
+    else:
+        (root / broken).write_text("raise ImportError('intentional import failure')\n")
+    if source == "conftest":
+        env["PYTEST_XDIST_WORKER"] = "gw-parent"
+
+    result = subprocess.run(["./scripts/check.sh", "--pytest-target", target, "--output", str(output)],
+                            cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["status"] == "failed"
+    assert gate["returncode"] == (2 if source == "test-module" else 4 if source == "conftest" else 1)
+    execution = json.loads(Path(gate["execution_context"]).read_text())
+    [failure] = execution["failures"]
+    assert failure["phase"] == "collection" and failure["worker"] is None
+    if source == "conftest-plugin":
+        assert "No module named 'missing_octopus_fixture_plugin'" in failure["error"]
+    elif source == "environment-plugin":
+        assert "No module named 'missing_octopus_environment_plugin'" in failure["error"]
+    elif source in ("plugin-runtime", "plugin-syntax"):
+        expected = "RuntimeError: intentional plugin failure" if source == "plugin-runtime" else "SyntaxError: invalid syntax"
+        assert expected in failure["error"]
+        assert Path(failure["location"]["file"]).name == "octopus_fixture_plugin.py"
+        assert failure["location"]["line"] == 1
+    else:
+        assert root / failure["nodeid"] == root / broken
+        assert "ImportError: intentional import failure" in failure["error"]
+        assert root / failure["location"]["file"] == root / broken
+    assert execution["targets"] == ([target] if source == "test-module" else [])
+
+
+@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
+@pytest.mark.parametrize(("source", "exit_code"), [
+    ("configuration", 3), ("configuration-usage", 4), ("conftest-syntax", 4), ("addopts-plugin", 1),
+    ("conftest-system-exit", 1),
+])
+def test_focused_pytest_records_startup_errors(pytest_checkout, tmp_path, release, source, exit_code):
+    root, env = pytest_checkout
+    output = tmp_path / "startup evidence"
+    conftest = root / "tests/conftest.py"
+    if source == "configuration":
+        conftest.write_text("def pytest_configure():\n    import missing_octopus_configuration_plugin\n")
+    elif source == "configuration-usage":
+        conftest.write_text("""import pytest
+
+def pytest_configure():
+    try:
+        import missing_octopus_configuration_plugin
+    except ImportError as error:
+        raise pytest.UsageError('cannot configure fixture plugin') from error
+""")
+    elif source == "addopts-plugin":
+        config = root / "pyproject.toml"
+        config.write_text(config.read_text().replace(
+            'addopts = "--strict-markers"', 'addopts = "--strict-markers -p missing_octopus_addopts_plugin"',
+        ))
+    elif source == "conftest-system-exit":
+        conftest.write_text("raise SystemExit('primary conftest import abort')\n")
+    else:
+        conftest.write_text("def :\n")
+    command = ["./scripts/check.sh", "--pytest-target", "tests/test_gate.py", "--output", str(output)]
+    if release:
+        command.append("--release")
+
+    result = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["returncode"] == exit_code
+    execution = json.loads(Path(gate["execution_context"]).read_text())
+    [failure] = execution["failures"]
+    assert failure["worker"] is None
+    if source.startswith("configuration"):
+        assert failure["phase"] == "internal"
+        assert "No module named 'missing_octopus_configuration_plugin'" in failure["error"]
+        if source == "configuration-usage":
+            assert "UsageError: cannot configure fixture plugin" in failure["error"]
+        assert root / failure["location"]["file"] == conftest
+        assert failure["location"]["line"] == (2 if source == "configuration" else 5)
+    elif source == "addopts-plugin":
+        assert failure["phase"] == "collection"
+        assert "No module named 'missing_octopus_addopts_plugin'" in failure["error"]
+    elif source == "conftest-system-exit":
+        assert failure["phase"] == "collection"
+        assert "SystemExit: primary conftest import abort" in failure["error"]
+        assert root / failure["location"]["file"] == conftest
+        assert failure["location"]["line"] == 1
+    else:
+        assert failure["phase"] == "collection" and failure["nodeid"] == "tests/conftest.py"
+        assert "SyntaxError: invalid syntax" in failure["error"]
+        assert root / failure["location"]["file"] == conftest
+        assert failure["location"]["line"] == 1
+    assert execution["targets"] == (["tests/test_gate.py"] if source.startswith("configuration") else [])
+    assert "tests/test_gate.py" in gate["source_files"] and "tests/test_gate.py" in gate["argv"]
+
+
+@pytest.mark.parametrize("release", [False, True], ids=["diagnostic", "release"])
+@pytest.mark.parametrize(("hook", "phase"), [
+    ("pytest_collection_modifyitems", "collection"),
+    ("pytest_configure", "startup"),
+    ("pytest_sessionstart", "startup"),
+], ids=["collection", "configure", "sessionstart"])
+@pytest.mark.parametrize(("statement", "exit_code"), [
+    ("pytest.exit('execution rejected by validation plugin', returncode=17)", 17),
+    ("pytest.exit('execution stopped successfully', returncode=0)", 0),
+    ("raise KeyboardInterrupt", 2),
+], ids=["failed", "successful", "interrupt"])
+def test_focused_pytest_records_only_failed_explicit_exits(pytest_checkout, tmp_path, release, statement, exit_code,
+                                                         hook, phase):
+    root, env = pytest_checkout
+    output = tmp_path / "explicit exit evidence"
+    conftest = root / "tests/conftest.py"
+    conftest.write_text(f"import pytest\n\ndef {hook}():\n    {statement}\n")
+    command = ["./scripts/check.sh", "--pytest-target", "tests/test_gate.py", "--output", str(output)]
+    if release:
+        command.append("--release")
+
+    result = subprocess.run(command, cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == int(bool(exit_code) or release or phase == "startup"), result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["returncode"] == exit_code
+    path = Path(gate["execution_context"])
+    if exit_code == 17:
+        [failure] = json.loads(path.read_text())["failures"]
+        assert failure["phase"] == phase
+        assert "execution rejected by validation plugin" in failure["error"]
+        assert hook in failure["error"]
+        assert root / failure["location"]["file"] == conftest
+        assert failure["location"]["line"] == 4
+    elif phase == "collection":
+        assert json.loads(path.read_text())["failures"] == []
+    else:
+        assert not path.exists()
+
+
+@pytest.mark.parametrize("workers", ["1", "auto"])
+def test_focused_pytest_attributes_collection_errors_from_configured_xdist(pytest_checkout, tmp_path, workers):
+    root, env = pytest_checkout
+    output = tmp_path / "parallel evidence"
+    target = "tests/test_gate.py"
+    config = root / "pyproject.toml"
+    config.write_text(config.read_text().replace('addopts = "--strict-markers"', f'addopts = "--strict-markers -n {workers}"'))
+    (root / target).write_text("raise ImportError('intentional worker module import failure')\n")
+
+    result = subprocess.run(["./scripts/check.sh", "--pytest-target", target, "--output", str(output)],
+                            cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["counts"]["errors"] == 1
+    execution = json.loads(Path(gate["execution_context"]).read_text())
+    assert execution["distribution"] == "load"
+    assert execution["workers_requested"] == execution["workers_started"] == 1
+    [failure] = execution["failures"]
+    assert failure["nodeid"] == target and failure["phase"] == "collection" and failure["worker"] == "gw0"
+    assert "ImportError: intentional worker module import failure" in failure["error"]
+
+
+@pytest.mark.parametrize("during_collection", [False, True], ids=["crash", "internal-error"])
+def test_focused_parallel_pytest_records_an_observable_worker_error(pytest_checkout, tmp_path, during_collection):
+    root, env = pytest_checkout
+    output = tmp_path / "worker crash evidence"
+    target = "tests/test_gate.py"
+    if during_collection:
+        (root / "tests/conftest.py").write_text("""
+def pytest_collection_modifyitems(config):
+    if getattr(config, 'workerinput', {}).get('workerid') == 'gw1':
+        raise RuntimeError('intentional worker collection hook failure')
+""")
+    else:
+        (root / target).write_text("import os\n\ndef test_crash(): os._exit(17)\n")
+
+    result = subprocess.run(["./scripts/check.sh", "--release", "--pytest-target", target,
+                             "--pytest-workers", "2" if during_collection else "1", "--output", str(output)],
+                            cwd=root, env=env, text=True, capture_output=True, timeout=15)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    [gate] = json.loads((output / "results.json").read_text())["gates"]
+    assert gate["status"] == "failed"
+    execution = json.loads(Path(gate["execution_context"]).read_text())
+    if during_collection:
+        [failure] = [item for item in execution["failures"]
+                     if "RuntimeError: intentional worker collection hook failure" in item["error"]]
+        assert failure["phase"] == "internal"
+        assert execution["workers_requested"] == 2 and failure["worker"] == "gw1"
+        assert "tests/conftest.py" in failure["error"]
+        assert failure["location"] is None
+    else:
+        [failure] = execution["failures"]
+        assert failure["nodeid"] == f"{target}::test_crash" and failure["worker"] == "gw0"
+        assert "worker 'gw0' crashed while running 'tests/test_gate.py::test_crash'" in failure["error"]
+        [crash] = execution["worker_crashes"]
+        assert crash["worker"] == "gw0" and crash["error"]
 
 
 @pytest.fixture

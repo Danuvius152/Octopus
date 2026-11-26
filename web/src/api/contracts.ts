@@ -815,6 +815,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/presence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Session Presence
+         * @description Check the account's persisted membership and outstanding deletion by ID.
+         */
+        get: operations["get_session_presence_api_sessions__session_id__presence_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/fork-preview": {
         parameters: {
             query?: never;
@@ -3851,6 +3871,8 @@ export interface components {
              * @default false
              */
             identity_unavailable: boolean;
+            /** Native Item Type */
+            native_item_type?: "fileChange" | null;
         };
         /** BrowserMessagePage */
         BrowserMessagePage: {
@@ -6395,6 +6417,13 @@ export interface components {
              */
             archived: boolean;
         };
+        /** SessionPresence */
+        SessionPresence: {
+            /** Archived */
+            archived: boolean | null;
+            /** Deletion Pending */
+            deletion_pending: boolean;
+        };
         /** SessionRestoreRequest */
         SessionRestoreRequest: {
             /** Operation Id */
@@ -8245,6 +8274,7 @@ export interface operations {
     delete_session_api_sessions__session_id__delete: {
         parameters: {
             query?: {
+                archived_only?: boolean;
                 token?: string | null;
             };
             header?: never;
@@ -8787,6 +8817,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MessagePage"] | components["schemas"]["BrowserMessagePage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_session_presence_api_sessions__session_id__presence_get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionPresence"];
                 };
             };
             /** @description Validation Error */

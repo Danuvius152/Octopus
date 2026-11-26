@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -18,17 +19,20 @@ import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from scripts.python_environment import inspect_environment
+from .python_environment import inspect_environment
 
 HERMETIC_PYTEST_SELECTION = "not real and not knowledge_eval and not wiki_perf"
 PYTEST_SELECTION_ENVIRONMENT = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")
 OFFLINE_E2E_COUNTS = ("passed", "failed", "flaky", "skipped", "errors")
 CODEX_LIVE_COUNTS = ("passed", "failed", "skipped")
+TARGETED_CHECK_DIR = "OCTOPUS_TARGETED_CHECK_DIR"
 
 
 @dataclass(frozen=True)
@@ -41,12 +45,39 @@ class Gate:
     report: str | None = None
     quiet: bool = False
     source_files: tuple[str, ...] = ()
-    pytest_context: bool = False
+    pytest_context: Literal["required", "diagnostic"] | None = None
 
 
 class Interrupted(Exception):
     def __init__(self, signum: int):
         self.signum = signum
+
+
+def targeted_directory() -> Path | None:
+    directory = os.environ.get(TARGETED_CHECK_DIR)
+    return Path(directory) if directory else None
+
+
+def stop_if_requested(directory: Path | None) -> None:
+    if directory is not None and (directory / "stop").exists():
+        raise Interrupted(signal.SIGTERM)
+
+
+@contextmanager
+def exclusive_lock(path: Path, *, blocking: bool = True) -> Iterator[None]:
+    with path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+@contextmanager
+def admit_dispatch(directory: Path | None) -> Iterator[None]:
+    if directory is None:
+        yield
+    else:
+        with exclusive_lock(directory / "dispatch.lock"):
+            stop_if_requested(directory)
+            yield
 
 
 def now() -> str:
@@ -56,7 +87,10 @@ def now() -> str:
 def atomic_json(path: Path, value: Any) -> None:
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".results-", delete=False) as stream:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", errors="backslashreplace",
+            dir=path.parent, prefix=".results-", delete=False,
+        ) as stream:
             temporary = Path(stream.name)
             json.dump(value, stream, indent=2, ensure_ascii=False)
             stream.write("\n")
@@ -206,8 +240,9 @@ def children() -> set[int]:
 class GateChildren:
     """Own one sequential gate, including orphans that create their own session."""
 
-    def __init__(self):
+    def __init__(self, *, term_grace: float = 5):
         self.process: subprocess.Popen | None = None
+        self.term_grace = term_grace
         self.pending: int | None = None
         self.deferred = True
         self.previous: int | None = None
@@ -224,7 +259,11 @@ class GateChildren:
             if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
                 raise OSError("Check execution requires default SIGCHLD handling to retain real child exit status")
             self.previous = subreaper()
-            if children():
+            try:
+                os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                pass
+            else:
                 raise OSError("Check execution requires no existing child processes")
             subreaper(1)
             if self.pending:
@@ -252,6 +291,19 @@ class GateChildren:
             if self.process is None or pid != self.process.pid:
                 os.waitpid(pid, os.WNOHANG)
 
+    def fully_reaped(self) -> bool:
+        if self.process is not None and self.process.poll() is None:
+            self.reap_exited_orphans()
+            return False
+        # After Popen has reaped its own child, an ECHILD result proves there
+        # are no remaining children. The /proc snapshot is only for signalling.
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            return True
+        return False
+
     def wait(self, process: subprocess.Popen) -> int:
         while True:
             try:
@@ -262,17 +314,14 @@ class GateChildren:
     def retire(self):
         active = not self.deferred
         self.deferred = True
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + self.term_grace
         notified: set[int] = set()
         try:
-            while True:
-                if self.process is not None:
-                    self.process.poll()
-                self.reap_exited_orphans()
+            while not self.fully_reaped():
                 remaining = children()
+                if self.process is not None and self.process.returncode is None:
+                    remaining.add(self.process.pid)
                 notified.intersection_update(remaining)
-                if not remaining:
-                    break
                 signum = signal.SIGTERM if time.monotonic() < deadline else signal.SIGKILL
                 for pid in remaining:
                     # Repeated TERM can reenter a child's graceful shutdown
@@ -323,7 +372,9 @@ def write_all(stream, data: bytes) -> None:
         remaining = remaining[written:]
 
 
-def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
+def run_gate(
+    gate: Gate, output: Path | None, row: dict[str, Any], save_progress: Callable[[], None] | None = None,
+) -> None:
     argv = list(gate.argv)
     report = None
     context = None
@@ -335,9 +386,17 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
             if gate.pytest_context:
                 context = output / f"{gate.id}-execution.json"
                 row["execution_context"] = str(context)
-                argv += ["-p", "scripts.pytest_evidence", "--execution-evidence", str(context)]
+                if gate.pytest_context == "diagnostic":
+                    python, entry = str(gate.cwd / ".venv/bin/python"), argv
+                else:
+                    python, *entry = argv
+                launcher = Path(__file__).resolve().with_name("pytest_diagnostics.py")
+                argv = [python, str(launcher), str(context), *entry]
         elif gate.report == "vitest":
             argv += ["--reporter=default", "--reporter=json", f"--outputFile={report}"]
+            evidence = output / f"{gate.id}-diagnostics"
+            row["diagnostics"] = str(evidence)
+            environment = {**os.environ, "OCTOPUS_VITEST_EVIDENCE_DIR": str(evidence)}
         elif gate.report == "offline-e2e":
             evidence = output / gate.id
             report = evidence / "result.json"
@@ -346,6 +405,9 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
             evidence = output / gate.id
             report = evidence / "result.json"
             argv += ["--output", str(evidence)]
+    elif gate.report == "vitest" and "OCTOPUS_VITEST_EVIDENCE_DIR" in os.environ:
+        environment = dict(os.environ)
+        del environment["OCTOPUS_VITEST_EVIDENCE_DIR"]
     row.update(argv=argv, cwd=str(gate.cwd), scope=gate.scope, started_at=now(), returncode=None,
                status="incomplete", counts=None, evidence_error=None, execution_error=None,
                log=None, report=str(report) if report else None)
@@ -357,12 +419,13 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
         row["scope"] += f"; inherited PYTEST_ADDOPTS={additional}"
     started = time.monotonic()
     owner = GateChildren()
+    directory = targeted_directory()
     try:
         inherited = [key for key in PYTEST_SELECTION_ENVIRONMENT if row["selection_environment"][key]]
         blocked = []
         if gate.id in ("pytest", "supervisor", "codex-live-pytest"):
             blocked = inherited
-        elif gate.id == "pytest-focused" and gate.pytest_context:
+        elif gate.id == "pytest-focused" and gate.pytest_context == "required":
             blocked = [key for key in inherited if key != "PYTEST_ADDOPTS"]
         if blocked:
             error = f"Unset {', '.join(blocked)} to certify the requested pytest selection"
@@ -371,7 +434,9 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
         with owner:
             if output is None:
                 try:
-                    process = owner.spawn(argv, cwd=gate.cwd, stdout=subprocess.DEVNULL if gate.quiet else None)
+                    with admit_dispatch(directory):
+                        process = owner.spawn(argv, cwd=gate.cwd, env=environment,
+                                              stdout=subprocess.DEVNULL if gate.quiet else None)
                 except OSError as error:
                     row.update(status="failed", execution_error=str(error))
                     print(error, file=sys.stderr)
@@ -380,10 +445,13 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
             else:
                 log = output / (gate.id + ".log")
                 row["log"] = str(log)
+                if save_progress is not None:
+                    save_progress()
                 with log.open("wb", buffering=0) as stream:
                     try:
-                        process = owner.spawn(argv, cwd=gate.cwd, env=environment,
-                                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        with admit_dispatch(directory):
+                            process = owner.spawn(argv, cwd=gate.cwd, env=environment,
+                                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                     except OSError as error:
                         row.update(status="failed", execution_error=str(error))
                         write_all(stream, (str(error) + "\n").encode())
@@ -445,7 +513,7 @@ def run_gate(gate: Gate, output: Path | None, row: dict[str, Any]) -> None:
                         row["evidence_error"] = "Native report contains failed tests after a zero exit"
                     elif row["returncode"] == 0 and gate.id == "supervisor" and not totals["passed"]:
                         row["evidence_error"] = "Supervisor report contains no passing tests"
-                    if context is not None:
+                    if context is not None and gate.pytest_context == "required":
                         context_data = json.loads(context.read_text())
                         row["execution"] = context_data
                         if row["returncode"] == 0 and (
@@ -496,24 +564,27 @@ def run_checks(root: Path, gates: list[Gate], output: Path | None = None) -> int
         raise Interrupted(signum)
 
     handlers = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+    directory = targeted_directory()
     exit_code = 1
     try:
         save()
+        stop_if_requested(directory)
         if output is not None:
             report["inputs_before"] = capture_inputs(root, source_files)
             save()
         for gate, row in zip(gates, report["gates"], strict=True):
+            stop_if_requested(directory)
             print(f"\n── {gate.name}", flush=True)
-            row["status"] = "incomplete"
-            save()
             try:
-                run_gate(gate, output, row)
+                run_gate(gate, output, row, save)
             except OSError as error:
                 row["evidence_error"] = str(error)
                 raise
             save()
+        stop_if_requested(directory)
         if output is not None:
             report["inputs_after"] = capture_inputs(root, source_files)
+            stop_if_requested(directory)
             report["inputs_changed"] = report["inputs_before"] != report["inputs_after"]
             if report["inputs_changed"]:
                 report["evidence_errors"].append("Verification inputs changed during execution")
@@ -577,7 +648,7 @@ def commit_gates(root: Path, e2e: bool) -> list[Gate]:
 def release_gates(root: Path, *, supervisor: bool) -> list[Gate]:
     python = str(root / ".venv/bin/python")
     gates = [
-        replace(gate, argv=(python, "-m", "pytest", *gate.argv[1:]), pytest_context=True)
+        replace(gate, argv=(python, "-m", "pytest", *gate.argv[1:]), pytest_context="required")
         if gate.id == "pytest" else gate
         for gate in commit_gates(root, e2e=False)
     ]
@@ -586,7 +657,7 @@ def release_gates(root: Path, *, supervisor: bool) -> list[Gate]:
             python, "-m", "pytest", "-c", "pyproject.toml", "-n", "0",
             "tests/",
             "--run-real", "-m", "real and supervisor", "-q",
-        ), root, "isolated systemd user units", "pytest", pytest_context=True))
+        ), root, "isolated systemd user units", "pytest", pytest_context="required"))
     gates.append(Gate("offline-e2e", "offline browser E2E", ("bun", "run", "test:e2e:fast"),
                       root / "web", "all offline browser partitions", "offline-e2e"))
     for suite in ("pytest", "browser"):
@@ -656,7 +727,8 @@ def main() -> int:
             test_files = {Path(target.partition("::")[0]) for target in targets}
             conftests = {parent / "conftest.py" for target in test_files for parent in target.parents}
             source_files = set(args.pytest_input).union(map(str, test_files | conftests))
-            command = (str(root / ".venv/bin/python"), "-m", "pytest") if args.release else (str(root / ".venv/bin/pytest"),)
+            command = ((str(root / ".venv/bin/python"), "-m", "pytest") if args.release
+                       else (str(root / ".venv/bin/pytest"),))
             workers = ("-n", str(args.pytest_workers or 0)) if args.release else ()
             distribution = ("--dist=loadfile", "--max-worker-restart=0") if args.pytest_workers else ()
             config = ("-c", "pyproject.toml") if args.release else ()
@@ -664,7 +736,8 @@ def main() -> int:
                 "pytest-focused", "backend unit (focused hermetic selection)",
                 (*command, *config, *targets, "-m", HERMETIC_PYTEST_SELECTION, *workers, *distribution, "-q"),
                 root, f"{', '.join(targets)} ({HERMETIC_PYTEST_SELECTION})", "pytest",
-                source_files=tuple(sorted(source_files)), pytest_context=args.release,
+                source_files=tuple(sorted(source_files)),
+                pytest_context="required" if args.release else "diagnostic",
             ))
     elif args.release:
         gates = available

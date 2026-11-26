@@ -31,7 +31,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
 if (args.includes("--list")) {
-  console.log(JSON.stringify({ errors: [], suites: [{ specs: [
+  fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE, JSON.stringify({ errors: [], suites: [{ specs: [
     { file: "app.spec.ts", tests: [{ projectName: "chromium" }] },
     { file: "connectors.spec.ts", tests: [{ projectName: "installation" }] },
     { file: "accounts.spec.ts", tests: [{ projectName: "installation" }] }

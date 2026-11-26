@@ -458,14 +458,17 @@ async def test_fork_keeps_unknown_input_as_history_without_admitting_its_replay(
 @pytest.mark.parametrize("complete_only", [False, True])
 @pytest.mark.parametrize("child", [False, True])
 async def test_native_patch_is_attributed_before_real_rewind_file_restore(native_runtime, tmp_path, rename, complete_only, child):
-    manager, _, parent, mode, _, _ = native_runtime
+    manager, database, parent, mode, _, _ = native_runtime
+    sample = json.loads((Path(__file__).parent / "fixtures" / "codex-file-change-result.json").read_text())
+    update, add, delete = sample["item"]["changes"]
     repo = tmp_path / "git-work"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "test@example.test")
     _git(repo, "config", "user.name", "Test")
-    file = repo / "a.py"
+    file, added, deleted = (repo / change["path"] for change in (update, add, delete))
     file.write_text("original\n")
+    deleted.write_text("deleted line\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "Initial state")
     parent = await manager.create_session(parent.agent_id, "Native file change", str(repo), backend="codex")
@@ -476,26 +479,38 @@ async def test_native_patch_is_attributed_before_real_rewind_file_restore(native
     if rename:
         file.rename(destination)
     destination.write_text("native patch\n")
+    added.write_text("added line\n")
+    deleted.unlink()
     if rename:
         _git(repo, "add", "-A")
-    changes = [{"path": str(file), "kind": {"type": "update", "move_path": str(destination) if rename else None}, "diff": "+native patch"}]
+    changes = [
+        {**update, "path": str(file), "kind": {**update["kind"], "move_path": str(destination) if rename else None}},
+        {**add, "path": str(added)},
+        {**delete, "path": str(deleted)},
+    ]
     if child:
         inject(tmp_path, child_start())
     phases = [("completed", "completed")] if complete_only else [("started", "inProgress"), ("completed", "completed")]
     for phase, status in phases:
-        inject(tmp_path, {"method": f"item/{phase}", "params": {
+        patch = {
             "threadId": "child" if child else ROOT, "turnId": "child-turn" if child else "turn-1",
-            "item": {"id": "patch", "type": "fileChange", "changes": changes, "status": status}}})
+            "item": {**sample["item"], "changes": changes, "status": status},
+        }
+        inject(tmp_path, {"method": f"item/{phase}", "params": patch})
     inject(tmp_path, terminal())
     assert (await asyncio.wait_for(receipt.wait(), 4)).outcome.status == "success"
+    saved = next(row for row in await database.load_messages(parent.id) if row["type"] == "tool_result")
+    assert saved["tool_name"] == "fileChange" and json.loads(saved["content"]) == patch
     preview = await manager.fork_preview(parent.id, 0, user_id=parent.user_id)
-    assert set(preview["side_effect_summary"]["agent_touched_paths"]) == {str(file), str(destination)}
+    assert set(preview["side_effect_summary"]["agent_touched_paths"]) == {str(path) for path in (file, destination, added, deleted)}
     assert all(edit["turns"] == 1 for edit in preview["side_effect_summary"]["file_edits"])
     assert preview["revert"]["available"]
     branch = await manager.fork_session(parent.id, 0, revert_files=True, user_id=parent.user_id)
     record = json.loads(branch.fork_revert_record)
     assert record["status"] == "completed" and record["stash_ref"]
     assert file.read_text() == "original\n"
+    assert deleted.read_text() == "deleted line\n"
+    assert not added.exists()
     if rename:
         assert not destination.exists()
 

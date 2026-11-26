@@ -4,12 +4,25 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig, searchForWorkspaceRoot } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { VitestEvidence } from './tests/vitestEvidence'
 
 const apiTarget = `http://localhost:${process.env.OCTOPUS_API_PORT || '8000'}`
+const evidenceDirectory = process.env.OCTOPUS_VITEST_EVIDENCE_DIR
+const evidence = evidenceDirectory ? new VitestEvidence(evidenceDirectory) : undefined
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    evidence && {
+      name: 'octopus-vitest-evidence',
+      configureVitest({ vitest }) {
+        // CLI overrides are already resolved, and Vitest has yet to instantiate the reporters.
+        if (!vitest.config.reporters.includes(evidence)) vitest.config.reporters.push(evidence)
+      },
+    },
+  ],
   // Two dev servers run at once during e2e (playwright.config.ts: one proxying
   // to the shared backend, one to the accounts backend). They share this
   // project, so they share `node_modules/.vite` — and each one's dependency
@@ -38,6 +51,7 @@ export default defineConfig({
     globals: true,
     setupFiles: './src/test-setup.ts',
     exclude: ['e2e/**', 'node_modules/**'],
+    ...(evidence && { includeTaskLocation: true, onUnhandledError: evidence.onUnhandledError }),
     coverage: {
       provider: 'v8',
       include: ['src/**/*.{ts,tsx}'],

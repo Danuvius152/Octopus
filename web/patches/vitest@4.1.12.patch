@@ -1,0 +1,120 @@
+diff --git a/dist/chunks/cli-api.B0Pz1_R7.js b/dist/chunks/cli-api.B0Pz1_R7.js
+index f3ac9b14803fb8bdae42ecb712f5e62db72efbcc..1a8801ba88605c3f936a0e686cbce1c513f03b74 100644
+--- a/dist/chunks/cli-api.B0Pz1_R7.js
++++ b/dist/chunks/cli-api.B0Pz1_R7.js
+@@ -36,6 +36,7 @@ import EventEmitter$1, { EventEmitter } from 'node:events';
+ import { c as createBirpc } from './index.Chj8NDwU.js';
+ import { i as isBuiltin, t as toBuiltin } from './modules.BJuCwlRJ.js';
+ import { fork } from 'node:child_process';
++import { channel } from 'node:diagnostics_channel';
+ import { Worker } from 'node:worker_threads';
+ import pm from 'picomatch';
+ import { glob, isDynamicPattern } from 'tinyglobby';
+@@ -83,7 +84,19 @@ async function getSpecificationsOptions(specifications) {
+ 			code = await promises.readFile(filepath, "utf-8").catch(() => "");
+ 			cache.set(filepath, code);
+ 		}
+-		const { env = project.config.environment || "node", envOptions, tags: specTags = [] } = detectCodeBlock(code);
++		let options;
++		try {
++			options = detectCodeBlock(code);
++		} catch (error) {
++			if (octopusFailure.hasSubscribers) octopusFailure.publish({
++				phase: "collection",
++				error,
++				file: filepath,
++				project: project.name
++			});
++			throw error;
++		}
++		const { env = project.config.environment || "node", envOptions, tags: specTags = [] } = options;
+ 		tags.set(spec, specTags);
+ 		const environment = {
+ 			name: env,
+@@ -2860,6 +2873,9 @@ var RunnerState = /* @__PURE__ */ function(RunnerState) {
+ }(RunnerState || {});
+ const START_TIMEOUT = 6e4;
+ const STOP_TIMEOUT = 6e4;
++const octopusEvidence = "octopus.vitest.evidence.v4";
++const octopusFailure = channel(octopusEvidence + ".failure");
++const octopusTaskUpdate = channel(octopusEvidence + ".tasks");
+ /** @experimental */
+ class PoolRunner {
+ 	/** Exposed to test runner as `VITEST_POOL_ID`. Value is between 1-`maxWorkers`. */
+@@ -3514,7 +3530,7 @@ class Pool {
+ 			const onFinished = (message) => {
+ 				if (message?.__vitest_worker_response__ && message.type === "testfileFinished") {
+ 					if (task.memoryLimit && message.usedMemory) isMemoryLimitReached = message.usedMemory >= task.memoryLimit;
+-					if (message.error) this.options.state.catchError(message.error, "Test Run Error");
++					if (message.error) this.options.state.catchError(message.error, "Test Run Error", octopusFailure.hasSubscribers ? publishWorkerFailure : void 0);
+ 					runner.off("message", onFinished);
+ 					runner.off("error", onTaskError);
+ 					resolver.resolve();
+@@ -3523,13 +3539,30 @@ class Pool {
+ 			function onTaskError(error) {
+ 				runner.off("message", onFinished);
+ 				runner.off("error", onTaskError);
+-				resolver.reject(new Error(`[vitest-pool]: Worker ${task.worker} emitted error.`, { cause: error }));
++				rejectWorker(new Error(`[vitest-pool]: Worker ${task.worker} emitted error.`, { cause: error }));
++			}
++			function rejectWorker(error) {
++				const alreadyRejected = resolver.isRejected;
++				resolver.reject(error);
++				// The unhandled error callback runs after all active files settle.
++				if (!alreadyRejected) publishWorkerFailure(error);
++			}
++			function publishWorkerFailure(error) {
++				if (octopusFailure.hasSubscribers) octopusFailure.publish({
++					phase: "worker",
++					error,
++					project: task.project.name,
++					pool: task.worker,
++					poolId,
++					workerId: task.context.workerId,
++					files: task.context.files.map((file) => file.filepath)
++				});
+ 			}
+ 			runner.on("message", onFinished);
+ 			runner.on("error", onTaskError);
+ 			if (!runner.isStarted) {
+-				const id = setTimeout(() => resolver.reject(/* @__PURE__ */ new Error(`[vitest-pool]: Timeout starting ${task.worker} runner.`)), WORKER_START_TIMEOUT);
+-				await runner.start({ workerId: task.context.workerId }).catch((error) => resolver.reject(new Error(`[vitest-pool]: Failed to start ${task.worker} worker for test files ${formatFiles(task)}.`, { cause: error }))).finally(() => clearTimeout(id));
++				const id = setTimeout(() => rejectWorker(/* @__PURE__ */ new Error(`[vitest-pool]: Timeout starting ${task.worker} runner.`)), WORKER_START_TIMEOUT);
++				await runner.start({ workerId: task.context.workerId }).catch((error) => rejectWorker(new Error(`[vitest-pool]: Failed to start ${task.worker} worker for test files ${formatFiles(task)}.`, { cause: error }))).finally(() => clearTimeout(id));
+ 			}
+ 			let span;
+ 			if (!resolver.isRejected) {
+@@ -12010,8 +12043,8 @@ class StateManager {
+ 	constructor(options) {
+ 		this.onUnhandledError = options.onUnhandledError;
+ 	}
+-	catchError(error, type) {
+-		if (isAggregateError(error)) return error.errors.forEach((error) => this.catchError(error, type));
++	catchError(error, type, observeError) {
++		if (isAggregateError(error)) return error.errors.forEach((error) => this.catchError(error, type, observeError));
+ 		if (typeof error === "object" && error !== null) error.type = type;
+ 		else error = {
+ 			type,
+@@ -12028,6 +12061,7 @@ class StateManager {
+ 			}
+ 			return;
+ 		}
++		observeError?.(error);
+ 		if (!this.onUnhandledError || this.onUnhandledError(error) !== false) this.errorsSet.add(error);
+ 	}
+ 	catchLeaks(leaks) {
+@@ -12657,6 +12691,7 @@ class TestRun {
+ 	async updated(update, events) {
+ 		this.syncUpdateStacks(update);
+ 		this.vitest.state.updateTasks(update);
++		if (octopusTaskUpdate.hasSubscribers) octopusTaskUpdate.publish({ vitest: this.vitest, packs: update });
+ 		for (const [id, event, data] of events) await this.reportEvent(id, event, data).catch((error) => {
+ 			this.vitest.state.catchError(serializeValue(error), "Unhandled Reporter Error");
+ 		});
+@@ -13024,5 +13059,6 @@ class VitestWatcher {
+ const WATCHER_DEBOUNCE = 100;
+ class Vitest {
++	static [Symbol.for(octopusEvidence)] = true;
+ 	/**
+ 	* Current Vitest version.
+ 	* @example '2.0.0'

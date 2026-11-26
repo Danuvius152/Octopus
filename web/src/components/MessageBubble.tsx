@@ -554,7 +554,7 @@ function BgTaskResultMessage({ body, summary }: { body: string; summary: string 
 function ToolResultBlock({ message, sessionId, onExpand }: { message: Message; sessionId: string; onExpand?: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [copyStatus, setCopyStatus] = useState("Copy path");
-  const { content, preview, errored, savedPath, label } = toolResultPresentation(message);
+  const { detail, preview, errored, savedPath, label } = toolResultPresentation(message);
 
   return (
     <div
@@ -609,7 +609,7 @@ function ToolResultBlock({ message, sessionId, onExpand }: { message: Message; s
               : "border-border bg-muted/40 text-foreground"
           }`}
         >
-          {content}
+          {detail()}
         </pre>
       )}
     </div>

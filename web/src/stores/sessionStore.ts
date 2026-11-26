@@ -137,6 +137,7 @@ export interface Message {
   body_state?: "inline" | "preview";
   detail_ref?: string | null;
   identity_unavailable?: boolean;
+  native_item_type?: "fileChange" | null;
   role: "user" | "assistant" | "system" | "tool";
   type: string;
   content?: string;

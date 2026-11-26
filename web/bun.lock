@@ -63,6 +63,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "vitest@4.1.12": "patches/vitest@4.1.12.patch",
+  },
   "overrides": {
     "katex": "0.18.2",
   },

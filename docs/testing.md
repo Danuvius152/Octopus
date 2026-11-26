@@ -89,8 +89,25 @@ Get feedback on each change promptly with the smallest relevant test set:
 
 Verify each ticket with the checks that exercise its acceptance criteria and
 affected behavior. After related tickets are integrated, run the focused
-regression for their shared behavior. Reserve the full gate for the integrated
-delivery candidate at the [code-commit boundary](#full-checks-before-code-commits).
+regression for their shared behavior.
+
+### Fixed candidates and parallel acceptance
+
+Before starting final review and focused checks, pin a recoverable candidate
+in a dedicated execution checkout. It contains the actual source, including
+new files, and any additional check inputs that Git does not capture. Record
+the revision or snapshot, the checkout and command working directories, and
+the identity and location of the extra inputs. Keep those inputs fixed
+throughout execution. Before/after input hashes supplement the candidate
+record and help detect drift.
+
+Give Vera and the focused checks the same candidate. Run the applicable
+regressions, type checks and generated-contract checks while Vera reviews.
+Record each check's command, scope, result and evidence location. Both tracks
+must pass on the integrated candidate before the [full commit gate](#full-checks-before-code-commits)
+and applicable [release checks](#release-and-documentation-checks) start.
+
+### Selecting checks and reusing evidence
 
 Reuse unchanged preparation across read-only variations and keep the assertions
 for each case. Content reads that supply authorization evidence remain real
@@ -98,10 +115,10 @@ reads. Use the named `short_process_shutdown` fixture only where the default
 process-exit grace period is outside the tested contract; signals and joins stay real.
 
 Before starting a check, inspect existing results and running checks. Use one
-executor per check. Reuse passing scopes while their relevant code,
-configuration, dependencies and environment still apply. Keep the command,
-scope, source version, result and log location in the task's existing acceptance
-record for reviewers and delivery. Read the actual summaries or build artifacts.
+executor per check. Reuse a passing check from a completed run after
+verifying that its summaries or build artifacts are readable and its command,
+selection, relevant code, configuration, dependencies and environment still
+apply. Link the original evidence in the task's acceptance record.
 
 Before scheduling a rerun, record the evidence that carries forward, the changed
 inputs or concrete failure hypothesis, and the checks needed to close the
@@ -174,6 +191,48 @@ inner groups after the runner is killed. Log short writes, flush/fsync failures
 and result-write failures fail the runner. No previous evidence is overwritten
 or automatically reused.
 
+### Retiring a candidate's checks
+
+For focused checks that may need retirement, start the actual entry point
+under the coordinator from the recorded execution directory:
+
+```sh
+# In the execution checkout. Use an unused absolute path for the control directory.
+.venv/bin/python -m scripts.targeted_check run "$control" -- ./scripts/check.sh --gate mypy
+```
+
+From another terminal in the same checkout, use the same control path. Once
+the directory exists, request a stop and check for a retirement record:
+
+```sh
+.venv/bin/python -m scripts.targeted_check stop "$control"
+.venv/bin/python -m scripts.targeted_check status "$control"
+```
+
+Make the checkout importable when the command's cwd is outside the repository
+root, for example with `PYTHONPATH=/path/to/checkout` for a direct Bun check
+from `web/`. Use a new control directory per execution and separate report
+directories. The coordinator holds the original runner from startup through
+exit, including shell toolchain setup, direct Bun entry points and any final
+input capture performed by the command. A stop request prevents further gate
+or browser-partition dispatch.
+
+If a focused check fails before review completes, preserve the fixed candidate
+and its failure evidence. Wait for Vera's verdict on that candidate and assess
+the results together before changing it. When a verified review finding
+requires changes, request a soft stop on the remaining checks. Repeat
+`status` until the coordinator records proof that the original runner and
+its descendants retired. An interrupted report or the outer background task's
+terminal status alone cannot prove retirement. If proof is missing, preserve
+the isolated checkout and its resource references until it can be established.
+If Playwright resource cleanup remains pending after confirmed retirement,
+retry `.venv/bin/python -m scripts.targeted_check cleanup "$control"`.
+After retirement, bring the persisted failures and review findings together.
+Pin the replacement, rerun known failing cases and affected paths first, and
+send it back through the existing Vera delegation.
+
+### Test evidence and remaining coverage
+
 In evidence mode, pytest emits JUnit and Vitest emits its native JSON in the
 same execution as the terminal reports. Their counts come from those files.
 Release pytest records the controller's workers started, failed node IDs and
@@ -182,6 +241,21 @@ crash fails the gate even if pytest exits zero, and records the worker ID
 whether or not a test was assigned. Empty execution also fails the release
 gate. Missing or invalid test reports leave counts unknown and fail evidence
 generation. Gate exit codes and failed reports remain available in the evidence.
+
+Focused pytest under `check.sh --pytest-target` with `--output` records failure
+details as the controller receives them. For direct Vitest evidence, run this
+command from `web/` with an unused absolute evidence directory and a separate
+JSON report path:
+
+```sh
+OCTOPUS_VITEST_EVIDENCE_DIR="$events" bun run test --reporter=default --reporter=json --outputFile="$report"
+```
+
+For direct Playwright, set `OCTOPUS_E2E_EVIDENCE_DIR` to a new directory before
+running `bun run test:e2e:fast`. Keep the immediate diagnostics with the native
+logs, selection and reports.
+An error record can identify a case to rerun while leaving its final outcome
+and the completion of neighboring cases unknown.
 
 Input records include HEAD, tracked and non-ignored untracked source contents,
 the focused pytest inputs above, file modes and symlink targets, configuration
@@ -212,9 +286,16 @@ identity in their native reports, and link the original failed report in the
 acceptance record.
 
 After an interrupted suite, run the uncompleted nodes when the collection and
-completion records establish the exact remaining set. Retain the original log,
-remaining-node list and segmented results. Run the incomplete suite in full if
-the required coverage cannot be established from those records.
+completion records establish the exact remaining set and the completed portion
+still applies to the fixed replacement candidate. Account for required
+setup, teardown, projects and repeats in that determination. Cases still
+running at retirement belong in the remaining set. Retain the original log,
+remaining-node list and segmented results. A collection list and early failures
+alone leave completion unknown when the final report is missing. After rerunning
+known failures and affected paths, rerun any required focused selection whose
+completion is still unproven in full to close the focused gate. Once focused
+checks and Vera pass, rerun any wider required suite with unproven coverage in
+full at its existing commit or release gate.
 
 Update or remove tests with the behavior they cover. Preserve independent
 current-behavior assertions and check shared fixture consumers before retiring
@@ -374,8 +455,10 @@ boundaries to verification without maintaining a second per-file inventory.
 | Original request settlement and failure takeover | [Completion](implemented/input-reliability.md#原请求完成与失败交接) | `test_terminal_recording.py`, `test_session_owner_failure.py` |
 | App/build/schedule/Wiki/delegation completion | [Result selection](implemented/input-reliability.md#原请求结果读取) and each domain owner | `test_codex_app_server_results.py`, `test_unattended_domain_consumers.py` |
 | Native output, images and child details | [Codex items](implemented/codex-backend.md#native-questions-and-output), [children](implemented/native-subagents.md), [Monitor](implemented/codex-performance-monitor.md) | `test_codex_native_items.py`, `native-output.spec.ts`, `native-items.spec.ts` |
+| Native file-change Result | [Transcript view](implemented/frontend-transcript-view.md), [rewind](implemented/session-rewind.md) | `test_browser_messages.py`, `test_codex_app_server_fork.py`, `MessageBubble.test.tsx`, `archived-session-restoration.spec.ts` |
 | Fork/rewind, creation uncertainty and file attribution | [Fork](implemented/session-fork.md), [rewind](implemented/session-rewind.md), [storage](implemented/current-storage-format.md) | `test_session_fork.py`, `test_session_owner_rewind_retirement.py` |
-| Reads, WS, reconnect and deletion | [Frontend](implemented/frontend-list-reconciliation.md), [socket delivery](implemented/multi-tenancy.md#websocket-delivery) | `test_ws_delivery.py`, `sessionList.test.ts`, `session-deletion.spec.ts` |
+| Reads, WS, reconnect and deletion | [Frontend](implemented/frontend-list-reconciliation.md), [socket delivery](implemented/multi-tenancy.md#websocket-delivery) | `test_ws_delivery.py`, `test_browser_session_restoration.py`, `sessionList.test.ts`, `ArchivedSessionsDialog.test.tsx`, `ChatView.test.tsx`, `session-deletion.spec.ts` |
+| Focused failure evidence and retirement | [Fixed candidates and parallel acceptance](#fixed-candidates-and-parallel-acceptance), [retirement](#retiring-a-candidates-checks) | `test_check_runner.py`, `test_check_hooks.py`, `test_targeted_check.py`, `e2eEvidence.test.ts` |
 | MCP original-command/waiter retirement | [MCP retirement](implemented/harness-layer.md#mcp-question-retirement) | `test_mcp_question_cancellation.py`, `test_ask_mcp.py` |
 | Exact cancelled-input exception and root presentation | [Root completion](implemented/codex-backend.md#root-completion-and-selected-answer) | `test_mcp_input_completion.py`, `test_codex_app_server_completion.py` |
 | Page question draft and answer association | [Question drafts](implemented/frontend-interaction-state.md#页面问题草稿与原回执), [settlement](implemented/input-reliability.md#问题结算) | `QuestionLifecycle.test.tsx`, `test_question_resolution.py`, `question-interaction.spec.ts` |

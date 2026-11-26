@@ -141,6 +141,41 @@ async def test_command_output_browser_projections_and_full_detail_replay(export_
     assert actual == samples[kind]
 
 
+@pytest.mark.parametrize("oversized", ["diff", "item-id"])
+async def test_file_change_keeps_its_native_type_when_only_the_duplicate_item_exceeds_preview_budget(export_runtime, oversized):
+    from server.harness.codex_items import item_events
+
+    db, manager, session, client, _, _ = export_runtime
+    patch = json.loads((Path(__file__).parent / "fixtures" / "codex-file-change-result.json").read_text())
+    item = patch["item"]
+    if oversized == "diff":
+        item["changes"][0]["diff"] = "+" * (18 * 1024)
+    else:
+        item["id"] = "patch-" + "x" * (16 * 1024)
+    result = item_events("item/completed", patch).events[0]
+    metadata = {"request_id": "request", "attempt_id": "attempt", "native": {
+        "thread_id": patch["threadId"], "turn_id": patch["turnId"],
+        "root_thread_id": patch["threadId"], "root_turn_id": patch["turnId"], "item_id": item["id"],
+    }}
+    await db.append_message(session.id, 0, "tool", "tool_result", result.content, tool_name=result.tool_name,
+        tool_input=result.tool_input, tool_use_id=result.tool_use_id, runtime_metadata=metadata)
+    async with connection(manager, client.headers["Authorization"].removeprefix("Bearer ")) as browser:
+        await manager._broadcast({"type": "tool_result", "session_id": session.id, "seq": 0,
+            "output": result.content, "tool_input": result.tool_input, "tool_use_id": result.tool_use_id,
+            "runtime_metadata": metadata})
+        event = await frame(browser[1])
+    snapshot = (await client.get(f"/api/sessions/{session.id}?view=browser")).json()["messages"][0]
+    assert event["output"] == snapshot["content"] == result.content
+    assert "tool" not in event and snapshot["tool_name"] == "fileChange"
+    assert event["runtime_metadata"] == snapshot["runtime_metadata"]
+    assert event["runtime_metadata"]["native"]["item_id"] == item["id"]
+    assert event["native_item_type"] == snapshot["native_item_type"] == "fileChange"
+    assert "native_item" not in event["tool_input"] and "native_item" not in snapshot["tool_input"]
+    full = (await client.get(f"/api/sessions/{session.id}/messages/0?view=browser")).json()
+    assert full["tool_input"] == {"native_item": item}
+    assert "native_item_type" not in full
+
+
 @pytest.mark.parametrize("case", ["second_prefix", "inline", "no_capture", "mcp", "user", "assistant", "embedded", "other_notice", "no_newline"])
 async def test_browser_output_filter_preserves_unproven_text(export_runtime, case):
     db, manager, session, client, _, _ = export_runtime

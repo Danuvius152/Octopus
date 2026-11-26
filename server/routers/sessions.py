@@ -11,7 +11,7 @@ from ..browser_messages import native_view, page_view, record_view, session_view
 from ..credential_bindings import CredentialBindingError
 from ..db.native_details import NativeDetailError
 from ..db.sessions import MessageExportError
-from ..deps import ScopeUser, SessionMgr
+from ..deps import CurrentUser, ScopeUser, SessionMgr, resolve_principal
 from ..harness import BackendForkNotSupported
 from ..harness.model_settings import SESSION_OVERRIDE_FIELDS
 from ..models import (
@@ -33,6 +33,7 @@ from ..models import (
     SessionArchiveResult,
     SessionDetail,
     SessionInfo,
+    SessionPresence,
     SessionRestoreRequest,
     SessionRestoreStatus,
     SessionUpdate,
@@ -92,6 +93,13 @@ def _own_session(
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     return session
+
+
+async def _require_session_account(bearer: str) -> str:
+    principal = await resolve_principal(bearer)
+    if principal is None or principal.credential_kind != "account" or principal.user_id is None:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account credentials required")
+    return principal.user_id
 
 
 @router.patch("/{session_id}", response_model=SessionInfo)
@@ -550,16 +558,33 @@ async def older_messages(
     return page_view(session_id, page) if view == "browser" else page
 
 
+@router.get("/{session_id}/presence", response_model=SessionPresence)
+async def get_session_presence(
+    session_manager: SessionMgr,
+    session_id: str,
+    response: Response,
+    account: CurrentUser,
+):
+    """Check the account's persisted membership and outstanding deletion by ID."""
+    response.headers["Cache-Control"] = "private, no-store"
+    return await session_manager.session_presence(session_id, account["id"])
+
+
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_session(
     session_manager: SessionMgr,
     session_id: str,
     user_id: ScopeUser = None,
-    _: str = Depends(verify_token),
+    archived_only: bool = Query(False),
+    bearer: str = Depends(verify_token),
 ):
-    session = _own_session(session_manager, session_id, user_id)
     try:
-        deleted = await session_manager.delete_session(session_id, expected_session=session)
+        if archived_only:
+            account_id = await _require_session_account(bearer)
+            deleted = await session_manager.delete_session(session_id, archived_user_id=account_id)
+        else:
+            session = _own_session(session_manager, session_id, user_id)
+            deleted = await session_manager.delete_session(session_id, expected_session=session)
     except ForkError as error:
         raise HTTPException(error.status_code, detail={"reason": error.reason, "message": str(error)})
     if not deleted:

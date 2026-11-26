@@ -103,19 +103,22 @@ one ticket at a time. Octo owns the tracker, integration and final delivery.
    existing claim, worktree, checks and delegations. Before claiming another
    ticket or starting final acceptance, use the previous ticket's handoff ID
    to check whether its continuation started and where to resume it.
-2. **Implement and test.** Use `implement` and, where possible, `tdd` at the
-   agreed seams. Octo must pass the ticket's [affected checks](../testing.md#fast-checks-during-development),
-   including applicable type checks. Pin the baseline and a recoverable
-   candidate that includes new files. Save the commands, results and evidence
-   for that candidate.
+2. **Implement and pin.** Use `implement` and, where possible, `tdd` at the
+   agreed seams. Pin the baseline, execution checkout and recoverable
+   candidate, including new files and extra check inputs, as described in
+   [Fixed candidates and parallel acceptance](../testing.md#fixed-candidates-and-parallel-acceptance).
 3. **Review.** Open a [named delegation](../implemented/agent-collaboration.md#invocation-and-identity)
    with `name="Vera"` and `purpose="ticket_review"` for each ticket, starting
    at design time when a decision needs early review. For final review, provide
-   the ticket, baseline, fixed diff, check results and open questions. Vera assesses the candidate against
-   the acceptance criteria and repository standards. Octo reads her verdict,
-   fixes substantiated findings, reruns the affected checks and returns the
-   revised candidate to the same `delegation_id` for verification. Follow-up
-   inherits the purpose and returns a new `work_id` for the review round.
+   the ticket, baseline, fixed candidate and diff, available evidence, planned
+   checks and open questions. Run the
+   [applicable focused checks](../testing.md#fixed-candidates-and-parallel-acceptance)
+   while Vera assesses the candidate against the acceptance criteria and
+   repository standards. Record both outcomes against the candidate. If a
+   verified review finding requires a change, follow
+   [Retiring a candidate's checks](../testing.md#retiring-a-candidates-checks)
+   and return the fixed replacement to the same `delegation_id` for verification.
+   Follow-up inherits the purpose and returns a new `work_id` for the review round.
 4. **Accept.** Keep the ticket `claimed` until its criteria are met, its checks
    pass and Vera's independent review is complete for the accepted version.
    In one ticket update, set `Status: resolved` and record the integrated
@@ -131,8 +134,10 @@ one ticket at a time. Octo owns the tracker, integration and final delivery.
    and report the outcome.
 5. **Start the next phase.** Use the recorded ID with the
    [ticket handoff tool](../implemented/input-reliability.md#ticket-handoffs).
-   After the last ticket passes, pass `pointers.next_phase="final_acceptance"`
-   and point `next_work` to the batch acceptance record.
+   Before handing off the last ticket, complete its formal review and focused
+   checks on the fixed integrated candidate. Pass
+   `pointers.next_phase="final_acceptance"` and point `next_work` to the batch
+   acceptance record.
    If the installation lacks automatic clearing, leave the handoff pending.
    When available, the runtime starts the named
    phase automatically in a fresh model context in the same Octo chat. Apply
@@ -155,9 +160,16 @@ one ticket at a time. Octo owns the tracker, integration and final delivery.
    unconfirmed handoff, reconcile any outstanding receipt and register under
    new human authorization.
 6. **Deliver and close the batch.** From confirmed final acceptance, Octo
-   checks the integrated behavior across tickets and runs the [full gate](../testing.md#full-checks-before-code-commits)
-   once on the final candidate. Complete the applicable [release checks](../testing.md#release-and-documentation-checks)
-   before the authorized commit, push and deployment. Settle pending human
+   checks whether the focused results and Vera's verdict cover the fixed
+   integrated candidate. Run any missing focused checks. If existing review
+   does not cover that candidate, open an ordinary named delegation to Vera
+   in parallel, since formal reviews belong to an active ticket. Use the
+   ordinary delegation's ID for any replacement review during final acceptance.
+   When both tracks pass for the candidate, run the [full gate](../testing.md#full-checks-before-code-commits)
+   once. When [release checks](../testing.md#release-and-documentation-checks)
+   apply, a single `--release` run covers both gates. Reuse passing evidence
+   when it still applies. Complete the applicable checks before the authorized
+   commit, push and deployment. Settle pending human
    input and verify the delivery still matches the authorization. Adopt a
    separate input that supplements the same batch with
    `mcp__ask_agent__adopt_ticket_batch_update`, using its exact text before

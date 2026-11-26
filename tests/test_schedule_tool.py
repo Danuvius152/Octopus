@@ -13,8 +13,10 @@ import pytest
 
 from server.routers import schedules as schedules_mod
 from server.session_manager import session_manager
+from tests.fake_run import capture_model_runs
 from tests.schedule_support import client as client
 from tests.schedule_support import create_session as _session
+from tests.schedule_support import schedule_job
 
 
 async def _other_agents_schedule(client) -> str:
@@ -311,6 +313,38 @@ async def test_cannot_touch_another_agents_schedule(client):
 
 
 # --- delete ---------------------------------------------------------------- #
+
+
+async def test_deleting_an_auto_archived_run_removes_history_and_preserves_the_schedule(client, monkeypatch):
+    origin = await _session(client)
+    runs = capture_model_runs(session_manager, monkeypatch)
+    created = await client.post(f"/api/sessions/{origin}/schedules", json={
+        "prompt": "Check the queue", "interval_seconds": 3600, "in_session": False,
+    })
+    assert created.status_code == 201, created.text
+    schedule_id = created.json()["id"]
+    runner = schedules_mod._runner
+    job = schedule_job(runner, schedule_id)
+    assert job is not None
+    await job.func(*job.args)
+
+    before, = (await client.get("/api/schedules")).json()
+    run_id = before["last_run_session_id"]
+    path = f"/api/sessions/{run_id}"
+    listed = (await client.get("/api/sessions", params={"include_archived": "true"})).json()
+    assert any(row["id"] == run_id and row["archived"] and row["origin"] == "schedule" for row in listed)
+    assert (await client.get(path)).status_code == 200
+    assert (await client.delete(path, params={"archived_only": "true"})).status_code == 204
+    after, = (await client.get("/api/schedules")).json()
+    assert (after["id"], after["enabled"], after["prompt"]) == (schedule_id, True, before["prompt"])
+    assert after["last_run_session_id"] == run_id
+    assert after["next_run_at"] and after["next_run_at"] == before["next_run_at"]
+    assert (await client.get(f"/api/sessions/{after['last_run_session_id']}")).status_code == 404
+
+    assert schedule_job(runner, schedule_id) is job
+    await job.func(*job.args)
+    next_run, = (await client.get("/api/schedules")).json()
+    assert len(runs) == 2 and next_run["last_run_session_id"] == runs[1].session_id != run_id
 
 
 @pytest.mark.asyncio
