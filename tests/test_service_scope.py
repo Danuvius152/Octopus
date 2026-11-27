@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -75,3 +76,39 @@ def test_checker_runs_without_site_packages_and_refuses_an_unrelated_scope():
     assert result.returncode == 78, result.stderr
     assert "not unambiguously inside" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("membership,invocation_matches", [(1, True), (2, True), (1, False)])
+def test_managed_git_proof_requires_empty_scope_and_current_invocation(tmp_path, monkeypatch, membership, invocation_matches):
+    from server import service_installation as installation
+    from server import service_scope
+
+    proc, _ = scope_files(tmp_path, count=membership)
+    unit = "octopus-test.service"
+    scope = service_scope.current_scope(unit, proc_root=proc)
+    invocation = "12" * 16
+    properties = (
+        f"MainPID={os.getpid()}\nControlGroup={scope.unit_path}\n"
+        f"Type=simple\nExitType=main\nKillMode=control-group\nSendSIGKILL=yes\n"
+        f"Delegate=no\nTasksAccounting=yes\nInvocationID={invocation}\n"
+    )
+    profile = installation.ServiceProfile(unit=unit, manager="user", paths={"db_path": str(tmp_path / "db")},
+                                          host="127.0.0.1", port=8080, enable_tunnel=False)
+    read_text = Path.read_text
+
+    def load_file(path, *args, **kwargs):
+        if path == Path("/etc/machine-id"):
+            return "machine\n"
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", load_file)
+    monkeypatch.setattr(installation, "current_scope", lambda unit: service_scope.current_scope(unit, proc_root=proc))
+    monkeypatch.setattr(installation, "check_prestart", lambda unit: service_scope.check_prestart(unit, proc_root=proc))
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, properties))
+    monkeypatch.setenv("INVOCATION_ID", invocation if invocation_matches else "23" * 16)
+    proof = installation._verify_service(profile)
+    if membership == 1 and invocation_matches:
+        assert proof.invocation == invocation
+        assert proof.covers_previous({"installation": proof.installation, "invocation": "older"})
+    else:
+        assert proof is None

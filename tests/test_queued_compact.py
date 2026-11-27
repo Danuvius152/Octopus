@@ -330,8 +330,8 @@ async def test_already_admitted_steer_keeps_delivery_before_queued_compact(queue
     anchor = fork_helpers.capture_git_anchor
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def held_anchor(*args):
-        result = await anchor(*args)
+    async def held_anchor(*args, **kwargs):
+        result = await anchor(*args, **kwargs)
         entered.set()
         await release.wait()
         return result
@@ -460,8 +460,8 @@ async def test_proven_rejected_steer_requeues_after_compact_in_original_order(na
     anchor = fork_helpers.capture_git_anchor
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def held_anchor(*args):
-        result = await anchor(*args)
+    async def held_anchor(*args, **kwargs):
+        result = await anchor(*args, **kwargs)
         entered.set()
         await release.wait()
         return result

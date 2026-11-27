@@ -255,7 +255,8 @@ async def test_delete_agent_drops_connector_links(db, binding_owner):
     await _make_agent(db, "a-1", "A", binding_owner)
     await _make_installation(db, "i-1", user_id=binding_owner)
     await db.set_owned_agent_connector("a-1", "i-1", True, binding_owner)
-    await db.delete_agent("a-1")
+    await db.claim_agent_deletion("a-1", user_id=binding_owner)
+    await db.delete_agent("a-1", user_id=binding_owner)
     # The installation survives; only the link is gone.
     assert await db.get_connector_installation("i-1") is not None
     assert await db.get_enabled_connectors_for_agent("a-1") == []

@@ -57,6 +57,7 @@ async def test_pull_and_handoff_share_the_harness_native_directory(export_runtim
     if root == "override":
         assert not native_dir.exists()
 
+    await database.update_agent(session.agent_id, backend="codex", model="codex-default")
     monkeypatch.chdir(cwd)
     options = ["handoff", "--server", "http://test", f"--token={args.token}"]
     if args.project_dir:
@@ -71,9 +72,12 @@ async def test_pull_and_handoff_share_the_harness_native_directory(export_runtim
     assert "Session imported:" in output
     imported_id = output.split("Session imported: ", 1)[1].splitlines()[0]
     imported = (await client.get(f"/api/sessions/{imported_id}")).json()
+    assert imported["agent_id"] == session.agent_id
+    assert (imported["backend"], imported["defaults_source"]) == ("claude-code", "backend")
     assert imported["working_dir"] == str(cwd)
     assert imported["claude_session_id"] == "export-native"
     assert [message["content"] for message in imported["messages"]] == ["native history"]
+    assert imported["messages"][0]["created_at"] == lines[0]["timestamp"]
     assert requests[-1] == "http://test/api/sessions/import"
 
 

@@ -351,6 +351,31 @@ root completion; it does not resume execution or change an existing outcome.
 已选 interrupted outcome 与有限采集 reader。未进入 steer writer 的取消可
 证明没有 I/O；已进入 writer 则继续依原持久发送证据判断，不能猜测回队。
 
+## Session history import
+
+`POST /api/sessions/import` installs a new session from an authenticated
+history request. CLI handoff uses the same installation path and defaults to
+Claude when the engine is omitted. Import prepares and checks the history
+before taking the [configuration lock](model-reasoning.md#persistence-and-precedence).
+The configuration candidate, native resume ID, message order, timestamps
+and attachment references are installed in one SQLite write transaction.
+The importer registers the session for execution and returns success after
+the transaction acknowledges the commit.
+
+The original operation continues if the HTTP waiter disconnects. A rollback
+leaves no installed session or partial history. If the commit acknowledgment
+is lost, the current database generation stops before registration or a
+`201` response. A subsequent generation observes either the complete session
+or its absence. Import does not automatically replay the operation.
+
+Imported dialogue text cannot claim a live request, handoff, withdrawal or
+copied-input boundary. Import removes those reserved fields from dialogue
+rows where replay interprets them and preserves ordinary tool arguments.
+Fork and missing-history recovery consume the installed dialogue using the
+existing replay rules. Regression entry points include
+`tests/test_import_api.py`, `tests/test_request_configuration.py` and
+`tests/test_cli_message_export.py`.
+
 ## 原执行的观察
 
 原接纳回执的 `execution` 持有 `RequestObservation`：原 input request/work、

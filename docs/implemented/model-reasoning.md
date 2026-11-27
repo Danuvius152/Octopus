@@ -34,6 +34,13 @@ source. Restore, archive replacement, rewind and full-copy forks preserve the
 source with the saved overrides. Archive replacement inserts the entire
 successor configuration in one write before rebinding schedules.
 
+Ordinary creation and [session import](input-reliability.md#session-history-import)
+resolve the same configuration candidate under the configuration lock. The
+candidate includes the selected engine, defaults source, per-session overrides,
+effective credential and tool policy. An explicit credential must belong to
+the account and support the selected engine. Validation and persistence use
+the same candidate. Later changes follow the saved source and override rules.
+
 Preparation captures the session overrides and Agent defaults together under
 the configuration lock. The read runs in the original request's preparation
 task. The Owner retains execution and context writes. Changes saved before

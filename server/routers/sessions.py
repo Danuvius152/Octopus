@@ -4,13 +4,15 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 
 from ..agent_configuration import AgentConfigurationError
 from ..auth import verify_token
 from ..browser_messages import native_view, page_view, record_view, session_view
 from ..credential_bindings import CredentialBindingError
+from ..db.base import DatabaseBusy
 from ..db.native_details import NativeDetailError
-from ..db.sessions import MessageExportError
+from ..db.sessions import MessageExportError, SessionImportContentError
 from ..deps import CurrentUser, ScopeUser, SessionMgr, resolve_principal
 from ..harness import BackendForkNotSupported
 from ..harness.model_settings import SESSION_OVERRIDE_FIELDS
@@ -191,14 +193,14 @@ async def import_session(
     _: str = Depends(verify_token),
 ):
     assert session_manager.db is not None
-    agent_id = req.agent_id
-    if agent_id is None:
-        sys_agent = await session_manager.db.get_system_agent(user_id)
-        agent_id = sys_agent["id"] if sys_agent else None
-    elif await session_manager.db.get_agent(agent_id, user_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     try:
-        s = await session_manager.import_session(
+        agent_id = req.agent_id
+        if agent_id is None:
+            sys_agent = await session_manager.db.get_system_agent(user_id)
+            agent_id = sys_agent["id"] if sys_agent else None
+        elif await session_manager.db.get_agent(agent_id, user_id) is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
+        return await session_manager.import_session(
             name=req.name,
             working_dir=req.working_dir,
             claude_session_id=req.claude_session_id,
@@ -207,32 +209,15 @@ async def import_session(
             agent_id=agent_id,
             backend=req.backend.value,
         )
+    except DatabaseBusy as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Session storage is busy") from exc
+    except (PydanticSerializationError, SessionImportContentError) as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Imported history cannot be represented as JSON") from exc
     except CredentialBindingError as exc:
         code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
         raise HTTPException(code, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-    messages_raw = await session_manager.db.load_messages(s.id)
-    messages = [MessageContent(**m) for m in messages_raw]
-    return SessionDetail(
-        **session_info(s).model_dump(),
-        messages=messages,
-        dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
-        pending_questions=[
-            PendingQuestionInfo(
-                question_id=q.question_id, questions=q.questions, deadline=q.deadline,
-                request_id=q.request_id, attempt_id=q.attempt_id,
-                interaction_policy=q.interaction_policy, wait_mode=q.wait_mode, snoozed=q.snoozed,
-            )
-            for q in session_manager.get_pending_questions(s.id)
-            if q.answer_target == "human"
-        ],
-        subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
-        # High-water mark: clients use this as the dedup baseline so any
-        # WS event with seq < next_message_seq is treated as already
-        # applied (it's in the messages list above).
-        next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
-    )
 
 
 @router.get("/{session_id}/wiki-jobs", response_model=list[JobCard])

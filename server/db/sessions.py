@@ -9,6 +9,7 @@ changed.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -26,8 +27,10 @@ from ..models import (
     NativeDetailPage,
 )
 from ..session_results import SessionResult, committed_result
+from .agents import require_agent_not_deleting
 from .applications import (
     ApplicationDeleting,
+    application_deletion_blocks_session,
     require_application_writable,
     retain_application_session_owner,
 )
@@ -51,6 +54,10 @@ class MessageExportError(ValueError):
     """A scoped export cannot provide a usable fixed-member page."""
 
 
+class SessionImportContentError(ValueError):
+    """A prepared transcript cannot be represented as stored JSON and numbers."""
+
+
 _HANDOFF_INPUT = ("role='user' AND type='text' AND CASE WHEN json_valid(tool_input) "
                   "THEN json_extract(tool_input,'$.request_context.source')='handoff' "
                   "AND json_extract(tool_input,'$.handoff_withdrawn') IS NOT 1 ELSE 0 END "
@@ -67,6 +74,79 @@ _MESSAGE_COLUMNS = (
     "git_status_clean, created_at, runtime_metadata, git_ignored_baseline"
 )
 
+_INSERT_MESSAGE = (
+    "INSERT INTO messages "
+    "(session_id, seq, role, type, content, tool_name, tool_input, "
+    "tool_use_id, is_error, session_id_ref, cost, attachments, "
+    "git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id, git_ignored_baseline) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def _message_values(
+    session_id: str,
+    seq: int,
+    role: str,
+    type: str,
+    content: Any = None,
+    tool_name: str | None = None,
+    tool_input: dict[str, Any] | None = None,
+    tool_use_id: str | None = None,
+    is_error: bool | None = None,
+    session_id_ref: str | None = None,
+    cost: float | None = None,
+    attachments: list[dict[str, Any]] | None = None,
+    git_head: str | None = None,
+    git_status_clean: bool | None = None,
+    created_at: str | None = None,
+    runtime_metadata: dict[str, Any] | None = None,
+    terminal_request_id: str | None = None,
+    git_ignored_baseline: str | None = None,
+    *,
+    allow_nan: bool = True,
+) -> tuple[Any, ...]:
+    if not allow_nan and cost is not None and not math.isfinite(cost):
+        raise ValueError("Message cost must be finite")
+    return (
+        session_id, seq, role, type,
+        json.dumps(content, allow_nan=allow_nan) if content is not None else None,
+        tool_name, json.dumps(tool_input, allow_nan=allow_nan) if tool_input is not None else None, tool_use_id,
+        int(is_error) if is_error is not None else None,
+        session_id_ref, cost, json.dumps(attachments, allow_nan=allow_nan) if attachments else None,
+        git_head, int(git_status_clean) if git_status_clean is not None else None,
+        created_at or datetime.now(UTC).isoformat(),
+        json.dumps(runtime_metadata, allow_nan=allow_nan) if runtime_metadata is not None else None,
+        terminal_request_id, git_ignored_baseline,
+    )
+
+
+def prepare_imported_message_rows(session_id: str, history: list[MessageContent]) -> list[tuple[Any, ...]]:
+    """Encode the transcript before taking the configuration or SQLite write lock."""
+    try:
+        return [
+            _message_values(
+                session_id=session_id,
+                seq=seq,
+                role=message.role.value,
+                type=message.type,
+                content=message.content,
+                tool_name=message.tool_name,
+                tool_input=message.tool_input,
+                tool_use_id=message.tool_use_id,
+                is_error=message.is_error,
+                session_id_ref=message.session_id,
+                cost=message.cost,
+                attachments=[attachment.model_dump() for attachment in message.attachments],
+                created_at=message.created_at,
+                runtime_metadata=message.runtime_metadata.model_dump() if message.runtime_metadata else None,
+                allow_nan=False,
+            )
+            for seq, message in enumerate(history)
+        ]
+    except ValueError as error:
+        raise SessionImportContentError("Cannot encode imported message rows") from error
+
+
 _SESSION_COLUMNS = (
     "id name working_dir created_at claude_session_id credential_id archived agent_id origin backend "
     "parent_session_id delegation_request forked_from_session_id fork_after_seq fork_needs_replay fork_metadata "
@@ -77,6 +157,11 @@ _SESSION_PROJECTION = ",".join(f"s.{column}" for column in _SESSION_COLUMNS) + (
     ", (SELECT CASE WHEN json_extract(i.payload,'$.ticket_batch') IN ('registered','finishing') THEN i.request_id END "
     f"FROM client_submissions i WHERE i.session_id=s.id AND {INDEPENDENT_HUMAN_INPUT} "
     "ORDER BY i.rowid DESC LIMIT 1)"
+)
+_UNRETIRED_REVERT = (
+    "origin='fork' AND fork_status='reverting' AND "
+    "COALESCE(CASE WHEN json_valid(fork_metadata) "
+    "THEN json_extract(fork_metadata, '$.revert_git_retired') END, 0) != 1"
 )
 
 
@@ -192,6 +277,7 @@ async def delegation_consumption(
 
 async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
     """Insert a prepared session within its owning admission transaction."""
+    await require_agent_not_deleting(tx, record.get("agent_id"))
     columns = ("id", "name", "working_dir", "created_at", "claude_session_id", "credential_id",
                "agent_id", "origin", "backend", "parent_session_id", "delegation_request", "app_id", "user_id",
                "defaults_source", "model", "reasoning_effort", "service_tier")
@@ -286,10 +372,11 @@ class SessionsMixin(DatabaseBase):
             return row[0]
 
     async def get_session_binding(self, session_id: str) -> dict[str, Any] | None:
-        """Internal relationship lookup; callers must compare the exact owner."""
+        """Relationship lookup for installed sessions; compare the exact owner."""
         async with self.transaction(write=False) as tx:
             cursor = await tx.execute(
-                "SELECT id, agent_id, user_id, archived FROM sessions WHERE id = ?",
+                "SELECT id, agent_id, user_id, archived FROM sessions WHERE id = ? "
+                "AND fork_status IS NOT 'reverting'",
                 (session_id,),
             )
             row = await cursor.fetchone()
@@ -439,6 +526,15 @@ class SessionsMixin(DatabaseBase):
                 reasoning_effort=reasoning_effort, service_tier=service_tier,
             ))
 
+    async def install_session_history(
+        self, record: dict[str, Any], rows: list[tuple[Any, ...]],
+    ) -> None:
+        """Commit a new session and its prepared transcript as one history write."""
+        async with self.transaction(write=True) as tx:
+            await insert_session(tx, record)
+            if rows:
+                await tx.execute_many(_INSERT_MESSAGE, rows)
+
     def add_session_delete_hook(self, hook: Callable[[str], None]) -> None:
         """Notify a recording owner after this relationship is truly removed.
 
@@ -450,7 +546,11 @@ class SessionsMixin(DatabaseBase):
 
     async def delete_session(self, session_id: str) -> None:
         async with self.transaction(write=True) as tx:
-            await tx.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            deleted = await tx.execute(
+                "DELETE FROM sessions WHERE id=? AND fork_status IS NOT 'reverting'", (session_id,),
+            )
+            if not deleted.rowcount and await tx.fetch_one("SELECT 1 FROM sessions WHERE id=?", (session_id,)):
+                raise ValueError("Cannot delete a fork awaiting Git execution retirement")
         for hook in tuple(self._session_delete_hooks):
             hook(session_id)
 
@@ -524,6 +624,7 @@ class SessionsMixin(DatabaseBase):
                 if parent is None or parent[0] != user_id:
                     raise ValueError("Application session ownership cannot cross accounts")
             snapshot = message_snapshot or await _fork_message_snapshot(tx, parent_id, fork_after_seq)
+            await require_agent_not_deleting(tx, agent_id)
             await tx.execute(
                 "INSERT INTO sessions "
                 "(id, name, working_dir, created_at, claude_session_id, "
@@ -550,7 +651,7 @@ class SessionsMixin(DatabaseBase):
         return app_id
 
     async def load_sessions(
-        self, *, include_archived: bool = False, user_id: str | None = None
+        self, *, include_archived: bool = False, user_id: str | None = None, session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Every session row, or only one account's (multi-tenancy.md §5).
 
@@ -565,6 +666,9 @@ class SessionsMixin(DatabaseBase):
             if user_id is not None:
                 clauses.append("user_id = ?")
                 params.append(user_id)
+            if session_id is not None:
+                clauses.append("id = ?")
+                params.append(session_id)
             if clauses:
                 query += " WHERE " + " AND ".join(clauses)
             cursor = await tx.execute(query, params)
@@ -573,6 +677,7 @@ class SessionsMixin(DatabaseBase):
 
     async def load_archived_sessions(
         self, *, user_id: str | None = None, session_id: str | None = None,
+        unavailable_rewinds: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         """Owned archives and complete sequence state in one read snapshot.
 
@@ -580,7 +685,12 @@ class SessionsMixin(DatabaseBase):
         None ownership retains the internal unscoped load_sessions convention.
         Rowid order preserves the list's original insertion order.
         """
-        clauses, params = ["s.archived = 1"], []
+        archive = "s.archived = 1"
+        params: list[Any] = []
+        if unavailable_rewinds:
+            archive = f"({archive} OR (s.fork_status='ready' AND s.id IN (SELECT value FROM json_each(?))))"
+            params.append(json.dumps(unavailable_rewinds))
+        clauses = [archive, "s.fork_status IS NOT 'reverting'"]
         if user_id is not None:
             clauses.append("s.user_id = ?")
             params.append(user_id)
@@ -736,43 +846,13 @@ class SessionsMixin(DatabaseBase):
         terminal_request_id: str | None = None,
         git_ignored_baseline: str | None = None,
     ) -> None:
-        content_str = json.dumps(content) if content is not None else None
-        tool_input_str = json.dumps(tool_input) if tool_input is not None else None
-        is_error_int = int(is_error) if is_error is not None else None
-        attachments_str = (
-            json.dumps(attachments) if attachments else None
-        )
-        git_status_clean_int = (
-            int(git_status_clean) if git_status_clean is not None else None
-        )
-
-        await tx.execute(
-            "INSERT INTO messages "
-            "(session_id, seq, role, type, content, tool_name, tool_input, "
-            "tool_use_id, is_error, session_id_ref, cost, attachments, "
-            "git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id, git_ignored_baseline) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                session_id,
-                seq,
-                role,
-                type,
-                content_str,
-                tool_name,
-                tool_input_str,
-                tool_use_id,
-                is_error_int,
-                session_id_ref,
-                cost,
-                attachments_str,
-                git_head,
-                git_status_clean_int,
-                created_at or datetime.now(UTC).isoformat(),
-                json.dumps(runtime_metadata) if runtime_metadata is not None else None,
-                terminal_request_id,
-                git_ignored_baseline,
-            ),
-        )
+        await tx.execute(_INSERT_MESSAGE, _message_values(
+            session_id, seq, role, type, content=content, tool_name=tool_name, tool_input=tool_input,
+            tool_use_id=tool_use_id, is_error=is_error, session_id_ref=session_id_ref, cost=cost,
+            attachments=attachments, git_head=git_head, git_status_clean=git_status_clean,
+            created_at=created_at, runtime_metadata=runtime_metadata, terminal_request_id=terminal_request_id,
+            git_ignored_baseline=git_ignored_baseline,
+        ))
 
     async def record_request(self, *, request_id: str, **message: Any) -> None:
         """Confirm one input and its server-owned context before execution.
@@ -801,7 +881,7 @@ class SessionsMixin(DatabaseBase):
             # would otherwise make an uncertain retry duplicate the input.
             query = (
                 f"SELECT {', '.join(columns)} FROM messages WHERE session_id = ? "
-                "AND (seq = ? OR CASE WHEN json_valid(tool_input) THEN "
+                "AND (seq = ? OR CASE WHEN role='user' AND type='text' AND json_valid(tool_input) THEN "
                 "json_extract(tool_input, '$.request_context.request_id') = ? ELSE 0 END)"
             )
             params = (message["session_id"], message["seq"], request_id)
@@ -1113,7 +1193,35 @@ class SessionsMixin(DatabaseBase):
                 for r in rows
             ]
 
-    async def update_session_field(self, session_id: str, **fields: Any) -> None:
+    async def load_revert_worktrees(self) -> list[tuple[str, str | None, tuple[int, int] | None]]:
+        """Retained worktree boundaries, including older candidates without a saved root."""
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                "SELECT working_dir, CASE WHEN json_valid(fork_metadata) "
+                "THEN json_extract(fork_metadata, '$.revert_worktree') END, "
+                "CASE WHEN json_valid(fork_metadata) THEN json_extract(fork_metadata, '$.rewind_worktree_id[0]') END, "
+                "CASE WHEN json_valid(fork_metadata) THEN json_extract(fork_metadata, '$.rewind_worktree_id[1]') END "
+                f"FROM sessions WHERE {_UNRETIRED_REVERT}",
+            )
+        return [
+            (cwd, root if isinstance(root, str) else None,
+             (device, inode) if type(device) is int and type(inode) is int else None)
+            for cwd, root, device, inode in rows
+        ]
+
+    async def has_reverting_fork(self, session_ids: list[str]) -> bool:
+        if not session_ids:
+            return False
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                f"SELECT 1 FROM sessions WHERE {_UNRETIRED_REVERT} AND id IN ({','.join('?' for _ in session_ids)})",
+                tuple(session_ids),
+            )
+        return row is not None
+
+    async def update_session_field(
+        self, session_id: str, *, require_current_directory: Callable[[], None] | None = None, **fields: Any,
+    ) -> None:
         async with self.transaction(write=True) as tx:
             allowed = {
                 "name",
@@ -1157,12 +1265,77 @@ class SessionsMixin(DatabaseBase):
                 updates[k] = int(bool(v)) if k in bool_fields else v
             if not updates:
                 return
+            await require_agent_not_deleting(tx, updates.get("agent_id"))
             set_clause = ", ".join(f"{k} = ?" for k in updates)
             values = list(updates.values()) + [session_id]
+            if require_current_directory is not None:
+                require_current_directory()
             await tx.execute(
                 f"UPDATE sessions SET {set_clause} WHERE id = ?",
                 values,
             )
+            if require_current_directory is not None:
+                require_current_directory()
+
+    async def begin_bound_archive_restore(
+        self, session_id: str, metadata: str, marker: str, *, was_archived: bool = True,
+        require_current_directory: Callable[[], None],
+    ) -> bool:
+        async with self.transaction(write=True) as tx:
+            await require_application_writable(tx, session_id)
+            require_current_directory()
+            row = await tx.fetch_one(
+                "UPDATE sessions SET archived=0, fork_metadata=json_set(fork_metadata, '$.rewind_restore_pending', ?) "
+                "WHERE id=? AND archived=? AND fork_metadata=? RETURNING id",
+                (marker, session_id, int(was_archived), metadata),
+            )
+            require_current_directory()
+            return row is not None
+
+    async def settle_bound_archive_restore(
+        self, session_id: str, marker: str | bool, *, archived: bool,
+        require_current_directory: Callable[[], None] | None = None,
+    ) -> str | None:
+        """Settle just the original restore while preserving intervening metadata changes."""
+        async with self.transaction(write=True) as tx:
+            if not archived:
+                await require_application_writable(tx, session_id)
+            if require_current_directory is not None:
+                require_current_directory()
+            row = await tx.fetch_one(
+                "UPDATE sessions SET archived=?, fork_metadata=json_remove(fork_metadata, '$.rewind_restore_pending') "
+                "WHERE id=? AND archived=0 AND CASE WHEN json_valid(fork_metadata) "
+                "THEN json_extract(fork_metadata, '$.rewind_restore_pending') END = ? RETURNING fork_metadata",
+                (int(archived), session_id, marker),
+            )
+            if require_current_directory is not None:
+                require_current_directory()
+            return row[0] if row else None
+
+    async def rearchive_confirmed_bound_restore(self, session_id: str, confirmed_metadata: str) -> None:
+        """Compensate a commit acknowledged before the live session was installed."""
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE sessions SET archived=1 WHERE id=? AND archived=0 AND fork_metadata=?",
+                (session_id, confirmed_metadata),
+            )
+
+    async def finish_fork_revert(
+        self, session_id: str, record: str, metadata: str, *, require_current_directory: Callable[[], None],
+    ) -> tuple[bool, bool] | None:
+        """Commit the result and capture archive and application admission in the same transaction."""
+        async with self.transaction(write=True) as tx:
+            require_current_directory()
+            row = await tx.fetch_one(
+                "UPDATE sessions SET fork_revert_record=?, fork_metadata=?, fork_status='ready' "
+                "WHERE id=? AND origin='fork' AND fork_status='reverting' RETURNING archived",
+                (record, metadata, session_id),
+            )
+            if row is None:
+                return None
+            application_deleting = await application_deletion_blocks_session(tx, session_id)
+            require_current_directory()
+            return bool(row[0]), application_deleting
 
     async def finish_full_copy_fork(
         self, session_id: str, resume_id: str | None, needs_replay: bool,

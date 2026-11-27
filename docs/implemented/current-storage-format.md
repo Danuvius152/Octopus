@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 当前格式准入、持久资源、完整记录与离线交接不变量。
 
-The main database uses format **14**, and Wiki uses format **17**. Each database
+The main database uses format **15**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -67,6 +67,14 @@ The exact collection and exclusions are maintained in
 Archive affects visibility; it is not a uniform age-based data deletion policy.
 
 ## Current field representations
+
+The main database stores `agents.deletion_pending` on the original account-owned
+Agent row. A pending Agent is archived, belongs to an account and has no
+associated sessions. A complete backup or account transfer preserves that
+row together with any remaining private tree and retirement evidence.
+An explicit retry settles the cleanup under the original identity.
+[Agent lifecycle](agent-refactor.md#creation-names-and-lifecycle) owns the
+admission and deletion behavior.
 
 Every GitHub installation's `external_account_id` must be the
 provider's positive numeric ID in canonical ASCII decimal text. Login is a
@@ -181,6 +189,30 @@ after object deletion or garbage collection. There is no schema conversion,
 new backup root or historical backfill. Existing session JSON, API projection
 and complete backup retain the original value. Creation, verification and
 uncertain effects belong to [safe rewind](session-rewind.md#the-one-revert-we-offer-file-edits-via-git).
+
+The private `fork_metadata.rewind_worktree_id` holds the reserved directory's
+device and inode until the first input consumes the preparation metadata.
+Confirmed application file removal can also release the binding of retained
+ready build histories in the same commit that removes the application row.
+`rewind_restore_pending` identifies an unarchive awaiting directory verification.
+The marker survives the initial commit. The final transaction verifies the
+current binding before consuming it and preserves any binding release from
+application cleanup. The live operation checks the acknowledged binding again
+before registration and conditionally rearchives a failed installation. Startup
+settles a marked restore with a mismatched directory back to the archive. When
+the marker is already cleared, a bound history with an unavailable directory is
+readable and retryable through the archive views without changing its stored
+archive status. An application deletion in progress defers settlement until
+the deletion commits.
+During `reverting`, `revert_worktree` records the path for rows without a
+directory identity, and `revert_writer` can identify the managed installation
+and invocation. If the path changes after confirmed retirement,
+`revert_git_retired` lets recovery retain the unavailable candidate without
+continuing to fence other rewinds. These revert-specific fields leave metadata
+at `ready`. The private `fork_revert_record.git_result` retains available Git
+output and exit, deadline and retirement facts. A historical candidate without writer identity stays pending
+unless the original execution has an applicable retirement proof. See
+[rewind recovery](session-rewind.md#crash-recovery).
 
 Question resolution uses the existing nullable message `tool_input` JSON:
 `question_resolution.version=1` carries original form/execution association,
@@ -471,18 +503,15 @@ keeps business closed. Reentry inspects actual committed facts under the same
 candidate and frozen inputs; it must not overwrite newer files/databases or
 replay model/tool effects. Runtime callbacks cannot be restored from JSON.
 
-The finite main-format 13 to 14 handoff requires preflight to use the pinned source
-release's verifier and checks the live process's database identity. After
-writer retirement, the loaded service mask and offline installation lock
-cover the baseline capture, transaction and handle closure. One transaction
-adds the constrained `sessions.defaults_source` column and advances
-`user_version`. Existing rows receive the `agent` source and retain their
-original inheritance. A fresh read verifies the candidate layout and compares original
-values, row IDs, remaining tables and SQLite sequences with the frozen facts.
-Reentry with committed format 14 repeats that comparison read-only before
-first start, including when the release pointer already changed. A readiness
-receipt bound to the original request, candidate process and database identity
-supplies evidence that subsequent normal writes can exist.
+The [main-format 14 to 15 converter](../../scripts/upgrade-main-14-to-15.py)
+runs under offline installation ownership after writer retirement. It uses
+the pinned format-14 source verifier and syncs a baseline bound to the
+database, source, candidate, converter and configuration before changing
+storage. One transaction adds the constrained `agents.deletion_pending` column
+with every existing Agent clear and advances `user_version`. Verification
+compares the complete current layout and the original tables, values, row IDs
+and sequences against the baseline. Reentry with committed format 15 requires
+the same baseline and verifies the result read-only before first start.
 
 Only verified current storage permits candidate start and credential writes.
 Do not rotate or clean credentials by opening an uncertain store. A running

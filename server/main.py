@@ -124,6 +124,7 @@ async def lifespan(app: FastAPI):
         # Its prior writers are gone; recovery still preserves their unknown
         # outcomes. Standalone startup has no corresponding retirement proof.
         await session_manager.initialize(db, previous_writers_retired=installation.profile is not None,
+                                         git_writer_scope=installation.git_writer_scope,
                                          defer_copy_delivery=True)
         # Restore round receipts before any background producer can start work.
         started.add("delegations")

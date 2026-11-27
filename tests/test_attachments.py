@@ -399,10 +399,11 @@ async def test_app_delete_retry_reopens_the_session_loaded_at_startup(
     app_row_deleted, release_session = asyncio.Event(), asyncio.Event()
     delete_app = db.delete_application
 
-    async def hold_after_deleting_row(app_id):
-        await delete_app(app_id)
+    async def hold_after_deleting_row(app_id, **kwargs):
+        result = await delete_app(app_id, **kwargs)
         app_row_deleted.set()
         await release_session.wait()
+        return result
 
     monkeypatch.setattr(db, "delete_application", hold_after_deleting_row)
     deletion = asyncio.create_task(client.delete(app_url, params={"keep_files": "true"}))

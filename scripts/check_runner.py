@@ -85,6 +85,14 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def atomic_json(path: Path, value: Any) -> None:
     temporary = None
     try:
@@ -98,11 +106,7 @@ def atomic_json(path: Path, value: Any) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        sync_directory(path.parent)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -241,9 +245,10 @@ def children() -> set[int]:
 class GateChildren:
     """Own one sequential gate, including orphans that create their own session."""
 
-    def __init__(self, *, term_grace: float = 5):
+    def __init__(self, *, term_grace: float = 5, handle_signals: bool = True):
         self.process: subprocess.Popen | None = None
         self.term_grace = term_grace
+        self.handle_signals = handle_signals
         self.pending: int | None = None
         self.deferred = True
         self.previous: int | None = None
@@ -255,7 +260,8 @@ class GateChildren:
             raise Interrupted(self.pending)
 
     def __enter__(self):
-        self.handlers = {sig: signal.signal(sig, self.interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
+        if self.handle_signals:
+            self.handlers = {sig: signal.signal(sig, self.interrupt) for sig in (signal.SIGINT, signal.SIGTERM)}
         try:
             if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
                 raise OSError("Check execution requires default SIGCHLD handling to retain real child exit status")

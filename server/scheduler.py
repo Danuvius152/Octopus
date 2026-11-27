@@ -78,6 +78,7 @@ class _ScheduleRegistration:
     schedule_id: str
     job_id: str
     timing: _ScheduleTiming
+    agent_id: str
     admission_revoked: bool = False
 
 
@@ -164,7 +165,7 @@ class ScheduleRunner:
         # Periodic jobs share the instance limit across edits. Each date arm
         # gets its own executor slot even if its predecessor is still unwinding.
         job_id = f"{schedule_id}:date:{uuid4().hex}" if timing.run_at is not None else schedule_id
-        registration = _ScheduleRegistration(schedule_id, job_id, timing)
+        registration = _ScheduleRegistration(schedule_id, job_id, timing, row["agent_id"])
         common = dict(id=job_id, args=[registration], replace_existing=True)
         if timing.run_at is not None:
             run_date = max(stored_run_at(timing.run_at), not_before or datetime.now(UTC))
@@ -596,7 +597,16 @@ class ScheduleRunner:
                 raise ScheduleTargetError("knowledge_owner_mismatch", "Schedule knowledge belongs to another account")
         except ScheduleTargetError as exc:
             return exc.reason
+        # A pending hard deletion closes creation at the SessionManager. An
+        # unconsumed date can still rearm and periodic jobs keep their cadence.
         return "agent_archived" if row["agent_id"] in self._session_mgr._closed_agents else None
+
+    async def remove_deleted_agent_schedules(self, agent_id: str) -> None:
+        """Remove triggers after SQLite has cascaded their definitions."""
+        async with self._registration_lock:
+            for schedule_id, registration in tuple(self._registrations.items()):
+                if registration.agent_id == agent_id:
+                    self._remove_job(schedule_id)
 
     async def suspend_agent(self, agent_id: str) -> None:
         for row in await self._db.load_schedules():

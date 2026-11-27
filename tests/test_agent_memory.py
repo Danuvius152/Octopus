@@ -8,6 +8,8 @@ by the gated real-CLI test.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from server import agent_memory
@@ -32,6 +34,110 @@ def test_ensure_and_remove_agent_dirs(agents_root):
 
     agent_memory.remove_agent_dir("a")
     assert not agent_memory.agent_state_dir("a").exists()
+
+
+@pytest.mark.parametrize("component", ["account", "agents", "agent"])
+def test_private_agent_removal_rejects_links_in_its_address(tmp_path, monkeypatch, component):
+    users = tmp_path / "users"
+    monkeypatch.setattr(settings, "users_root", str(users))
+    target = users / "original" / "agents" / "a"
+    blocked = {"account": target.parents[1], "agents": target.parent, "agent": target}[component]
+    blocked.parent.mkdir(parents=True)
+    external = tmp_path / "keep"
+    original = external / target.relative_to(blocked) / "memory" / "keep.md"
+    original.parent.mkdir(parents=True)
+    original.write_text("Keep the unrelated files\n")
+    blocked.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        agent_memory.remove_agent_dir("a", "original")
+    assert original.read_text() == "Keep the unrelated files\n"
+
+
+def test_private_agent_removal_accepts_the_configured_root_alias(tmp_path, monkeypatch):
+    users = tmp_path / "users"
+    users.mkdir()
+    configured = tmp_path / "configured-users"
+    configured.symlink_to(users, target_is_directory=True)
+    monkeypatch.setattr(settings, "users_root", str(configured))
+    agent_memory.ensure_agent_dirs("a", "original")
+    agent_memory.remove_agent_dir("a", "original")
+    assert not (users / "original" / "agents" / "a").exists()
+
+
+@pytest.mark.parametrize("component", ["account", "agents", "agent", "memory"])
+def test_private_agent_removal_refuses_to_cross_mounts(tmp_path, monkeypatch, component):
+    monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
+    agent_memory.ensure_agent_dirs("a", "original")
+    memory = agent_memory.agent_memory_dir("a", "original")
+    original = memory / "keep.md"
+    original.write_text("Keep files behind the mount\n")
+    paths = {"memory": memory, "agent": memory.parent, "agents": memory.parents[1], "account": memory.parents[2]}
+    binding = paths[component].stat()
+    mount_id = agent_memory.directory_cleanup.mount_id
+
+    def replacement_mount(descriptor):
+        return "unexpected-bind-mount" if os.path.samestat(os.fstat(descriptor), binding) else mount_id(descriptor)
+
+    monkeypatch.setattr(agent_memory.directory_cleanup, "mount_id", replacement_mount)
+    with pytest.raises(OSError, match="mount"):
+        agent_memory.remove_agent_dir("a", "original")
+    assert original.read_text() == "Keep files behind the mount\n"
+
+
+@pytest.mark.parametrize("component", ["agents", "agent"])
+def test_private_agent_removal_detects_directory_replacement(tmp_path, monkeypatch, component):
+    users = tmp_path / "users"
+    monkeypatch.setattr(settings, "users_root", str(users))
+    agent_memory.ensure_agent_dirs("a", "original")
+    target = agent_memory.agent_state_dir("a", "original")
+    blocked = {"agents": target.parent, "agent": target}[component]
+    retired = tmp_path / "original-directory"
+    remove = agent_memory.directory_cleanup.empty_directory
+    replace = True
+
+    def swap_then_remove(*args, **kwargs):
+        nonlocal replace
+        if replace:
+            replace = False
+            blocked.rename(retired)
+            decoy = blocked / target.relative_to(blocked) / "memory" / "keep.md"
+            decoy.parent.mkdir(parents=True)
+            decoy.write_text("Keep the replacement files\n")
+        return remove(*args, **kwargs)
+
+    monkeypatch.setattr(agent_memory.directory_cleanup, "empty_directory", swap_then_remove)
+    with pytest.raises(OSError, match="changed"):
+        agent_memory.remove_agent_dir("a", "original")
+    assert (target / "memory" / "keep.md").read_text() == "Keep the replacement files\n"
+
+
+def test_private_agent_removal_preserves_final_empty_replacement(agents_root, monkeypatch):
+    agent_memory.ensure_agent_dirs("a")
+    target = agent_memory.agent_state_dir("a")
+    saved = agents_root / "moved-original"
+    move = agent_memory.directory_cleanup.move_unoccupied
+    switched = None
+
+    def replace_at_final_move(source_parent, source, dest_parent, dest):
+        nonlocal switched
+        if source == "a":
+            target.rename(saved)
+            target.mkdir()
+            switched = target.stat()
+        return move(source_parent, source, dest_parent, dest)
+
+    monkeypatch.setattr(agent_memory.directory_cleanup, "move_unoccupied", replace_at_final_move)
+    with pytest.raises(OSError, match="original directory proof"):
+        agent_memory.remove_agent_dir("a")
+    slot = agents_root / agent_memory.retirement_name("a")
+    preserved = slot / "directory"
+    assert switched is not None and os.path.samestat(switched, preserved.stat())
+    assert not target.exists()
+    assert saved.is_dir()
+    with pytest.raises(OSError, match="original directory proof"):
+        agent_memory.remove_agent_dir("a")
+    assert os.path.samestat(switched, preserved.stat())
 
 
 def test_ensure_agent_dirs_is_idempotent(agents_root):
@@ -97,7 +203,7 @@ async def test_unarchive_and_delete_keep_one_owner_of_agent_memory(agents_root, 
     async def blocked(identifier):
         entered.set()
         await release.wait()
-        await unarchive(identifier)
+        return await unarchive(identifier)
 
     monkeypatch.setattr(database, "unarchive_agent", blocked)
     restoring = asyncio.create_task(sessions.unarchive_agent(agent["id"], owner["id"]))

@@ -4,23 +4,29 @@ import asyncio
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import agent_memory
 from server.agent_manager import AgentManager
 from server.database import Database
+from server.db.agents import AgentDeleteRefused, AgentDeletionPending
+from server.db.schedules import schedule_delivery_id
+from server.delegations import DelegationManager
 from server.deps import set_user_manager
 from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
+from server.sessions.runtime_types import SessionAdmissionClosed
 from server.users import UserManager
 from tests.fake_run import FakeRunBase, model_run_factory
 from tests.harness_profiles import process_profile
-from tests.schedule_support import dispatch_schedule, schedule_job
+from tests.schedule_support import dispatch_schedule, save_schedule, schedule_job
 from tests.test_session_retirement import _retire_original_test_process
 
 
@@ -420,6 +426,166 @@ async def test_delete_empty_agent(client):
     assert (await client.get(f"/api/agents/{agent['id']}", headers=client.headers)).status_code == 404
 
 
+@pytest.mark.parametrize("partial", [False, True])
+async def test_agent_delete_file_failure_can_retry_same_agent(client, monkeypatch, partial):
+    agent = await _create_agent(client, name="Delete after file failure")
+    neighbor = await _create_agent(client, name="Keep private memory")
+    db = session_manager.db
+    owner = (await db.get_agent_identity(agent["id"]))["user_id"]
+    url = f"/api/agents/{agent['id']}"
+    memory = agent_memory.agent_memory_dir(agent["id"], owner)
+    first, second = memory / "first.md", memory / "second.md"
+    first.write_text("First\n")
+    second.write_text("Second\n")
+    neighbor_memory = agent_memory.agent_memory_dir(neighbor["id"], owner) / "MEMORY.md"
+    neighbor_memory.write_text("Neighbor\n")
+    shared = memory.parents[1] / "shared-memory" / "MEMORY.md"
+    shared.parent.mkdir(exist_ok=True)
+    shared.write_text("Shared\n")
+    events = []
+
+    async def capture(event):
+        if event["type"] == "agent_deleted":
+            events.append(event["agent_id"])
+
+    def fail_removal(*args, **kwargs):
+        if partial:
+            first.unlink()
+        raise PermissionError("injected file failure")
+
+    session_manager.on_broadcast("observe-delete-file-failure", capture)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(agent_memory, "remove_agent_dir", fail_removal)
+            failed = await client.delete(url)
+        assert failed.status_code == 409 and "retry" in failed.json()["detail"].lower()
+        assert (await client.get(url)).json()["id"] == agent["id"]
+        assert (await client.post(f"{url}/unarchive")).status_code == 409
+        assert (await client.post(f"{url}/sessions", json={"name": "Closed"})).status_code in (400, 409)
+        assert first.exists() is not partial
+        assert second.read_text() == "Second\n"
+        assert events == []
+
+        assert (await client.delete(url)).status_code == 204
+        assert (await client.get(url)).status_code == 404
+        assert not memory.parent.exists()
+        assert events == [agent["id"]]
+        assert shared.read_text() == "Shared\n"
+        assert neighbor_memory.read_text() == "Neighbor\n"
+    finally:
+        session_manager.remove_broadcast("observe-delete-file-failure")
+
+
+async def test_agent_delete_owns_cleanup_and_one_event_after_http_cancellation(client, monkeypatch, tmp_path):
+    agent = await _create_agent(client, name="Retained cleanup owner")
+    agent_id = agent["id"]
+    url = f"/api/agents/{agent_id}"
+    db = session_manager.db
+    runner = schedules_mod._get_runner()
+    runner._scheduler.pause()
+    owner = (await db.get_agent_identity(agent_id))["user_id"]
+    foreign = await UserManager(db).create_user(username="foreign", password="test-password")
+    foreign_token = await UserManager(db).issue_token(foreign["id"])
+    neighbor = await _create_agent(client, name="Session belongs here")
+    session = await session_manager.create_session(neighbor["id"])
+    await db.append_message(session.id, 0, "user", "text", "Keep original history")
+    definition = dict(agent_id=agent_id, name="Pending", prompt="Keep definition", created_at="time", interval_seconds=3600)
+    await save_schedule(db, schedule_id="pending-agent-schedule", **definition)
+    await runner.reconcile("pending-agent-schedule")
+    assert schedule_job(runner, "pending-agent-schedule") is not None
+
+    remove = agent_memory.remove_agent_dir
+    cleanup, settled, finish, joining = (asyncio.Event() for _ in range(4))
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    removals, events = [], []
+    input_database = session_manager.input_database
+
+    def observe_join():
+        if asyncio.current_task() is duplicate:
+            joining.set()
+        return input_database()
+
+    def held_remove(identifier, user_id):
+        removals.append((identifier, user_id))
+        loop.call_soon_threadsafe(cleanup.set)
+        if not release.wait(5):
+            raise TimeoutError("test did not release Agent cleanup")
+        remove(identifier, user_id)
+
+    async def observe(event):
+        if event["type"] == "agent_deleted":
+            events.append(event["agent_id"])
+            settled.set()
+            await finish.wait()
+
+    monkeypatch.setattr(agent_memory, "remove_agent_dir", held_remove)
+    monkeypatch.setattr(session_manager, "input_database", observe_join)
+    session_manager.on_broadcast("observe-owned-agent-delete", observe)
+    original = asyncio.create_task(client.delete(url))
+    duplicate = None
+    try:
+        await asyncio.wait_for(cleanup.wait(), 3)
+        async with asyncio.timeout(3):
+            # This independent transaction completes while file cleanup owns the attempt.
+            row = await db.get_agent(agent_id, owner)
+            assert row["deletion_pending"] and row["archived"] and row["user_id"] == owner
+            assert await db.count_sessions_for_agent(agent_id) == 0
+            assert str(agent_id) not in {item["id"] for item in (await client.get("/api/agents")).json()}
+            assert (await client.post(f"{url}/unarchive")).status_code == 409
+            assert (await client.post(f"{url}/sessions", json={"name": "Closed"})).status_code in (400, 409)
+            with pytest.raises(AgentDeletionPending):
+                await db.save_session("late", "Late", str(tmp_path), "time", agent_id=agent_id, user_id=owner)
+            with pytest.raises(AgentDeletionPending):
+                await db.create_fork_session(
+                    fork_id="late-fork", name="Late fork", working_dir=str(tmp_path), created_at="time",
+                    parent_id=session.id, backend="claude-code", user_id=owner, agent_id=agent_id,
+                    credential_id=None, resume_id=None, fork_after_seq=0,
+                )
+            with pytest.raises(AgentDeletionPending):
+                await db.update_session_field(session.id, agent_id=agent_id)
+            with pytest.raises(AgentDeletionPending):
+                await db.update_agent(agent_id, archived=False)
+            with pytest.raises(AgentDeletionPending):
+                await db.unarchive_agent(agent_id)
+            assert await db.get_session_binding("late") is None
+            assert await db.get_session_binding("late-fork") is None
+            assert (await db.get_session_binding(session.id))["agent_id"] == neighbor["id"]
+            assert [row["content"] for row in await db.load_messages(session.id)] == ["Keep original history"]
+            assert await db.count_sessions_for_agent(agent_id) == 0
+            with pytest.raises(AgentDeletionPending):
+                await save_schedule(db, schedule_id="late-for-pending", **definition)
+            with pytest.raises(AgentDeletionPending):
+                await db.update_schedule("pending-agent-schedule", enabled=True)
+            await dispatch_schedule(runner, "pending-agent-schedule")
+            assert schedule_job(runner, "pending-agent-schedule") is None
+            assert await db.get_schedule_definition("pending-agent-schedule") is not None
+            assert events == []
+
+        original.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await original
+        release.set()
+        await asyncio.wait_for(settled.wait(), 3)
+        assert await db.get_agent(agent_id, owner) is None
+        assert not agent_memory.agent_state_dir(agent_id, owner).exists()
+        duplicate = asyncio.create_task(client.delete(url))
+        await asyncio.wait_for(joining.wait(), 3)
+        foreign = await client.delete(url, headers={"Authorization": f"Bearer {foreign_token}"})
+        assert foreign.status_code == 404
+        assert not duplicate.done()
+        finish.set()
+        assert (await asyncio.wait_for(duplicate, 3)).status_code == 204
+        assert removals == [(agent_id, owner)]
+        assert events == [agent_id]
+        assert (await client.delete(url)).status_code == 404
+    finally:
+        release.set()
+        finish.set()
+        await asyncio.gather(*(task for task in (original, duplicate) if task is not None), return_exceptions=True)
+        session_manager.remove_broadcast("observe-owned-agent-delete")
+
+
 @pytest.mark.asyncio
 async def test_delete_agent_with_sessions_refused(client):
     agent = await _create_agent(client, name="Busy")
@@ -428,6 +594,412 @@ async def test_delete_agent_with_sessions_refused(client):
     )
     resp = await client.delete(f"/api/agents/{agent['id']}", headers=client.headers)
     assert resp.status_code == 400
+
+
+async def test_delete_admission_closes_session_creation_before_final_delete(client, monkeypatch):
+    agent = await _create_agent(client, name="Deleting agent")
+    url = f"/api/agents/{agent['id']}"
+    database = session_manager.db
+    runner = schedules_mod._get_runner()
+    runner._scheduler.pause()
+    run_at = "2026-01-01T00:00:00Z"
+    await save_schedule(
+        database, schedule_id="late-date", agent_id=agent["id"], name="Late date",
+        prompt="Do not run", created_at=run_at, run_at=run_at,
+    )
+    await runner.reconcile("late-date")
+    delete = database.delete_agent
+    deleting, release = asyncio.Event(), asyncio.Event()
+
+    async def held_delete(*args, **kwargs):
+        deleting.set()
+        await release.wait()
+        return await delete(*args, **kwargs)
+
+    monkeypatch.setattr(database, "delete_agent", held_delete)
+    request = asyncio.create_task(client.delete(url))
+    try:
+        await asyncio.wait_for(deleting.wait(), 2)
+        async with asyncio.timeout(2):
+            created = await client.post(f"{url}/sessions", json={"name": "Late creation"})
+            imported = await client.post("/api/sessions/import", json={"name": "Late import", "agent_id": agent["id"]})
+            await dispatch_schedule(runner, "late-date")
+            assert await database.get_schedule_definition("late-date") is not None
+            assert await session_manager.source_receipt("schedule", schedule_delivery_id("late-date", run_at)) is None
+    finally:
+        release.set()
+        deleted = await asyncio.wait_for(request, 2)
+
+    assert created.status_code in (400, 409), created.text
+    assert imported.status_code in (400, 409), imported.text
+    assert deleted.status_code == 204, deleted.text
+    assert await database.count_sessions_for_agent(agent["id"]) == 0
+    assert all(session.agent_id != agent["id"] for session in session_manager.sessions.values())
+    assert await database.get_schedule_definition("late-date") is None
+    assert schedule_job(runner, "late-date") is None
+
+
+async def _wait_for_agent_gate(agent_id):
+    async with asyncio.timeout(3):
+        while True:
+            try:
+                async with session_manager.agent_operation(agent_id):
+                    pass
+            except SessionAdmissionClosed:
+                return
+            await asyncio.sleep(0)
+
+
+async def test_delete_joins_admitted_import_and_reopens_input_creation_and_schedules(client, monkeypatch):
+    from tests.fake_run import capture_model_runs
+
+    agent = await _create_agent(client, name="Import before deletion")
+    identifier = agent["id"]
+    url = f"/api/agents/{identifier}"
+    db = session_manager.db
+    runner = schedules_mod._get_runner()
+    runner._scheduler.pause()
+    run_at = "2026-01-01T00:00:00Z"
+    for schedule_id, timing in (("periodic", {"interval_seconds": 3600}), ("date", {"run_at": run_at})):
+        await save_schedule(
+            db, schedule_id=schedule_id, agent_id=identifier, name=schedule_id, prompt="Run after refusal",
+            created_at=run_at, **timing,
+        )
+        await runner.reconcile(schedule_id)
+    periodic_job = schedule_job(runner, "periodic")
+    periodic_due = runner.next_run_at("periodic")
+    owner_id = (await db.get_agent_identity(identifier))["user_id"]
+    memory = agent_memory.agent_memory_dir(identifier, owner_id) / "MEMORY.md"
+    memory.write_text("Keep my memory\n")
+    runs = capture_model_runs(session_manager, monkeypatch)
+    saving, release = asyncio.Event(), asyncio.Event()
+    install = db.install_session_history
+    deleted_events = []
+
+    async def held_install(record, messages):
+        if record["name"] == "Reserved import":
+            saving.set()
+            await release.wait()
+        return await install(record, messages)
+
+    async def observe(event):
+        if event["type"] == "agent_deleted":
+            deleted_events.append(event)
+
+    monkeypatch.setattr(db, "install_session_history", held_install)
+    session_manager.on_broadcast("observe-hard-delete-refusal", observe)
+    importing = asyncio.create_task(client.post("/api/sessions/import", json={
+        "name": "Reserved import", "agent_id": identifier,
+        "messages": [{"type": "text", "role": "user", "content": "Keep this history"}],
+    }))
+    deleting = None
+    try:
+        await asyncio.wait_for(saving.wait(), 3)
+        deleting = asyncio.create_task(client.delete(url))
+        await _wait_for_agent_gate(identifier)
+        assert not deleting.done()
+        await dispatch_schedule(runner, "periodic")
+        await dispatch_schedule(runner, "date")
+        assert schedule_job(runner, "periodic") is periodic_job
+        assert runner.next_run_at("periodic") == periodic_due
+        assert schedule_job(runner, "date") is not None
+        assert (await db.get_schedule_definition("date"))["run_at"] == run_at
+        assert runs == []
+        release.set()
+        imported, refused = await asyncio.wait_for(asyncio.gather(importing, deleting), 3)
+        assert imported.status_code == 201, imported.text
+        assert refused.status_code == 400 and "still has sessions" in refused.json()["detail"]
+        session_id = imported.json()["id"]
+        assert session_manager.get_session(session_id).agent_id == identifier
+        assert [row["content"] for row in await db.load_messages(session_id)] == ["Keep this history"]
+        assert memory.read_text() == "Keep my memory\n"
+        assert deleted_events == []
+        receipt = await session_manager.start_message(session_id, "Next input")
+        assert (await asyncio.wait_for(receipt.wait(), 3)).outcome.status == "success"
+        created = await client.post(f"{url}/sessions", json={"name": "Another session"})
+        assert created.status_code == 201, created.text
+        await asyncio.wait_for(dispatch_schedule(runner, "date"), 3)
+        assert await session_manager.source_receipt("schedule", schedule_delivery_id("date", run_at)) is not None
+        assert await db.get_schedule_definition("date") is None
+        await asyncio.wait_for(dispatch_schedule(runner, "periodic"), 3)
+        assert (await db.get_schedule_definition("periodic"))["last_run_at"] is not None
+        assert len(runs) == 3
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (importing, deleting) if task is not None), return_exceptions=True)
+        session_manager.remove_broadcast("observe-hard-delete-refusal")
+
+
+async def test_reserved_one_shot_commits_before_agent_delete(client, monkeypatch):
+    from tests.fake_run import capture_model_runs
+
+    agent = await _create_agent(client, name="Scheduled before deletion")
+    db = session_manager.db
+    runner = schedules_mod._get_runner()
+    runner._scheduler.pause()
+    run_at = "2026-01-01T00:00:00Z"
+    await save_schedule(
+        db, schedule_id="reserved-date", agent_id=agent["id"], name="Reserved date",
+        prompt="Original one-shot", created_at=run_at, run_at=run_at,
+    )
+    await runner.reconcile("reserved-date")
+    create = session_manager._create_session
+    reserved, release = asyncio.Event(), asyncio.Event()
+    runs = capture_model_runs(session_manager, monkeypatch)
+
+    async def held_candidate(agent_id, **kwargs):
+        assert agent_id == agent["id"] and kwargs["origin"] == "schedule"
+        reserved.set()
+        await release.wait()
+        return await create(agent_id, **kwargs)
+
+    monkeypatch.setattr(session_manager, "_create_session", held_candidate)
+    fire = asyncio.create_task(dispatch_schedule(runner, "reserved-date"))
+    deleting = None
+    try:
+        await asyncio.wait_for(reserved.wait(), 3)
+        deleting = asyncio.create_task(client.delete(f"/api/agents/{agent['id']}"))
+        await _wait_for_agent_gate(agent["id"])
+        assert not deleting.done()
+        release.set()
+        _, refused = await asyncio.wait_for(asyncio.gather(fire, deleting), 3)
+        assert refused.status_code == 400 and "still has sessions" in refused.json()["detail"]
+        assert await db.get_schedule_definition("reserved-date") is None
+        session_id, receipt = await session_manager.source_receipt("schedule", schedule_delivery_id("reserved-date", run_at))
+        assert receipt.accepted and (await db.get_session_binding(session_id))["agent_id"] == agent["id"]
+        assert len(runs) == 1 and runs[0].session_id == session_id
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (fire, deleting) if task is not None), return_exceptions=True)
+
+
+async def test_delete_joins_child_creation_already_admitted_by_named_delegation(client, monkeypatch):
+    from tests.fake_run import capture_model_runs
+
+    worker = await _create_agent(client, name="Delegated worker")
+    db = session_manager.db
+    owner_id = (await db.get_agent_identity(worker["id"]))["user_id"]
+    parent_agent = await db.get_system_agent(owner_id)
+    parent = await session_manager.create_session(parent_agent["id"])
+    runs = capture_model_runs(session_manager, monkeypatch)
+    delegations = DelegationManager()
+    delegations.bind(session_manager, db)
+    saving, release = asyncio.Event(), asyncio.Event()
+    save = db.save_session
+
+    async def held_save(**fields):
+        if fields["origin"] == "delegation":
+            saving.set()
+            await release.wait()
+        return await save(**fields)
+
+    monkeypatch.setattr(db, "save_session", held_save)
+    asking = asyncio.create_task(delegations.start_delegation(
+        parent_session_id=parent.id, agent_name=worker["name"], request="Keep the admitted child",
+    ))
+    deleting = None
+    try:
+        await asyncio.wait_for(saving.wait(), 3)
+        deleting = asyncio.create_task(client.delete(f"/api/agents/{worker['id']}"))
+        await _wait_for_agent_gate(worker["id"])
+        assert not deleting.done()
+        release.set()
+        delegation, refused = await asyncio.wait_for(asyncio.gather(asking, deleting), 3)
+        assert refused.status_code == 400 and "still has sessions" in refused.json()["detail"]
+        child = session_manager.get_session(delegation.delegation_id)
+        assert child is not None and child.parent_session_id == parent.id
+        async with asyncio.timeout(3):
+            while not any(run.session_id == child.id for run in runs):
+                await asyncio.sleep(0)
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (asking, deleting) if task is not None), return_exceptions=True)
+        delegations.shutdown()
+
+
+async def test_agent_restore_settles_schedule_and_notification_before_delete(client, monkeypatch):
+    agent = await _create_agent(client, name="Restoring before delete")
+    url = f"/api/agents/{agent['id']}"
+    assert (await client.post(f"{url}/archive")).status_code == 200
+    events = []
+    entered, release = asyncio.Event(), asyncio.Event()
+    runner = schedules_mod._get_runner()
+    restore = runner.restore_agent
+
+    async def held_restore(agent_id):
+        entered.set()
+        await release.wait()
+        await restore(agent_id)
+
+    async def observe(event):
+        if event.get("agent_id") == agent["id"]:
+            events.append(event["type"])
+
+    monkeypatch.setattr(runner, "restore_agent", held_restore)
+    session_manager.on_broadcast("observe-restore-delete-order", observe)
+    restoring = asyncio.create_task(client.post(f"{url}/unarchive"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert (await client.get(url)).json()["archived"] is False
+        assert (await client.delete(url)).status_code == 409
+        assert not events
+        release.set()
+        assert (await asyncio.wait_for(restoring, 3)).status_code == 200
+        assert (await client.delete(url)).status_code == 204
+        assert events == ["agent_updated", "agent_deleted"]
+        assert (await client.get(url)).status_code == 404
+    finally:
+        release.set()
+        await asyncio.gather(restoring, return_exceptions=True)
+        session_manager.remove_broadcast("observe-restore-delete-order")
+
+
+async def test_concurrent_restores_of_different_agents_both_complete(client, monkeypatch):
+    first = await _create_agent(client, name="First restore")
+    second = await _create_agent(client, name="Second restore")
+    first_url, second_url = (f"/api/agents/{agent['id']}" for agent in (first, second))
+    for url in (first_url, second_url):
+        assert (await client.post(f"{url}/unpin")).status_code == 200
+        assert (await client.post(f"{url}/archive")).status_code == 200
+    db = session_manager.db
+    unarchive = db.unarchive_agent
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_first_restore(agent_id):
+        if agent_id == first["id"]:
+            entered.set()
+            await release.wait()
+        return await unarchive(agent_id)
+
+    monkeypatch.setattr(db, "unarchive_agent", hold_first_restore)
+    first_request = asyncio.create_task(client.post(f"{first_url}/unarchive"))
+    second_request = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        second_request = asyncio.create_task(client.post(f"{second_url}/unarchive"))
+        async with asyncio.timeout(3):
+            while second["id"] not in session_manager._agent_lifecycle_tasks and not second_request.done():
+                await asyncio.sleep(0)
+        release.set()
+        responses = await asyncio.wait_for(asyncio.gather(first_request, second_request), 3)
+        for response in responses:
+            assert response.status_code == 200, response.text
+            assert not response.json()["archived"] and response.json()["pinned"]
+        for agent in (first, second):
+            assert not (await db.get_agent_identity(agent["id"]))["archived"]
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (first_request, second_request) if task is not None), return_exceptions=True)
+
+
+async def test_archive_wins_hard_delete_and_keeps_history_and_memory(client, monkeypatch):
+    agent = await _create_agent(client, name="Archiving before delete")
+    identifier = agent["id"]
+    url = f"/api/agents/{identifier}"
+    db = session_manager.db
+    owner_id = (await db.get_agent_identity(identifier))["user_id"]
+    imported = await client.post("/api/sessions/import", json={
+        "name": "Keep this history", "agent_id": identifier,
+        "messages": [{"type": "text", "role": "user", "content": "Archive this input"}],
+    })
+    assert imported.status_code == 201
+    session_id = imported.json()["id"]
+    memory = agent_memory.agent_memory_dir(identifier, owner_id) / "MEMORY.md"
+    memory.write_text("Retain private memory\n")
+    archive = db.archive_agent
+    entered, release = asyncio.Event(), asyncio.Event()
+    events = []
+
+    async def held_archive(agent_id):
+        entered.set()
+        await release.wait()
+        await archive(agent_id)
+
+    async def observe(event):
+        if event.get("agent_id") == identifier and event["type"] in ("agent_archived", "agent_deleted"):
+            events.append(event["type"])
+
+    monkeypatch.setattr(db, "archive_agent", held_archive)
+    session_manager.on_broadcast("observe-archive-delete-order", observe)
+    archiving = asyncio.create_task(client.post(f"{url}/archive"))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        assert (await client.delete(url)).status_code == 409
+        assert events == []
+        release.set()
+        assert (await asyncio.wait_for(archiving, 3)).json()["archived"]
+        assert (await db.get_session_binding(session_id))["archived"]
+        assert [message["content"] for message in await db.load_messages(session_id)] == ["Archive this input"]
+        assert memory.read_text() == "Retain private memory\n"
+        assert events == ["agent_archived"]
+    finally:
+        release.set()
+        await asyncio.gather(archiving, return_exceptions=True)
+        session_manager.remove_broadcast("observe-archive-delete-order")
+
+
+@pytest.mark.parametrize("failure", ["pin", "memory"])
+async def test_failed_agent_restore_stays_archived_until_same_agent_retries(client, monkeypatch, failure):
+    agent = await _create_agent(client, name="Retry restore safely")
+    identifier = agent["id"]
+    url = f"/api/agents/{identifier}"
+    db = session_manager.db
+    assert (await client.post(f"{url}/unpin")).status_code == 200
+    assert (await client.post(f"{url}/archive")).status_code == 200
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def failed_pin(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        raise ValueError("Injected pin failure")
+
+    def failed_memory(*args, **kwargs):
+        raise PermissionError("Injected memory failure")
+
+    with monkeypatch.context() as fault:
+        if failure == "pin":
+            fault.setattr(db, "_set_pinned", failed_pin)
+            restoring = asyncio.create_task(client.post(f"{url}/unarchive"))
+            try:
+                await asyncio.wait_for(entered.wait(), 3)
+                with pytest.raises(SessionAdmissionClosed):
+                    await asyncio.wait_for(session_manager.create_session(identifier), 3)
+            finally:
+                release.set()
+                refused = await asyncio.wait_for(restoring, 3)
+            assert refused.status_code == 409
+        else:
+            fault.setattr(agent_memory, "ensure_agent_dirs", failed_memory)
+            with pytest.raises(PermissionError, match="Injected memory failure"):
+                await client.post(f"{url}/unarchive")
+    state = (await client.get(url)).json()
+    assert state["archived"] and not state["pinned"]
+    assert (await client.post(f"{url}/sessions", json={"name": "Refused after failure"})).status_code == 400
+    restored = await client.post(f"{url}/unarchive")
+    assert restored.status_code == 200 and restored.json()["pinned"] and not restored.json()["archived"]
+    assert (await client.post(f"{url}/sessions", json={"name": "Allowed after retry"})).status_code == 201
+
+
+@pytest.mark.parametrize("archived", [False, True])
+async def test_database_agent_delete_rechecks_owner_protection_and_sessions(client, archived):
+    db = session_manager.db
+    agent = await _create_agent(client, name="Checked SQL delete")
+    owner_id = (await db.get_agent_identity(agent["id"]))["user_id"]
+    other = await UserManager(db).create_user(username="another-owner", password="test-password")
+    default = await db.get_system_agent(owner_id)
+    with pytest.raises(AgentDeleteRefused, match="not found"):
+        await db.delete_agent(agent["id"], user_id=other["id"])
+    with pytest.raises(AgentDeleteRefused, match="Default Agent"):
+        await db.delete_agent(default["id"], user_id=owner_id)
+    with pytest.raises(AgentDeleteRefused, match="cleanup responsibility"):
+        await db.delete_agent(agent["id"], user_id=owner_id)
+    session = await session_manager.create_session(agent["id"])
+    if archived:
+        await session_manager.archive_agent(agent["id"])
+    with pytest.raises(AgentDeleteRefused, match="still has sessions"):
+        await db.delete_agent(agent["id"], user_id=owner_id)
+    assert bool((await db.get_agent_identity(agent["id"]))["archived"]) is archived
+    assert bool((await db.get_session_binding(session.id))["archived"]) is archived
 
 
 @pytest.mark.asyncio

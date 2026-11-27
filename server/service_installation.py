@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 from contextlib import closing, contextmanager, nullcontext
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Literal
 
@@ -17,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .account_baseline import persistent_database_file
 from .service_health import ServiceHealth, file_effect
-from .service_scope import ScopeError, current_scope
+from .service_scope import GitWriterScope, ScopeError, check_prestart, current_scope
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -409,7 +410,7 @@ def _check_registrations(config: Settings, *, root: Path | None = None, state: P
                 raise InstallationError("Wiki has conflicting registrations for overlapping body ranges; verify their authority before opening a writer")
 
 
-def _verify_service(profile: ServiceProfile) -> None:
+def _verify_service(profile: ServiceProfile) -> GitWriterScope | None:
     try:
         scope = current_scope(profile.unit)
         required = {
@@ -418,13 +419,27 @@ def _verify_service(profile: ServiceProfile) -> None:
             "KillMode": "control-group", "SendSIGKILL": "yes", "Delegate": "no", "TasksAccounting": "yes",
         }
         command = ["systemctl", *( ["--user"] if profile.manager == "user" else [] ), "show", "--no-pager"]
-        command.extend("--property=" + key for key in required)
+        command.extend("--property=" + key for key in (*required, "InvocationID"))
         result = subprocess.run([*command, "--", profile.unit], check=True, capture_output=True, text=True, timeout=5)
         actual = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         if any(actual.get(key) != value for key, value in required.items()):
             raise InstallationError(f"{profile.unit} must directly own this single server process with the configured cgroup policy; reload and multiple workers are unsupported")
     except (ScopeError, OSError, subprocess.SubprocessError) as error:
         raise InstallationError(f"Start this managed installation through {profile.unit}: {error}") from error
+    invocation = actual.get("InvocationID")
+    if not invocation or invocation != os.environ.get("INVOCATION_ID") or invocation == "0" * 32:
+        return None
+    try:
+        # Check here as well as in ExecStartPre, so recovery's evidence comes
+        # from this invocation and cannot be inferred from a profile alone.
+        verified = check_prestart(profile.unit)
+        machine = Path("/etc/machine-id").read_text().strip()
+    except (ScopeError, OSError):
+        return None
+    if verified != scope or not machine:
+        return None
+    installation = json.dumps([machine, profile.manager, str(scope.unit_path), profile.paths["db_path"]])
+    return GitWriterScope(sha256(installation.encode()).hexdigest(), invocation)
 
 
 def _publish(path: Path, text: str, *, health: ServiceHealth | None = None) -> None:
@@ -622,7 +637,9 @@ class InstallationOwner:
         self.config = config
         self.db_path = None if config.db_path == ":memory:" else Path(config.db_path).expanduser().resolve()
         self._lock: BinaryIO | None = None
+        self._offline = False
         self.profile: ServiceProfile | None = None
+        self.git_writer_scope: GitWriterScope | None = None
         self.offline_request: str | None = None
 
     def acquire(self) -> None:
@@ -631,6 +648,13 @@ class InstallationOwner:
     def acquire_offline(self) -> None:
         """Own stopped storage without impersonating systemd's server process."""
         self._acquire(service_process=False)
+        self._offline = True
+
+    def offline_database(self) -> Path:
+        """Return the persistent database under this owner's held offline lock."""
+        if not self._offline or self._lock is None or self.db_path is None:
+            raise InstallationError("An offline owner of the persistent database is required")
+        return self.db_path
 
     def _acquire(self, *, service_process: bool) -> None:
         self._acquire_lock()
@@ -642,7 +666,7 @@ class InstallationOwner:
             self.profile = read_service_profile(self.config)
             if self.profile is not None:
                 if service_process:
-                    _verify_service(self.profile)
+                    self.git_writer_scope = _verify_service(self.profile)
                 else:
                     command = ["systemctl", *(["--user"] if self.profile.manager == "user" else []),
                                "show", "--no-pager", "--property=MainPID,ActiveState,Job", "--", self.profile.unit]
@@ -680,6 +704,8 @@ class InstallationOwner:
         self._lock = handle
 
     def close(self) -> None:
+        self._offline = False
+        self.git_writer_scope = None
         if self._lock is not None:
             self._lock.close()
             self._lock = None

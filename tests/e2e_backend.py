@@ -15,7 +15,7 @@ if os.environ.get("OCTOPUS_E2E_MODE") != "offline":
 record = install(Path(os.environ["OCTOPUS_E2E_AUDIT_FILE"]))
 
 # The guard is active before the app, lifespan or harness registry is imported.
-from server import fork_helpers
+from server import fork_git, fork_helpers
 from server.harness import all_backends, get_harness
 from server.harness.claude_code import CLAUDE_CODE
 from server.harness.driver import ArgvDriver
@@ -30,7 +30,7 @@ def offline_argv(ctx):
 async def offline_git(*args, **kwargs):
     # The UI fixture is a non-Git workspace. Do not execute repository hooks
     # or other child programs while collecting an optional turn/fork anchor.
-    return -1, "", "Offline UI workspace has no Git repository"
+    return fork_git.GitResult(None, "", "Offline UI workspace has no Git repository")
 
 
 fork_helpers._git = offline_git

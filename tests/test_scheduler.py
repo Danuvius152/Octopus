@@ -16,17 +16,9 @@ from server.session_manager import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import capture_model_runs
 from tests.schedule_support import dispatch_schedule, schedule_job
+from tests.schedule_support import save_schedule as save_schedule
 from tests.session_runtime import wait_dispatch_idle
 from tests.submission import accepted_receipt
-
-
-async def save_schedule(db, **fields):
-    """Seed a new trusted definition; missing-context legacy rows are tested separately."""
-    agent = await db.get_agent(fields["agent_id"])
-    context = for_account(session_id=fields.get("origin_session_id") or "schedule-entry",
-                          request_id=fields["schedule_id"], user_id=agent["user_id"],
-                          prompt=fields["prompt"], selected=fields.get("wiki_mode"))
-    await db.save_schedule(**fields, knowledge_context=encode(context))
 
 
 @pytest.fixture

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from functools import partial
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
-from ..agent_manager import AgentError, AgentManager
+from ..agent_configuration import AgentConfigurationError
+from ..agent_manager import AgentDeleteRetry, AgentError, AgentManager
 from ..auth import verify_token
 from ..credential_bindings import CredentialBindingError
 from ..deps import ScopeUser, SessionMgr
@@ -21,6 +21,7 @@ from ..models import (
     ScheduleInfo,
     SessionInfo,
 )
+from ..sessions.lifecycle import AgentLifecycleConflict
 from .request_validation import SafeInputValidationRoute
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -59,6 +60,8 @@ async def _publish(session_manager, kind: str, agent: dict) -> None:
 
 def _agent_http_error(e: AgentError | CredentialBindingError) -> HTTPException:
     msg = str(e)
+    if isinstance(e, AgentDeleteRetry):
+        return HTTPException(status.HTTP_409_CONFLICT, msg)
     if isinstance(e, AgentError) and e.field:
         return HTTPException(status.HTTP_400_BAD_REQUEST, {"message": msg, "field": e.field})
     code = status.HTTP_404_NOT_FOUND if "not found" in msg.lower() else status.HTTP_400_BAD_REQUEST
@@ -142,28 +145,17 @@ router.add_api_route("/{agent_id}", update_agent, methods=["PATCH"], response_mo
 
 @router.post("/{agent_id}/archive", response_model=AgentRead)
 async def archive_agent(session_manager: SessionMgr, agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    manager = _get_manager()
-    agent = await manager.get_agent(agent_id, user_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="agent not found")
-    if agent["is_system"]:
-        raise _agent_http_error(AgentError("The Default Agent cannot be archived"))
-    async def finish_archive() -> AgentRead:
-        # Keep retirement, persistence and notification under one owner. A
-        # disconnected HTTP waiter cannot strand evicted sessions in live rows.
-        try:
-            await session_manager.archive_agent(agent_id)
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        archived = await manager.get_agent(agent_id, user_id)
-        if archived is None:
-            raise HTTPException(status_code=404, detail="agent not found")
-        await _publish(session_manager, "agent_archived", archived)
-        return AgentRead(**archived)
-
-    operation = asyncio.create_task(finish_archive(), name=f"archive-agent-{agent_id}")
-    session_manager._own_task(operation)
-    return await asyncio.shield(operation)
+    try:
+        archived = await session_manager.archive_agent(
+            agent_id, user_id=user_id, notify=partial(_publish, session_manager, "agent_archived"),
+        )
+    except AgentConfigurationError:
+        raise
+    except AgentError as e:
+        raise _agent_http_error(e) from e
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(409, str(e)) from e
+    return AgentRead(**archived)
 
 
 @router.post("/{agent_id}/unarchive", response_model=AgentRead)
@@ -174,12 +166,13 @@ async def unarchive_agent(
     comes back pinned; its sessions stay archived — those come back from the
     archived-sessions page individually."""
     try:
-        agent = await session_manager.unarchive_agent(agent_id, user_id)
+        agent = await session_manager.unarchive_agent(
+            agent_id, user_id, notify=partial(_publish, session_manager, "agent_updated"),
+        )
     except AgentError as e:
         raise _agent_http_error(e)
     except ValueError as e:
         raise HTTPException(409, str(e)) from e
-    await _publish(session_manager, "agent_updated", agent)
     return AgentRead(**agent)
 
 
@@ -216,10 +209,13 @@ async def delete_agent(
     session_manager: SessionMgr, agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
     try:
-        agent = await _get_manager().delete_agent(agent_id, user_id=user_id)
+        await session_manager.delete_agent(
+            agent_id, user_id, notify=partial(_publish, session_manager, "agent_deleted"),
+        )
     except AgentError as e:
-        raise _agent_http_error(e)
-    await _publish(session_manager, "agent_deleted", agent)
+        raise _agent_http_error(e) from e
+    except AgentLifecycleConflict as e:
+        raise HTTPException(409, str(e)) from e
 
 
 @router.get("/{agent_id}/sessions", response_model=list[SessionInfo])

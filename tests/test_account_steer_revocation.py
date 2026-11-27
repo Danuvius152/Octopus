@@ -6,6 +6,7 @@ import sys
 
 import pytest
 
+from server import fork_git
 from server.agent_manager import AgentManager
 from server.harness import get_harness
 from server.harness.claude_code import ClaudeDriver
@@ -80,18 +81,18 @@ async def test_disabling_owner_during_steer_git_anchor_prevents_frame_delivery(
         assert process.returncode == 0, (stdout + stderr).decode()
 
     gate_next_anchor = False
-    spawn = asyncio.create_subprocess_exec
+    spawn_git = fork_git._spawn_git
 
-    async def controlled_spawn(*arguments, **kwargs):
+    async def controlled_spawn(args, **kwargs):
         nonlocal gate_next_anchor
-        process = await spawn(*arguments, **kwargs)
-        if gate_next_anchor and arguments[:3] == ("git", "rev-parse", "HEAD"):
+        process = await spawn_git(args, **kwargs)
+        if gate_next_anchor and args[-2:] == ("rev-parse", "HEAD"):
             gate_next_anchor = False
             anchor_entered.set()
             await release_anchor.wait()
         return process
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", controlled_spawn)
+    monkeypatch.setattr(fork_git, "_spawn_git", controlled_spawn)
 
     async def observe(event):
         if event.get("session_id") != session.id:

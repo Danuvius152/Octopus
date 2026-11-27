@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 
+from server.agent_manager import AgentError, AgentManager
 from server.database import Database
 from server.harness import HarnessEvent
 from server.research import manager as research_module
@@ -67,6 +68,51 @@ async def returning_research(monkeypatch, tmp_path):
         release.set()
         await research.shutdown()
         await database.close()
+
+
+@pytest.mark.parametrize("archived", [False, True])
+async def test_research_delivers_to_existing_session_while_agent_delete_waits(returning_research, monkeypatch, archived):
+    db, manager, research, started, release, processed = returning_research
+    owner = await db.get_system_agent()
+    agent = await AgentManager(db).create_agent(name="Returning research", user_id=owner["user_id"])
+    session = await manager.create_session(agent["id"], "Original return target")
+    job = await research.start(session.id, "Keep the original report")
+    task = research._task(job["id"])
+    await asyncio.wait_for(started.wait(), 2)
+    if archived:
+        await manager.archive_session(session.id, replace=False)
+
+    claim_deletion = db.claim_agent_deletion
+    entered, resume_delete = asyncio.Event(), asyncio.Event()
+    events = []
+
+    async def held_claim(agent_id, *, user_id):
+        entered.set()
+        await resume_delete.wait()
+        return await claim_deletion(agent_id, user_id=user_id)
+
+    async def notify(agent):
+        events.append(agent)
+
+    monkeypatch.setattr(db, "claim_agent_deletion", held_claim)
+    deleting = asyncio.create_task(manager.delete_agent(agent["id"], agent["user_id"], notify=notify))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        release.set()
+        await asyncio.wait_for(task, 3)
+        result = await db.get_research_job(job["id"])
+        assert result["injection_status"] == "delivered"
+        assert "# Saved report" in await asyncio.wait_for(processed.get(), 3)
+        assert manager.get_session(session.id) is not None
+        assert not deleting.done()
+        resume_delete.set()
+        with pytest.raises(AgentError, match="still has sessions"):
+            await asyncio.wait_for(deleting, 3)
+        assert events == []
+    finally:
+        release.set()
+        resume_delete.set()
+        await asyncio.gather(deleting, return_exceptions=True)
 
 
 @pytest.mark.parametrize("paused", [False, True])

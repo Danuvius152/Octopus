@@ -7,12 +7,22 @@ from httpx import ASGITransport, AsyncClient
 from server import deps
 from server.agent_manager import AgentManager
 from server.database import Database
+from server.knowledge import encode, for_account
 from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
 from server.users import UserManager
+
+
+async def save_schedule(db, **fields):
+    """Seed a schedule with the original account's knowledge authority."""
+    agent = await db.get_agent(fields["agent_id"])
+    context = for_account(session_id=fields.get("origin_session_id") or "schedule-entry",
+                          request_id=fields["schedule_id"], user_id=agent["user_id"],
+                          prompt=fields["prompt"], selected=fields.get("wiki_mode"))
+    await db.save_schedule(**fields, knowledge_context=encode(context))
 
 
 def schedule_job(runner, schedule_id):

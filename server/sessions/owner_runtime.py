@@ -29,6 +29,7 @@ from ..credential_bindings import CredentialBindingError
 from ..db.base import DatabaseBusy
 from ..db.schedules import OneShotFire
 from ..diagnostics import diagnostic_text, exception_diagnostic, safe_diagnostic
+from ..fork_git import WorktreeChanged, require_rewind_worktree
 from ..harness import Harness, HarnessCredential, HarnessEvent, HarnessRun, get_harness
 from ..harness.driver import ActiveTurnRef, SteerNotAccepted
 from ..harness.events import HarnessDeadlineExceeded, HarnessPreparationError
@@ -209,6 +210,8 @@ class CloseExecution:
 @dataclass(frozen=True)
 class ReleaseApplication:
     """The application row was removed; retain the development conversation."""
+
+    rewind_metadata: str | None
 
 
 @dataclass(frozen=True)
@@ -712,7 +715,7 @@ class OwnerRuntime:
                 return None
             return self.retire(command.backend, "held_process_reaped")
         if isinstance(command, ReleaseApplication):
-            manager._release_application_admission(session)
+            manager._release_application_admission(session, rewind_metadata=command.rewind_metadata)
             return True
         if isinstance(command, OwnForkProcess):
             if (not (session._forking or session.fork_status == "initializing") or self.current is not None
@@ -1894,7 +1897,8 @@ class OwnerRuntime:
             try:
                 prepared = operation.result()
             except Exception as error:
-                await self._failed(execution, error, "initialization_error")
+                code = error.error_code if isinstance(error, HarnessPreparationError) else None
+                await self._failed(execution, error, code or "initialization_error")
                 return
             if prepared is None:
                 await self._interrupt("user")
@@ -1974,6 +1978,10 @@ class OwnerRuntime:
             self.owner.wake()
         await validate_claimed_attachments(manager, configured.id, request.request_id)
         await require_retired_writers(manager, configured.id)
+        try:
+            require_rewind_worktree(configured.working_dir, configured.fork_metadata)
+        except WorktreeChanged as error:
+            raise HarnessPreparationError(str(error), error_code="fork_worktree_changed") from error
         if request.operation == "compact":
             if not request.native_session_id or configured.claude_session_id != request.native_session_id:
                 raise ValueError("The original native history is no longer available to compact")
@@ -1982,7 +1990,9 @@ class OwnerRuntime:
             raise AttachmentUnavailable()
         files = await asyncio.to_thread(validate_message_attachments, configured.id, request.attachment_ids,
                                         user_id=configured.user_id)
-        head, clean, ignored = await fork_helpers.capture_git_anchor(configured.working_dir)
+        head, clean, ignored = await fork_helpers.capture_git_anchor(
+            configured.working_dir, db=manager.db, session_id=configured.id, fork_metadata=configured.fork_metadata,
+        )
         return _PreparedInput(
             tuple(AttachmentMetadata(id=item.id, filename=item.filename, size=item.size, mime_type=item.mime_type) for item in files),
             tuple(str(item.path) for item in files), head, clean, ignored,
@@ -2111,6 +2121,10 @@ class OwnerRuntime:
                     await database.session_input_history(configured.id, request_id))
             except ValueError as error:
                 raise HarnessPreparationError(str(error), error_code="replay_installation_unknown") from error
+            try:
+                require_rewind_worktree(configured.working_dir, configured.fork_metadata)
+            except WorktreeChanged as error:
+                raise HarnessPreparationError(str(error), error_code="fork_worktree_changed") from error
             if configured.fork_needs_replay:
                 from .handoff import recheck_replay_scope
 
@@ -2932,7 +2946,10 @@ class OwnerRuntime:
         merged = revise(previous, AdmittedRequest(RequestRef(configured.id, request.request_id, configured.user_id),
                                                  request.knowledge_context, request.work_id),
                         {"prompt": request.prompt if request.trusted_request is None else request.trusted_request}, human=True)
-        head, clean, ignored = await fork_helpers.capture_git_anchor(configured.working_dir)
+        head, clean, ignored = await fork_helpers.capture_git_anchor(
+            configured.working_dir, db=self.owner.manager.db, session_id=configured.id,
+            fork_metadata=configured.fork_metadata,
+        )
         return merged, _PreparedInput((), (), head, clean, ignored)
 
     async def _write_steer(

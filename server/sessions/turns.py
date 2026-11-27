@@ -30,6 +30,7 @@ from ..db.schedules import (
     schedule_delivery_id,
 )
 from ..diagnostics import exception_diagnostic, safe_diagnostic
+from ..fork_git import drain_git_executions, require_rewind_worktree
 from ..harness import (
     HarnessEvent,
     HarnessRun,
@@ -355,6 +356,7 @@ class TurnsMixin(SessionManagerBase):
                 await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._owned_tasks)
                                        if task is not asyncio.current_task()), return_exceptions=True)
             await self.join_mcp_question_calls()
+            await drain_git_executions()
         return active
 
     def running_turns_for(self, user_id: str | None) -> int:
@@ -1521,6 +1523,8 @@ class TurnsMixin(SessionManagerBase):
         async def authorize_spawn() -> None:
             assert database is not None, "Execution requires its admitted input database"
             await database.require_run_authority(user_id, credential_id, backend)
+            current = self.sessions.get(session.id, session)
+            require_rewind_worktree(session.working_dir, current.fork_metadata)
 
         return RunConfig(
             session_id=session.id,

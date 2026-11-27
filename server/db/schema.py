@@ -9,8 +9,12 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 14
+CURRENT_VERSION = 15
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
+AGENT_DELETION_COLUMN = """deletion_pending INTEGER NOT NULL DEFAULT 0 CHECK (
+    deletion_pending = 0 OR
+    (deletion_pending = 1 AND archived IS 1 AND is_system IS 0 AND user_id IS NOT NULL)
+)"""
 
 
 class UnsupportedMainStorage(RuntimeError):
@@ -91,7 +95,8 @@ CREATE TABLE agents (
     -- agent is still listed, callable and schedulable either way.
     pinned INTEGER NOT NULL DEFAULT 1,
     pin_order INTEGER
-, reasoning_effort TEXT, service_tier TEXT, context_settings_revision INTEGER NOT NULL DEFAULT 0);
+, reasoning_effort TEXT, service_tier TEXT, context_settings_revision INTEGER NOT NULL DEFAULT 0,
+    """ + AGENT_DELETION_COLUMN + """);
 
 CREATE TABLE applications (
     -- Who owns this row (multi-tenancy.md §5). NULL means the install:

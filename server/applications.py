@@ -46,6 +46,7 @@ from .config import settings
 from .crypto import is_sha256_hexdigest
 from .db.applications import ApplicationNameConflict, ApplicationVisibilityField
 from .diagnostics import exception_diagnostic
+from .fork_git import application_git_pending
 from .sessions.runtime_types import SessionAdmissionClosed
 from .sessions.submission import RequestCompletion
 from .workspace import paths_for
@@ -531,7 +532,7 @@ class ApplicationManager:
             request_id = uuid.uuid4().hex
             handed_off = False
             try:
-                async with self.session_mgr.agent_operation(agent_id):
+                async with self.session_mgr.agent_operation(agent_id, creates_session=False):
                     async with self._build_updates.setdefault(row["id"], asyncio.Lock()):
                         current = await self._read_created_application(row["id"])
                         self.require_writable(current)
@@ -978,6 +979,9 @@ class ApplicationManager:
                 # Close the original Sessions before independent-work drain;
                 # no stopped BG/delegation return can wake a new execution.
                 await self.session_mgr.retire_application_writers(session_ids)
+            if await application_git_pending(db, app_id, session_ids):
+                raise ApplicationError("An application session is waiting for Git execution retirement", status_code=409)
+            if state["phase"] == "retiring":
                 await backend_supervisor.stop(app_id)
                 if app_agent_manager.session_mgr is self.session_mgr:
                     await app_agent_manager.delete_conversations_for_app(app_id)
@@ -1000,7 +1004,7 @@ class ApplicationManager:
                             # inside a still-present directory remains an error.
                             if os.path.lexists(path):
                                 raise
-                await db.delete_application(app_id)
+                _, rewind_updates = await db.delete_application(app_id, release_rewind_worktree=not state["keep_files"])
         except Exception as exc:
             db.health.require_healthy()
             state = dict(state, error=str(exc))
@@ -1012,7 +1016,9 @@ class ApplicationManager:
         # Only confirmed deletion releases the temporary prohibition. History
         # remains usable; a future human input may recreate its working dir.
         if self.session_mgr is not None:
-            await self.session_mgr.release_application_writers(session_ids)
+            await self.session_mgr.release_application_writers(
+                session_ids, rewind_updates=rewind_updates,
+            )
         self._deletions.pop(app_id, None)
         await self._broadcast_application("application_deleted", row)
 

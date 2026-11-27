@@ -20,6 +20,18 @@ class ServiceScope:
     unit_path: PurePosixPath
 
 
+@dataclass(frozen=True)
+class GitWriterScope:
+    installation: str
+    invocation: str
+
+    def covers_previous(self, writer: object) -> bool:
+        return (isinstance(writer, dict)
+                and writer.get("installation") == self.installation
+                and isinstance(previous := writer.get("invocation"), str)
+                and bool(previous) and previous != self.invocation)
+
+
 def _mount_path(value: str) -> PurePosixPath:
     return PurePosixPath(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value))
 

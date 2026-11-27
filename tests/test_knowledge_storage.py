@@ -89,6 +89,20 @@ async def test_request_input_and_context_are_committed_before_return(database, t
         await reader.close()
 
 
+async def test_tool_arguments_do_not_supply_a_request_identity_or_release_their_sequence(database):
+    parameters = {"request_context": {"request_id": "request-one"}}
+    await database.append_message("parent", 0, "assistant", "tool_use", tool_input=parameters)
+    request = {
+        "session_id": "parent", "role": "user", "type": "text",
+        "content": "/wiki Why?", "tool_input": {"request_context": REQUEST_CONTEXT},
+    }
+    with pytest.raises(ValueError, match="conflict"):
+        await database.record_request(request_id="request-one", seq=0, **request)
+    await database.record_request(request_id="request-one", seq=1, **request)
+    tool, user_input = await database.load_messages("parent")
+    assert tool["tool_input"] == parameters and user_input["tool_input"] == request["tool_input"]
+
+
 @pytest.mark.parametrize("change", ["sequence", "identity", "knowledge", "content", "role"])
 async def test_request_retry_never_reuses_a_different_input(database, change):
     message = {

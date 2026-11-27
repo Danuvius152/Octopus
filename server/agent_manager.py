@@ -27,6 +27,8 @@ from .credential_bindings import (
     validate_failed_credential_write,
 )
 from .database import Database
+from .db.agents import AgentDeleteRefused, AgentDeletionPending
+from .db.base import DatabaseBusy
 from .harness import RunConfig, get_harness, model_settings
 from .session_operations import is_utf8_text
 
@@ -50,6 +52,10 @@ class AgentError(Exception):
     def __init__(self, message: str, *, field: str | None = None) -> None:
         super().__init__(message)
         self.field = field
+
+
+class AgentDeleteRetry(AgentError):
+    """Deletion did not settle, and can be retried using the original ID."""
 
 
 def _memory_mutation(operation):
@@ -267,6 +273,8 @@ class AgentManager:
         agent = await self.db.get_agent(agent_id, user_id=user_id)
         if agent is None:
             raise AgentError("Agent not found")
+        if agent["deletion_pending"]:
+            raise AgentDeletionPending("Agent deletion is unfinished; retry deletion")
         if not agent["archived"]:
             return agent
         clash = await self.db.find_live_agent_id(agent["name"], agent.get("user_id"))
@@ -275,13 +283,11 @@ class AgentManager:
                 f"An agent named {agent['name']!r} already exists — rename it "
                 f"before restoring this one"
             )
-        await self.db.unarchive_agent(agent_id)
-        # Restoring is choosing to use it again: it comes back to the sidebar
-        # (where it was, if it was pinned when it left).
-        await self.db.set_agent_pinned(agent_id, True)
+        # Prepare the private directory before making the Agent discoverable.
         agent_memory.ensure_agent_dirs(agent_id, agent.get("user_id"))
-        restored = await self.db.get_agent(agent_id)
-        assert restored is not None
+        restored = await self.db.unarchive_agent(agent_id)
+        if restored is None:
+            raise AgentError("Agent not found")
         return restored
 
     async def set_pinned(
@@ -326,18 +332,15 @@ class AgentManager:
     ) -> dict[str, Any]:
         if user_id is None:
             raise AgentError("Agent not found")
-        agent = await self.db.get_agent(agent_id, user_id=user_id)
-        if agent is None:
-            raise AgentError("Agent not found")
-        if agent["is_system"]:
-            raise AgentError("The Default Agent cannot be deleted")
-        if await self.db.count_sessions_for_agent(agent_id) > 0:
-            raise AgentError(
-                "Agent still has sessions; archive it instead of deleting"
-            )
-        owner_id = agent.get("user_id")
-        await self.db.delete_agent(agent_id)
-        # Hard delete also removes the agent's memory dir. Archiving keeps it,
-        # mirroring archived-session history.
-        agent_memory.remove_agent_dir(agent_id, owner_id)
+        try:
+            agent = await self.db.claim_agent_deletion(agent_id, user_id=user_id)
+            try:
+                await asyncio.to_thread(agent_memory.remove_agent_dir, agent["id"], agent["user_id"])
+            except OSError as error:
+                raise AgentDeleteRetry("Agent private files could not be cleared; retry deletion") from error
+            await self.db.delete_agent(agent["id"], user_id=agent["user_id"])
+        except AgentDeleteRefused as error:
+            raise AgentError(str(error)) from error
+        except (DatabaseBusy, sqlite3.IntegrityError) as error:
+            raise AgentDeleteRetry("Agent deletion could not commit; retry deletion") from error
         return agent

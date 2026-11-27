@@ -255,10 +255,14 @@ claim that external effects were rolled back.
 The operation stashes before restoring attributable files and records its outcome
 in `fork_revert_record`. Each snapshot has a unique marker. The operation finds
 exactly that stash commit, or retains the OID returned by `stash create`, and
-verifies the full commit OID before saving `stash_ref` or continuing explicit
-restore. Failed, missing or ambiguous lookup stops this path; it never borrows
-an earlier stash. Stashing itself may already have changed the worktree, so a
-failed lookup is not a rollback claim. Later stash pushes do not change the
+verifies the full commit OID before continuing explicit restore. A successful
+`stash store` establishes a recovery OID as soon as the original process has
+retired. An unsuccessful object verification clears that OID. A timed-out
+verification stops restore and keeps the OID when the retired process exited
+successfully with complete output confirming the object in the bound
+repository. Failed, missing or ambiguous lookup stops this path without
+borrowing an earlier stash. Stashing itself may already have changed the
+worktree before lookup failed. Later stash pushes do not change the
 saved OID. Legacy `stash@{n}` values remain readable but are unstable historical
 selectors, not identities of today's snapshot. An OID does not guarantee object
 retention after deletion or Git garbage collection.
@@ -266,19 +270,99 @@ retention after deletion or Git garbage collection.
 `fork_revert_record.ran` becomes true when a mutating Git operation starts or
 when preflight proves a completed no-op. It is not a success flag. A failed
 stash lookup or later restore can therefore retain `ran: true`. Failure before
-mutation and refusal retain `ran: false`.
+mutation and refusal retain `ran: false`. A partially persisted result
+omits the field when startup of a pending write is still unconfirmed.
+Recovery without the original result treats that interrupted write as
+potentially run and reports unknown file effects.
 
 Failure does not erase the successfully created fork or pretend file restoration
 succeeded. This does not roll back commits, send/unsend
 messages, undo database writes, cancel original BG jobs or reverse provider calls.
 
-The shared Git helper still has an execution-retirement gap: timeout kills only
-the parent without awaiting exit, and caller cancellation does not retire its
-process group. Anchor capture, preview/preflight and stash/restore use that helper;
-a returned timeout or cancelled call is therefore not proof that Git or its hooks
-have stopped touching the tree. This limits isolation around failed operations,
-not the path-ownership checks above
-(see [the shared Git subprocess helper](../../server/fork_helpers.py#L80-L105)).
+Anchor capture, preview, preflight and stash/restore use the
+[same Git execution owner](../../server/fork_git.py). It retains the pending
+launch, direct process, process group and both output pipes. Git's process
+handle is captured before attaching the asynchronous pipe readers so a
+failed attachment still stops and joins the original process group. Leader exit and
+pipe EOF are followed by a group check. A deadline or cancellation requests
+termination through that owner. If retirement remains unconfirmed when the
+caller leaves, the original owner keeps observing it and blocks service drain.
+
+A rewind reserves the worktree's directory identity through the ready commit
+and registration. Parent archival follows after release of that reservation.
+Anchor capture and preview also use the reservation to order their Git
+observations with rewind admission. A Git launch uses the verified open directory
+even if its pathname changes while launch is pending. Directory identity and
+Git ancestry are read from that descriptor. Preflight, anchor capture and
+file operations use the reserved repository's worktree and Git directory.
+Inherited Git repository selectors are cleared. Status, stash creation, file
+restore and reftable operations use a private Git directory view. Its native
+common locator reaches the reserved common directory through descriptors so Git can
+classify nested repositories independently. Git resolves configuration in the
+original repository. The view keeps primary repository format settings separate
+from resolved includes. The view retains command scope and preserves valueless
+settings. Child Git uses the native executable lookup order and helper scripts.
+If a child Git opens another repository, including through explicit directory
+options, the launcher releases the view's index and worktree overrides and
+restores the original configuration environment. Filters and hooks restore the
+repository's native launch environment, including the actual Git directory when
+discovered through a gitfile. Shell filters receive Git's expanded command as
+both their script and `$0`. The callbacks remain in the original Git process
+group until retirement is confirmed.
+Before entering a callback, Octopus verifies the worktree and Git directories
+against the descriptors held by the original command. The hook dispatchers
+look up each hook when Git invokes it, so an earlier hook can install or remove
+a later one. The owner retains the existing hook directory alongside the
+repository descriptors. The launcher checks the hook directory before and
+after looking for the script. For an existing script, the second check follows
+validation of the resolved worktree and Git directories. If lookup is denied
+in a stable directory, Git's ignored-hook advice setting applies.
+The launcher executes the native hook path, letting the kernel enforce execution
+permissions and select the script interpreter. Only a format error
+(`ENOEXEC`) falls back to Git's configured shell. Shell hooks retain their
+native script path and arguments. This uses Git's ordinary path resolution
+between the final identity check, kernel execution and any interpreter read.
+The retirement check can detect a lasting binding change. A hook in a repository
+with a gitfile or separate common directory inherits the retained common
+directory, including when it calls Git by absolute path. The hook's `git`
+launcher releases that override for an
+explicit Git directory in another repository. An absolute invocation that
+selects another repository needs to clear `GIT_COMMON_DIR` in its environment.
+Filters receive the native repository environment so they can run Git in another
+repository using its own discovery rules. A callback binding failure remains
+attached to the command result even if the repository path is restored before
+retirement.
+A failed inspection keeps the Git exit and output
+collection status without recording configuration values or marking a write
+as started.
+The view holds the complete HEAD and directs index replacement to the original
+Git directory. It writes a full index to keep shared-index data out of the
+temporary directory. Git's configured split-index preference remains in force
+for subsequent native operations. Other commands receive the verified common
+directory explicitly. Descriptors and the private view remain available until
+the original process group retires. Status disables optional index writes.
+A changed binding at launch stops the command. A change observed after retirement
+is reported separately from the exit code and collected output. Temporary view
+cleanup failures are logged independently of retirement.
+For a missing session subdirectory, the nearest existing ancestor establishes
+whether the session still belongs to a fenced Git worktree.
+A fenced directory keeps its retirement fence across the physical ancestor chain,
+including when a Git marker is absent or an inner subdirectory contains an empty
+`.git` directory.
+An unconfirmed Git exit stops the revert, including at the second root lookup
+before any stash or restore. The candidate and its copied history stay
+`reverting` and the parent stays in place. The worktree fence also applies
+to rewinds with file restore disabled. Continued observation may establish
+retirement and release that fence without replacing the parent. A confirmed
+Git error keeps its diagnostic, file-effect record and any verified stash
+identity under the ordinary revert result contract. The stored Git observation
+keeps the exit code, output, timeout and confirmed retirement separate. A busy
+database before the write begins leaves the original owner holding that result
+for a retry of the commit.
+A successful `stash store` preserves its snapshot identity when cancellation or
+the binding check prevents worktree restore. A later object verification can
+withdraw that identifier. The original execution's result applies this rule
+even when cancellation delays settlement.
 
 <a id="564-first-turn-context"></a>
 #### First-turn context
@@ -307,11 +391,32 @@ become ready. Recovery cleans each `initializing` fork using its exact saved
 identity. If cleanup fails, its row and copied messages remain for the next
 startup to retry, and recovery continues with the other rows.
 
-A crash during `reverting` produces `unknown_post_crash` and a usable ready
-conversation with an explicit inspection message. Recovery persists the result
-and first-turn note before use and refreshes any already live successor. Failure
-to persist the result blocks startup. Recovery does not repeat uncertain Git
-effects or claim the stash/revert finished.
+Before launching Git for a revert, the candidate records its worktree and,
+when available, the identity of its managed writer. Startup preserves an
+unconfirmed candidate and its copied history outside the executable session
+registry, including legacy rows without writer evidence. A legacy row without
+a recorded Git root fences a candidate whose root is a physical ancestor of
+the legacy working directory. The parent retains
+its prior state. A verified empty managed scope and a matching installation
+from a different invocation can prove that the original writer retired.
+
+After retirement is confirmed, recovery commits the result, first-turn note
+and `ready` together. If the file effects are still unknown, the result
+`unknown_post_crash` directs the user to inspect the worktree and stash.
+Recovery uses any already recorded result and verified stash identity.
+When the saved path points to a different worktree, recovery retains the
+candidate's history and proof without admitting it or fencing unrelated work.
+Startup, archive restoration, anchor capture, first backend input and further
+rewinds check the saved directory until native input consumes the preparation
+metadata.
+A restore with a pending marker and a mismatched directory returns to the
+archive at startup. A committed history whose bound directory is unavailable
+can be read and retried through the archive views. The same binding still
+needs to match before the history can run. Deletion confirmation reports
+the same archive state as those views. An in-progress application deletion
+keeps its own retirement and recovery responsibility.
+Failure to commit a covered candidate's result blocks startup. No recovery
+path repeats stash or restore.
 
 Rewind borrows the parent's directory, including when the parent is itself a
 full copy under the fork base. Recovery never derives directory

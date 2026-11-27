@@ -16,8 +16,10 @@ ready。`/health` 是存活信息；`/ready` 反映 `ServiceHealth` 的 starting
 stopping／故障事实，不能用 health 200 替代业务准入。
 
 `previous_writers_retired` 只用于原代输入／Wiki 引用恢复，不把历史 unknown 改为
-未执行，也不伪造通知 ACK。原代 PID 数字、managed 标志或 session idle 均不能
-代替真实退出。正常发布等自然排空；fatal 强制退出属于既有故障边界。
+未执行，也不伪造通知 ACK。Fork 恢复另核验实际空 cgroup 和本次 systemd
+invocation，在已保存的写者属于同一主机、安装及受管范围且来自不同 invocation
+时采纳退出证明。原代 PID 数字、managed 标志或 session idle 均不能代替真实
+退出。正常发布等自然排空；fatal 强制退出属于既有故障边界。
 
 ## 领域事实与封口收据
 
