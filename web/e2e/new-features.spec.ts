@@ -2684,14 +2684,16 @@ test.describe("/model", () => {
       },
     });
     expect(imported.ok()).toBeTruthy();
-    const { id } = await imported.json();
+    const { id, defaults_source } = await imported.json();
+    // The offline system Agent uses Claude Code, so the Codex import uses engine defaults.
+    expect(defaults_source).toBe("backend");
     await login(page);
     await page.locator(".session-item .session-name", { hasText: "Speed Session" }).click();
     await page.locator(".btn-model-settings").click();
     const dialog = page.locator(".model-picker-dialog");
     await expect(dialog.getByLabel("Speed")).toBeEnabled();
     await expect(dialog.getByLabel("Speed")).toHaveValue("");
-    await expect(dialog.getByLabel("Speed").locator("option:checked")).toHaveText("Agent default (Normal)");
+    await expect(dialog.getByLabel("Speed").locator("option:checked")).toHaveText("Engine default (Normal)");
     await dialog.getByLabel("Speed").selectOption("fast");
     await dialog.getByRole("button", { name: "Apply" }).click();
     await expect(dialog).toBeHidden();
