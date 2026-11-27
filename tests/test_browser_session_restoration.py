@@ -27,11 +27,11 @@ async def test_presence_sees_a_restored_session_omitted_by_both_list_reads(resto
     notice, allow_notice = asyncio.Event(), asyncio.Event()
     read_archived = manager.db.load_archived_sessions
 
-    async def delayed_archive_read(*, user_id=None, session_id=None):
+    async def delayed_archive_read(*, user_id=None, session_id=None, unavailable_rewinds=()):
         if session_id is None:
             archive_read.set()
             await allow_archive_read.wait()
-        return await read_archived(user_id=user_id, session_id=session_id)
+        return await read_archived(user_id=user_id, session_id=session_id, unavailable_rewinds=unavailable_rewinds)
 
     async def delayed_notice(event):
         if event["type"] == "session_unarchived" and event["session_id"] == sid:

@@ -20,12 +20,47 @@ from ..agent_configuration import (
     decode_agent_configuration,
     encode_agent_configuration,
 )
+from ..agent_memory import valid_private_agent_identity
 from ..config import settings
 from .base import DatabaseBase
 from .schema import _DEFAULT_MCP_SERVERS
 from .transaction import Transaction
 
 logger = logging.getLogger(__name__)
+
+
+class AgentDeleteRefused(ValueError):
+    """The delete transaction found an ineligible Agent."""
+
+
+class AgentDeletionPending(ValueError):
+    """The committed deletion owns the Agent's remaining lifecycle."""
+
+
+async def require_agent_not_deleting(tx: Transaction, agent_id: str | None) -> None:
+    if agent_id is not None and await tx.fetch_one(
+        "SELECT 1 FROM agents WHERE id=? AND deletion_pending=1", (agent_id,),
+    ):
+        raise AgentDeletionPending("Agent deletion is unfinished; retry deletion")
+
+
+async def _require_deletable_agent(tx: Transaction, agent_id: str, user_id: str) -> bool:
+    from .users import owner_is_available
+
+    agent = await tx.fetch_one(
+        "SELECT is_system, EXISTS(SELECT 1 FROM sessions WHERE agent_id=agents.id), deletion_pending "
+        "FROM agents WHERE id=? AND user_id=?", (agent_id, user_id),
+    )
+    if agent is None or not await owner_is_available(tx, user_id):
+        raise AgentDeleteRefused("Agent not found")
+    is_system, has_sessions, pending = agent
+    if is_system:
+        raise AgentDeleteRefused("The Default Agent cannot be deleted")
+    if has_sessions:
+        raise AgentDeleteRefused("Agent still has sessions; archive it instead of deleting")
+    if not valid_private_agent_identity(agent_id, user_id):
+        raise AgentDeleteRefused("Agent private directory identity is invalid")
+    return bool(pending)
 
 
 async def _insert_agent(tx: Transaction, agent_id: str, fields: dict[str, Any]) -> None:
@@ -144,7 +179,7 @@ class AgentsMixin(DatabaseBase):
         agent.update(decode_agent_configuration(agent["id"], {
             field: agent[field] for field in AGENT_CONFIGURATION_FIELDS
         }))
-        for field in ("is_system", "archived", "pinned"):
+        for field in ("is_system", "archived", "pinned", "deletion_pending"):
             agent[field] = bool(agent[field])
         return agent
 
@@ -347,6 +382,8 @@ class AgentsMixin(DatabaseBase):
         if "archived" in updates:
             updates["archived"] = int(bool(updates["archived"]))
         async with self.transaction(write=True) as tx:
+            if "archived" in updates:
+                await require_agent_not_deleting(tx, agent_id)
             context_fields = ("backend", "model", "credential_id")
             columns = ", ".join(AGENT_CONFIGURATION_FIELDS)
             row = await tx.fetch_one(f"SELECT {columns} FROM agents WHERE id = ?", (agent_id,))
@@ -367,6 +404,7 @@ class AgentsMixin(DatabaseBase):
     async def archive_agent(self, agent_id: str) -> None:
         """Soft-delete an agent and cascade-archive its sessions."""
         async with self.transaction(write=True) as tx:
+            await require_agent_not_deleting(tx, agent_id)
             await tx.execute(
                 "UPDATE agents SET archived = 1, updated_at = ? WHERE id = ?",
                 (datetime.now(UTC).isoformat(), agent_id),
@@ -376,16 +414,17 @@ class AgentsMixin(DatabaseBase):
                 (agent_id,),
             )
 
-    async def unarchive_agent(self, agent_id: str) -> None:
-        """Restore an archived agent. Its sessions stay archived: they were
-        archived as a cascade, and silently reviving a dozen old threads is
-        not what "restore this agent" means — the archived-sessions page is
-        where a session comes back from."""
+    async def unarchive_agent(self, agent_id: str) -> dict[str, Any] | None:
+        """Restore and pin the Agent together. Its sessions stay archived."""
         async with self.transaction(write=True) as tx:
+            await require_agent_not_deleting(tx, agent_id)
             await tx.execute(
                 "UPDATE agents SET archived = 0, updated_at = ? WHERE id = ?",
                 (datetime.now(UTC).isoformat(), agent_id),
             )
+            await self._set_pinned(tx, "agents", agent_id, True)
+            row = await tx.fetch_one(f"SELECT {self._AGENT_COLS} FROM agents a WHERE a.id = ?", (agent_id,))
+            return self._row_to_agent(row) if row is not None else None
 
     async def set_agent_pinned(self, agent_id: str, pinned: bool) -> None:
         """Put the agent in the sidebar (at the bottom) or take it out."""
@@ -411,12 +450,23 @@ class AgentsMixin(DatabaseBase):
         agents = self._agents_for_display(rows)
         return agents, [a for a in agents if a["id"] in current and a["pin_order"] != current[a["id"]]]
 
-    async def delete_agent(self, agent_id: str) -> bool:
-        """Hard-delete an agent. FK ON DELETE CASCADE removes its sessions,
-        schedules — guarded by AgentManager so this is
-        only reached when the agent has no sessions."""
+    async def claim_agent_deletion(self, agent_id: str, *, user_id: str) -> dict[str, Any]:
+        """Commit the original account and Agent's private cleanup responsibility."""
         async with self.transaction(write=True) as tx:
-            cursor = await tx.execute(
-                "DELETE FROM agents WHERE id = ?", (agent_id,)
+            pending = await _require_deletable_agent(tx, agent_id, user_id)
+            if not pending:
+                await tx.execute(
+                    "UPDATE agents SET deletion_pending=1, archived=1, updated_at=? WHERE id=?",
+                    (datetime.now(UTC).isoformat(), agent_id),
+                )
+            row = await tx.fetch_one(
+                f"SELECT {self._AGENT_COLS} FROM agents a WHERE a.id=?", (agent_id,),
             )
-            return cursor.rowcount > 0
+            return self._row_to_agent(row)
+
+    async def delete_agent(self, agent_id: str, *, user_id: str) -> None:
+        """Finish the claimed deletion after the private directory was cleared."""
+        async with self.transaction(write=True) as tx:
+            if not await _require_deletable_agent(tx, agent_id, user_id):
+                raise AgentDeleteRefused("Agent deletion has not acquired cleanup responsibility")
+            await tx.execute("DELETE FROM agents WHERE id=?", (agent_id,))

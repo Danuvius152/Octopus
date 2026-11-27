@@ -25,7 +25,8 @@ _ACCOUNT_FILTERS = {
     "custom_connectors": _INSTALLED_KIND,
     "connector_oauth_clients": _INSTALLED_KIND,
 }
-# Chat exclusions include message-private Git baselines and generated BG summaries.
+# Chat exclusions include message-private Git baselines, pending revert writer
+# identities, and generated BG summaries.
 EXCLUDED = {"auth_tokens", "invites", "sessions", "messages", "schedules", "bg_tasks", "client_submissions",
             "research_jobs", "wiki_job_notifications"}
 _INITIAL_CONTEXT_REVISION = 0
@@ -68,6 +69,7 @@ def read_account(source: sqlite3.Connection, user_id: str, *, key: str) -> dict[
     dek = decrypt(rows["users"][0]["dek_wrapped"], key)
     for row in rows["agents"]:
         # Target configuration starts a new authority; source chat is excluded.
+        # An unfinished private deletion retains the original Agent and its closure.
         row["context_settings_revision"] = _INITIAL_CONTEXT_REVISION
     for row in rows["backend_credentials"]:
         if row["auth_type"] == "oauth":

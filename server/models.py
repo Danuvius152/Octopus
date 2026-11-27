@@ -131,7 +131,8 @@ class ForkRevertRecord(BaseModel):
 
     ran: bool = Field(default=False, description=(
         "A mutating Git operation started, or preflight verified a completed no-op. "
-        "This does not imply success: a failed operation may already have changed files."
+        "A failed operation may already have changed files. With unknown_post_crash, "
+        "true also covers a write that may have started before evidence could be saved."
     ))
     files: list[str] = []
     stash_ref: str | None = Field(default=None, description=(

@@ -52,14 +52,27 @@ A protected `is_system` agent, if present,
 cannot be archived, deleted or unpinned; ordinary startup does not recreate an
 installation-era default agent or backfill user configuration.
 
-Hard deletion requires no remaining sessions and removes the private memory
-directory. Archive keeps it. Pinning controls visibility independently of
-archive; see [sidebar behavior](sidebar-pins.md).
+Archive and hard deletion check account ownership before mutation. For hard
+deletion, SessionManager stops admitting operations that can create sessions
+for the Agent and waits for existing reservations to settle. An active or
+archived session blocks deletion. SQLite checks this when claiming deletion
+and again in the final delete transaction. A refusal releases the temporary
+admission hold. Existing history and its input and return paths remain
+available under the Agent's current lifecycle state.
 
-Archive and hard deletion both reject a failed account-scoped lookup before
-mutation. `delete_agent` requires explicit account scope and returns the authorized
-original row for the deletion event. Missing or foreign targets cannot reach row
-or memory deletion. The detailed boundary and regression evidence belong to
+The claim commits the account and Agent's cleanup responsibility before any
+private files are removed. The pending Agent stays closed to new work and
+restoration. Repeated requests share outstanding work and can retry a
+failed cleanup or a known uncommitted final delete under the original Agent
+ID. The operation continues if the HTTP waiter disconnects. Success and its
+event require both [private memory cleanup](memory.md#4-plumbing) and a
+confirmed final delete. If the commit acknowledgment is lost, the current
+database generation stops without publishing success. After restart the
+stored row determines whether cleanup can resume or the Agent is already
+absent.
+
+Archiving keeps private memory. Pinning controls visibility independently
+of archive. See [sidebar behavior](sidebar-pins.md) and
 [account ownership](multi-tenancy.md#business-ownership).
 
 ## Related contracts and verification
@@ -73,6 +86,6 @@ or memory deletion. The detailed boundary and regression evidence belong to
 Implementation: [AgentManager](../../server/agent_manager.py),
 [session lifecycle](../../server/sessions/lifecycle.py),
 [agent routes](../../server/routers/agents.py).
-Regression entry points: `tests/test_agents_api.py`,
+Regression entry points: `tests/test_agents_api.py`, `tests/test_agent_delete_recovery.py`,
 `tests/test_agent_configuration_startup.py`, `tests/test_agent_credential_bindings.py`
 and `tests/test_model_settings.py`.

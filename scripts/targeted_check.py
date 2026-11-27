@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from .check_runner import (
@@ -23,6 +24,7 @@ from .check_runner import (
     atomic_json,
     exclusive_lock,
     stop_if_requested,
+    sync_directory,
 )
 
 PLAYWRIGHT_OWNER = "targeted-playwright-owner.json"
@@ -39,39 +41,72 @@ def retirement(directory: Path) -> dict[str, Any] | None:
         return None
     pid, status = proof.get("runner_pid"), proof.get("returncode")
     if (pid is None and status is None) or (type(pid) is int and pid > 0 and type(status) is int):
+        # The proof becomes visible at rename, before the writer's directory sync.
+        sync_directory(directory)
         return proof
     return None
 
 
-def run(directory: Path, argv: list[str]) -> int:
+def run_command(directory: Path, argv: list[str]) -> int:
+    interrupted: int | None = None
+
+    def remember_interrupt(signum: int, _frame: FrameType | None) -> None:
+        nonlocal interrupted
+        interrupted = interrupted or signum
+
+    # The run subcommand owns these signals through CLI exit, including when
+    # main reports a launch or retirement error.
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, remember_interrupt)
+
     directory.mkdir(mode=0o700)
     stop = directory / "stop"
-    launch = {"format_version": 1, "run_directory": str(directory), "cwd": os.getcwd(), "argv": argv, "runner_pid": None}
+    launch: dict[str, Any] = {
+        "format_version": 1, "run_directory": str(directory), "cwd": os.getcwd(), "argv": argv, "runner_pid": None,
+    }
+    environment = {**os.environ, TARGETED_CHECK_DIR: str(directory)}
+    launch_failed = False
     # Allow the nested gate owner to complete its own TERM and KILL phases.
-    with GateChildren(term_grace=12) as owner:
+    with GateChildren(term_grace=12, handle_signals=False) as owner:
         with exclusive_lock(directory / "dispatch.lock"):
-            if not stop.exists():
-                owner.spawn(argv, env={**os.environ, TARGETED_CHECK_DIR: str(directory)})
+            if not stop.exists() and interrupted is None:
+                owner.spawn(argv, env=environment)
         process = owner.process
         if process is not None:
             launch["runner_pid"] = process.pid
-            atomic_json(directory / "launch.json", launch)
-            while not stop.exists():
-                try:
-                    process.wait(timeout=0.1)
-                    break
-                except subprocess.TimeoutExpired:
-                    owner.reap_exited_orphans()
-    returncode = owner.process.returncode if owner.process is not None else None
+            try:
+                atomic_json(directory / "launch.json", launch)
+            except OSError as error:
+                print(f"Cannot write check launch record for {directory}: {error}", file=sys.stderr)
+                launch_failed = True
+            else:
+                while not stop.exists() and interrupted is None:
+                    try:
+                        process.wait(timeout=0.1)
+                        break
+                    except subprocess.TimeoutExpired:
+                        owner.reap_exited_orphans()
+
+    # Leaving the owner successfully proves retirement. Startup errors and
+    # unconfirmed retirement bypass publication and leave the reservation intact.
+    returncode = process.returncode if process is not None else None
     stopped = stop.exists()
-    atomic_json(directory / "retirement.json", {**launch, "returncode": returncode, "stop_requested": stopped})
+    atomic_json(directory / "retirement.json", {
+        **launch, "returncode": returncode, "stop_requested": interrupted is not None or stopped,
+    })
+    cleanup_failed = False
     try:
         clean_playwright(directory)
     except (OSError, ValueError) as error:
         print(f"Playwright cleanup pending for {directory}: {error}", file=sys.stderr)
-        return 128 + signal.SIGTERM if stopped else 1
+        cleanup_failed = True
+
+    if interrupted is not None:
+        return 128 + interrupted
     if stopped:
         return 128 + signal.SIGTERM
+    if launch_failed or cleanup_failed:
+        return 1
     assert returncode is not None
     return shell_status(returncode)
 
@@ -196,7 +231,7 @@ def main() -> int:
         if args.operation == "run":
             if not args.argv:
                 parser.error("run requires a command after its directory")
-            return run(directory, args.argv)
+            return run_command(directory, args.argv)
         if args.operation == "stop":
             if not directory.is_dir():
                 raise ValueError(f"Check control directory is not ready: {directory}")

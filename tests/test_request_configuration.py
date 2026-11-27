@@ -18,7 +18,7 @@ from server.deps import get_session_manager
 from server.harness import get_harness
 from server.harness.claude_code import ClaudeDriver
 from server.harness.driver import ArgvDriver
-from server.harness.model_settings import ModelSettings
+from server.harness.model_settings import ModelSettings, effective_settings
 from server.routers import agents, credentials, sessions
 from server.sessions import SessionManager
 from tests.accounts import create_account
@@ -629,7 +629,152 @@ async def test_cross_engine_settings_keep_unenforceable_agent_policy_from_saving
     assert (await client.get(path)).json()["backend"] == "claude-code"
     posted = await client.post(create_path, json={"working_dir": original.working_dir, **target})
     assert posted.status_code == 400 and "tool_deny" in posted.json()["detail"]
+    imported = await client.post("/api/sessions/import", json={"agent_id": original.agent_id, **target})
+    assert (imported.status_code, imported.json()) == (posted.status_code, posted.json())
     assert (await manager.db.get_agent(original.agent_id))["tool_deny"] == "Write"
+
+
+@pytest.mark.parametrize(
+    ("backend", "source", "model", "effort", "tier"),
+    [("codex", "agent", "agent-old", "low", "default"), ("claude-code", "backend", None, None, None)],
+)
+async def test_new_import_and_creation_reload_with_the_same_configuration(
+    configuration_host, backend, source, model, effort, tier,
+):
+    client, manager, original, credential_ids, _effects = configuration_host
+    create_path = f"/api/agents/{original.agent_id}/sessions"
+    fields = {"backend": backend, "working_dir": original.working_dir}
+    created = await client.post(create_path, json=fields)
+    imported = await client.post("/api/sessions/import", json={
+        **fields, "agent_id": original.agent_id,
+        "messages": [{"type": "text", "role": "user", "content": "Previous input"}],
+    })
+    assert created.status_code == 201, created.text
+    assert imported.status_code == 201, imported.text
+
+    reloaded = SessionManager()
+    await reloaded.initialize(manager.db)
+    for response in (created, imported):
+        info = response.json()
+        session = reloaded.get_session(info["id"], original.user_id)
+        captured, defaults = await reloaded.capture_request_configuration(session)
+        assert (info["backend"], info["defaults_source"]) == (captured.backend, captured.defaults_source) == (backend, source)
+        assert (captured.model, captured.reasoning_effort, captured.service_tier, captured.credential_id) == (None,) * 4
+        assert effective_settings(captured, defaults) == {
+            "model": model, "reasoning_effort": effort, "service_tier": tier,
+            "credential_id": credential_ids[0] if source == "agent" else None,
+        }
+
+
+async def test_import_and_creation_apply_the_same_explicit_credential_rules(configuration_host):
+    client, manager, original, credential_ids, _effects = configuration_host
+    other, _ = await create_account(manager.db, username="other-credential-owner")
+    for credential_id, owner in (("owned-claude", original.user_id), ("foreign-claude", other["id"])):
+        await manager.db.save_credential(
+            credential_id, "claude-code", "Test binding", "api_key", "test-only",
+            "2026-11-17T00:00:00+00:00", user_id=owner,
+        )
+
+    payload = {"agent_id": original.agent_id, "backend": "claude-code", "working_dir": original.working_dir}
+    for credential_id, status in (("owned-claude", 201), (credential_ids[0], 400), ("foreign-claude", 404)):
+        fields = {**payload, "credential_id": credential_id}
+        before = {row["id"] for row in await manager.db.load_sessions()}
+        created = await client.post("/api/sessions", json=fields)
+        imported = await client.post("/api/sessions/import", json=fields)
+        assert created.status_code == imported.status_code == status, (created.text, imported.text)
+        if status != 201:
+            assert imported.json() == created.json()
+            assert {row["id"] for row in await manager.db.load_sessions()} == before
+            continue
+
+        reloaded = SessionManager()
+        await reloaded.initialize(manager.db)
+        for response in (created, imported):
+            saved = reloaded.get_session(response.json()["id"], original.user_id)
+            assert saved.defaults_source == "backend" and saved.credential_id == credential_id
+            captured, agent = await reloaded.capture_request_configuration(saved)
+            assert effective_settings(captured, agent)["credential_id"] == credential_id
+
+
+async def test_import_uses_one_configuration_until_history_commit(configuration_host, monkeypatch):
+    client, manager, original, _credential_ids, _effects = configuration_host
+    db = manager.db
+    for credential_id in ("inherited-claude", "explicit-claude"):
+        await db.save_credential(
+            credential_id, "claude-code", "Test binding", "api_key", "test-only",
+            "2026-11-17T00:00:00+00:00", user_id=original.user_id,
+        )
+    agent_path = f"/api/agents/{original.agent_id}"
+    configured = await client.patch(agent_path, json={
+        "backend": "claude-code", "model": "sonnet", "reasoning_effort": None, "service_tier": None,
+        "credential_id": "inherited-claude", "tool_deny": "Write",
+    })
+    assert configured.status_code == 200, configured.text
+
+    installing, release = asyncio.Event(), asyncio.Event()
+    install = db.install_session_history
+
+    async def hold_install(record, rows):
+        installing.set()
+        await release.wait()
+        await install(record, rows)
+        saved = next(row for row in await db.load_sessions() if row["id"] == record["id"])
+        defaults = await db.get_agent(original.agent_id, original.user_id)
+        assert (saved["backend"], saved["defaults_source"], saved["credential_id"]) == (
+            "claude-code", "agent", "explicit-claude",
+        )
+        assert (saved["model"], saved["reasoning_effort"], saved["service_tier"]) == (None, None, None)
+        assert effective_settings(saved, defaults) == {
+            "model": "sonnet", "reasoning_effort": None, "service_tier": None, "credential_id": "explicit-claude",
+        }
+        assert defaults["tool_deny"] == "Write"
+        assert await db.get_credential("explicit-claude", original.user_id) is not None
+        assert [message["content"] for message in await db.load_messages(record["id"])] == ["Previous input"]
+
+    monkeypatch.setattr(db, "install_session_history", hold_install)
+    payload = {
+        "agent_id": original.agent_id, "backend": "claude-code", "credential_id": "explicit-claude",
+        "working_dir": original.working_dir,
+        "messages": [{"type": "text", "role": "user", "content": "Previous input"}],
+    }
+    importing = asyncio.create_task(client.post("/api/sessions/import", json=payload))
+    updates = []
+    try:
+        await asyncio.wait_for(installing.wait(), 3)
+
+        waiting = asyncio.Queue()
+        acquire = manager.configuration_lock.acquire
+
+        async def observe_acquire():
+            waiting.put_nowait(None)
+            return await acquire()
+
+        monkeypatch.setattr(manager.configuration_lock, "acquire", observe_acquire)
+        updates.append(asyncio.create_task(client.patch(agent_path, json={"model": "opus", "tool_deny": "Edit"})))
+        await asyncio.wait_for(waiting.get(), 3)
+        updates.append(asyncio.create_task(client.delete("/api/credentials/explicit-claude")))
+        await asyncio.wait_for(waiting.get(), 3)
+        assert all(not update.done() for update in updates)
+        release.set()
+        imported, changed, revoked = await asyncio.wait_for(asyncio.gather(importing, *updates), 3)
+    finally:
+        release.set()
+        await asyncio.gather(importing, *updates, return_exceptions=True)
+
+    assert (imported.status_code, changed.status_code, revoked.status_code) == (201, 200, 204)
+    detail = imported.json()
+    assert detail["credential_id"] == "explicit-claude" and detail["defaults_source"] == "agent"
+    assert [message["content"] for message in detail["messages"]] == ["Previous input"]
+    live = manager.get_session(detail["id"], original.user_id)
+    captured, defaults = await manager.capture_request_configuration(live)
+    assert captured.credential_id is None
+    assert effective_settings(captured, defaults) == {
+        "model": "opus", "reasoning_effort": None, "service_tier": None, "credential_id": "inherited-claude",
+    }
+    assert defaults["tool_deny"] == "Edit"
+    restored = next(row for row in await db.load_sessions() if row["id"] == detail["id"])
+    assert restored["credential_id"] is None and restored["defaults_source"] == "agent"
+    assert (await client.post("/api/sessions/import", json=payload)).status_code == 404
 
 
 async def test_alternate_engine_creation_and_credential_deletion_share_a_commit_boundary(configuration_host, monkeypatch):

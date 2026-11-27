@@ -85,6 +85,21 @@ async def retain_application_session_owner(tx: Transaction, session_id: str) -> 
 
 class ApplicationsMixin(DatabaseBase):
 
+    async def authorize_session_git(self, session_id: str) -> str | None:
+        """Capture the exact application before any Git process can start."""
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                "SELECT a.id, a.deletion FROM sessions s LEFT JOIN applications a ON "
+                "(a.id=s.app_id OR a.session_id=s.id) AND a.user_id IS s.user_id WHERE s.id=?",
+                (session_id,),
+            )
+        if len(rows) != 1:
+            raise ValueError("The original Git session has no current ownership binding")
+        app_id, deletion = rows[0]
+        if deletion is not None:
+            raise ApplicationDeleting("Application deletion is unfinished; retry deletion before writing")
+        return app_id
+
     async def require_application_session_writable(self, session_id: str) -> None:
         async with self.transaction(write=False) as tx:
             await require_application_writable(tx, session_id)
@@ -362,9 +377,23 @@ class ApplicationsMixin(DatabaseBase):
             changed = [row for row in after if row["id"] in before and row["pin_order"] != before[row["id"]]]
             return after, changed
 
-    async def delete_application(self, app_id: str) -> bool:
+    async def delete_application(
+        self, app_id: str, *, release_rewind_worktree: bool = False,
+    ) -> tuple[bool, dict[str, str]]:
         async with self.transaction(write=True) as tx:
+            updates: dict[str, str] = {}
+            if release_rewind_worktree:
+                rows = await tx.fetch_all(
+                    "UPDATE sessions SET fork_metadata=json_remove(fork_metadata, '$.rewind_worktree_id') "
+                    "WHERE fork_status='ready' "
+                    "AND CASE WHEN json_valid(fork_metadata) THEN json_type(fork_metadata, '$.rewind_worktree_id') END IS NOT NULL "
+                    "AND EXISTS (SELECT 1 FROM applications a WHERE a.id=? AND a.user_id IS sessions.user_id "
+                    "AND (a.id=sessions.app_id OR a.session_id=sessions.id)) "
+                    "RETURNING id, fork_metadata",
+                    (app_id,),
+                )
+                updates = dict(rows)
             cursor = await tx.execute(
                 "DELETE FROM applications WHERE id = ?", (app_id,)
             )
-            return cursor.rowcount > 0
+            return cursor.rowcount > 0, updates

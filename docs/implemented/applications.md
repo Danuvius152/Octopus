@@ -263,6 +263,11 @@ The operation first closes input/start admission, then joins the original
 development executions, exact delegated rounds and independent BG, application
 conversations, and backend process group/readers. Session archive or deletion
 retires a builder's independent work before its association can disappear.
+Git executions from associated rewind, preview and anchor calls must retire
+before file cleanup, including executions whose waiters have already left.
+Deletion admission closes Git for those sessions in both deletion phases.
+Each Git execution captures its application before launch so deleting the
+originating session still leaves the application retirement obligation visible.
 New builders and archive successors retain `sessions.app_id`; before archiving,
 deleting or replacing the application's reference to a legacy builder, its exact
 ownership is retained in that field. This includes builders archived before the
@@ -320,8 +325,13 @@ this lifecycle fact without restoring execution authority; see
 [storage handoff](current-storage-format.md) and [account transfer](../backup-and-migrate.md#account-export-and-import).
 Build histories remain readable and retain their ordinary archive/restore/input
 behavior after successful deletion. A later new instruction may recreate their
-working directory. Deletion retires original writers; it does not forbid future
-explicit human work in the retained build history.
+working directory. Confirmed directory removal releases any unused rewind
+directory binding in the same commit as application deletion. Keeping files
+preserves that binding.
+When a previous file removal left a history unavailable at startup, completing
+the removal retry restores the eligible active history in the current service.
+It joins the owning Agent's lifecycle before registration and announces the
+restored session to its account.
 
 <a id="6-build-brief-and-ui"></a>
 ## Build brief and UI

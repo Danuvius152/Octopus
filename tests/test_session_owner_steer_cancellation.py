@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from server import fork_git
 from server.harness import get_harness
 from server.harness.claude_code import ClaudeDriver
 from tests import test_question_lifecycle as question_tests
@@ -69,13 +70,18 @@ async def test_cancelled_steer_does_not_deliver_after_its_git_preparation_finish
     processes, preparations = [], []
     gate_next_anchor = False
     spawn = asyncio.create_subprocess_exec
+    spawn_git = fork_git._spawn_git
 
     async def observe_original_spawn(*arguments, **kwargs):
-        nonlocal gate_next_anchor
         process = await spawn(*arguments, **kwargs)
         if str(model) in arguments:
             processes.append(process)
-        if gate_next_anchor and arguments[:3] == ("git", "rev-parse", "HEAD"):
+        return process
+
+    async def hold_git_anchor(args, **kwargs):
+        nonlocal gate_next_anchor
+        process = await spawn_git(args, **kwargs)
+        if gate_next_anchor and args[-2:] == ("rev-parse", "HEAD"):
             gate_next_anchor = False
             preparations.append((asyncio.current_task(), process))
             anchor_entered.set()
@@ -91,6 +97,7 @@ async def test_cancelled_steer_does_not_deliver_after_its_git_preparation_finish
             following_received.set()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_original_spawn)
+    monkeypatch.setattr(fork_git, "_spawn_git", hold_git_anchor)
     manager.on_broadcast("cancelled-original-correction", observe_original_output)
     prompt = "Keep the first original request active."
     withdrawn = "Never deliver this withdrawn correction."

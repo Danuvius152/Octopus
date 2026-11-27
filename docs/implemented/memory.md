@@ -137,8 +137,14 @@ the ordinary file/tool loop through memory wiring. See the
 - The memory blurb is composed in `assembly.py` (single-point, like the
   connectors blurb), gated by `RuntimeProfile.injects_memory_prompt` so only
   Codex receives it; Claude relies on native injection.
-- `agent_manager.create_agent` provisions `<agent>/memory/`; agent hard delete
-  removes that agent's tree. Archive preserves it; sibling shared memory remains.
+- `agent_manager.create_agent` provisions `<agent>/memory/`. The
+  [hard-delete operation](agent-refactor.md#creation-names-and-lifecycle) removes
+  the verified private tree after the deletion claim commits. It holds directory
+  handles while cleaning and uses a private retirement slot with an identity
+  receipt to finish interrupted root removal. A retry can finish an already
+  absent tree. A changed binding or an unverifiable receipt leaves the Agent
+  pending for investigation. Archive preserves the private tree, and hard
+  deletion preserves other Agents' trees and the account's shared memory.
 
 ## Verification
 

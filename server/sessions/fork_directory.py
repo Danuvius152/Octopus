@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ctypes
 import errno
 import os
 import shutil
@@ -13,6 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..directory_cleanup import DirectoryBindingError, empty_directory
+from ..directory_cleanup import mount_id as _mount_id
+from ..directory_cleanup import move_unoccupied as _move
 from ..workspace import (
     FORK_CREATION_ATTRIBUTE,
     FORK_RETIREMENT_TARGET_ATTRIBUTE,
@@ -21,10 +23,6 @@ from ..workspace import (
 )
 
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-_RENAME_NOREPLACE = 1
-_renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-_renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-_renameat2.restype = ctypes.c_int
 
 
 class ForkDirectoryError(RuntimeError):
@@ -86,20 +84,9 @@ def _parents(
         os.close(parent)
 
 
-def _move(source_parent: int, source: str, dest_parent: int, dest: str) -> None:
-    if _renameat2(source_parent, os.fsencode(source), dest_parent, os.fsencode(dest), _RENAME_NOREPLACE):
-        number = ctypes.get_errno()
-        raise OSError(number, os.strerror(number), source, None, dest)
-
-
 def _identity(fd: int) -> list[int]:
     info = os.fstat(fd)
     return [info.st_dev, info.st_ino]
-
-
-def _mount_id(fd: int) -> str:
-    with open(f"/proc/self/fdinfo/{fd}") as info:
-        return next(line.split()[1] for line in info if line.startswith("mnt_id:"))
 
 
 def _same_directory(left: int, right: int) -> bool:
@@ -363,21 +350,10 @@ def _copy_tree(source: Path, target: int) -> None:
 
 
 def _empty_directory(target: int, mount: str) -> None:
-    mode = stat.S_IMODE(os.fstat(target).st_mode)
-    if not mode & stat.S_IWUSR:
-        os.fchmod(target, mode | stat.S_IWUSR)
-    for name in os.listdir(target):
-        info = os.stat(name, dir_fd=target, follow_symlinks=False)
-        if stat.S_ISDIR(info.st_mode):
-            with _directory(name, parent=target) as child:
-                if _mount_id(child) != mount or not os.path.samestat(info, os.fstat(child)):
-                    raise ForkDirectoryError("Fork cleanup encountered a changed or mounted directory")
-                _empty_directory(child, mount)
-                if not os.path.samestat(info, os.stat(name, dir_fd=target, follow_symlinks=False)):
-                    raise ForkDirectoryError("Fork cleanup directory changed during retirement")
-                os.rmdir(name, dir_fd=target)
-        else:
-            os.unlink(name, dir_fd=target)
+    try:
+        empty_directory(target, mount, make_writable=True)
+    except DirectoryBindingError as error:
+        raise ForkDirectoryError(str(error)) from error
 
 
 def _created_target(target: int, receipt: dict[str, Any], token: str) -> bool:

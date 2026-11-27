@@ -14,11 +14,12 @@ from server.routers.ws import router as ws_router
 
 
 @asynccontextmanager
-async def session_client(manager, session):
+async def session_client(manager, session=None, *, bearer=None):
     app = FastAPI()
     app.include_router(sessions_router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    bearer = await deps.get_user_manager().issue_token(session.user_id)
+    if bearer is None:
+        bearer = await deps.get_user_manager().issue_token(session.user_id)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
         headers={"Authorization": f"Bearer {bearer}"}) as client:
         yield client

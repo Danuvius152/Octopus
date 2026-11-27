@@ -33,7 +33,7 @@ from uuid import UUID
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from server import deps
+from server import deps, fork_git, fork_helpers
 from server.agent_manager import AgentManager
 from server.app_agent import app_agent_manager
 from server.applications import (
@@ -50,10 +50,12 @@ from server.applications import (
 )
 from server.config import settings
 from server.database import Database
+from server.harness import HarnessEvent
 from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import applications as applications_mod
-from server.session_manager import SessionManager, session_manager
+from server.session_manager import ForkError, SessionManager, session_manager
+from server.sessions.runtime_types import SessionAdmissionClosed
 from server.users import UserManager
 from tests.accounts import create_account
 from tests.completion_models import CompletionModels
@@ -128,6 +130,287 @@ async def _create_app(am, db, *, name="Todo App", **extra) -> dict:
         agent_id=agent["id"],
         **extra,
     )
+
+
+async def test_application_deletion_waits_for_its_original_rewind_git(am, db, mgr, sent, models, monkeypatch):
+    row = await _create_app(am, db)
+    parent = mgr.get_session(row["session_id"])
+    code = Path(row["app_dir"])
+    original_file = code / "original.txt"
+    original_file.write_text("application files")
+    await models.emit(mgr, {"type": "result", "session_id": parent.id})
+    spawned = asyncio.Event()
+    release = asyncio.Event()
+    original_spawn = fork_git._spawn_git
+    original_git = fork_helpers._git
+    process = None
+
+    async def slow_spawn(args, **kwargs):
+        nonlocal process
+        if args != ("rev-parse", "--show-toplevel"):
+            return await original_spawn(args, **kwargs)
+        process = await original_spawn(("-c", "alias.wait=!sleep 10", "wait"), **kwargs)
+        spawned.set()
+        await release.wait()
+        return process
+
+    async def git(cwd, *args, **kwargs):
+        return await original_git(cwd, *args, timeout=0.12)
+
+    monkeypatch.setattr(fork_git, "_spawn_git", slow_spawn)
+    monkeypatch.setattr(fork_git, "_RETIRE_TIMEOUT", 0.12)
+    monkeypatch.setattr(fork_helpers, "_git", git)
+    rewind = asyncio.create_task(mgr.fork_session(parent.id, 0, revert_files=True))
+    try:
+        await asyncio.wait_for(spawned.wait(), 3)
+        with pytest.raises(ForkError) as refused:
+            await rewind
+        assert refused.value.reason == "git_retirement_pending"
+        assert process.poll() is None
+        with pytest.raises(ApplicationError, match="Git execution retirement"):
+            await am.delete_application(row["id"])
+        assert (await am.get_application(row["id"]))["deletion"]["phase"] == "retiring"
+        assert original_file.read_text() == "application files"
+    finally:
+        release.set()
+        await asyncio.gather(rewind, return_exceptions=True)
+
+    async with asyncio.timeout(3):
+        while await db.load_incomplete_forks():
+            await asyncio.sleep(0.01)
+    assert process.returncode is not None
+    await am.delete_application(row["id"])
+    assert not code.exists()
+
+
+@pytest.mark.parametrize("phase", ["retiring", "files"])
+@pytest.mark.parametrize("operation", ["preview", "anchor", "deleted-session"])
+async def test_application_deletion_waits_for_git_without_a_rewind_row(am, db, mgr, sent, models, monkeypatch, phase, operation):
+    row = await _create_app(am, db)
+    parent = mgr.get_session(row["session_id"])
+    await models.emit(mgr, {"type": "result", "session_id": parent.id})
+    code = Path(row["app_dir"])
+    marker = code / "original.txt"
+    marker.write_text("keep until Git is retired")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    spawn = fork_git._spawn_git
+    spawned = []
+
+    async def delayed_spawn(_args, **kwargs):
+        process = await spawn(("-c", "alias.wait=!sleep 10", "wait"), **kwargs)
+        spawned.append(process)
+        entered.set()
+        await release.wait()
+        return process
+
+    monkeypatch.setattr(fork_git, "_spawn_git", delayed_spawn)
+    monkeypatch.setattr(fork_git, "_RETIRE_TIMEOUT", 0.12)
+    original = asyncio.create_task(
+        mgr.fork_preview(parent.id, 0) if operation != "anchor" else
+        fork_helpers.capture_git_anchor(parent.working_dir, db=db, session_id=parent.id),
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        original.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await original
+        assert not await db.load_incomplete_forks() and spawned[0].poll() is None
+        if operation == "deleted-session":
+            assert await mgr.delete_session(parent.id)
+            assert not await db.application_session_ids(row["id"])
+        if phase == "files":
+            await db.set_application_deletion(row["id"], {"phase": phase, "keep_files": False, "error": None})
+        with pytest.raises(ApplicationError, match="Git execution retirement"):
+            await am.delete_application(row["id"])
+        assert (await am.get_application(row["id"]))["deletion"]["phase"] == phase
+        assert marker.exists()
+    finally:
+        release.set()
+        await asyncio.gather(original, return_exceptions=True)
+        # Give the real group reap its standard budget rather than the
+        # deliberately short budget used to remove each original waiter.
+        monkeypatch.setattr(fork_git, "_RETIRE_TIMEOUT", 2)
+        await fork_git.drain_git_executions()
+
+    if operation != "deleted-session":
+        preview = await mgr.fork_preview(parent.id, 0)
+        assert not preview["can_fork"]
+        assert await fork_helpers.capture_git_anchor(parent.working_dir, db=db, session_id=parent.id) == (None, None, None)
+    assert len(spawned) == 1
+    await am.delete_application(row["id"])
+    assert not code.exists()
+
+
+@pytest.mark.parametrize("cleanup_commits", ["before-restore", "after-restore"])
+async def test_archive_restore_preserves_concurrent_application_worktree_release(
+    am, db, mgr, sent, models, monkeypatch, cleanup_commits,
+):
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    rewind = await mgr.fork_session(row["session_id"], 0)
+    await mgr.archive_session(rewind.id, replace=False)
+    begin = db.begin_bound_archive_restore
+
+    async def complete_file_cleanup():
+        shutil.rmtree(row["app_dir"])
+        deleted, histories = await db.delete_application(row["id"], release_rewind_worktree=True)
+        assert deleted
+        assert "rewind_worktree_id" not in json.loads(histories[rewind.id])
+
+    async def overlap_restore_and_cleanup(*args, **kwargs):
+        if cleanup_commits == "before-restore":
+            await complete_file_cleanup()
+        started = await begin(*args, **kwargs)
+        if cleanup_commits == "after-restore":
+            assert started
+            await complete_file_cleanup()
+        return started
+
+    with monkeypatch.context() as overlap:
+        overlap.setattr(db, "begin_bound_archive_restore", overlap_restore_and_cleanup)
+        with pytest.raises(SessionAdmissionClosed):
+            await mgr.unarchive_session(rewind.id, rewind.user_id)
+    [archived] = await db.load_archived_sessions(session_id=rewind.id)
+    metadata = json.loads(archived["fork_metadata"])
+    assert "rewind_worktree_id" not in metadata
+    assert "rewind_restore_pending" not in metadata
+    assert mgr.get_session(rewind.id) is None
+    assert (await mgr.unarchive_session(rewind.id, rewind.user_id)).id == rewind.id
+
+
+@pytest.mark.parametrize(("keep_files", "move_directory"), [(True, True), (True, False), (False, True)])
+async def test_application_cleanup_settles_rewind_restore_deferred_at_startup(
+    am, db, mgr, sent, models, monkeypatch, keep_files, move_directory, tmp_path,
+):
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    rewind = await mgr.fork_session(row["session_id"], 0)
+    await mgr.archive_session(rewind.id, replace=False)
+    code = Path(row["app_dir"])
+    moved = tmp_path / "moved-application-directory"
+    begin = db.begin_bound_archive_restore
+
+    async def interrupt_after_commit(*args, **kwargs):
+        assert await begin(*args, **kwargs)
+        await db.set_application_deletion(row["id"], {"phase": "files", "keep_files": keep_files, "error": None})
+        if move_directory:
+            code.rename(moved)
+        raise RuntimeError("stop after beginning rewind restore")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(db, "begin_bound_archive_restore", interrupt_after_commit)
+        with pytest.raises(RuntimeError, match="stop after beginning"):
+            await mgr.unarchive_session(rewind.id, rewind.user_id)
+
+    await mgr.close_session_owners()
+    restarted = SessionManager()
+    await restarted.initialize(db)
+    current = ApplicationManager()
+    current.bind(restarted, db)
+    try:
+        await current.delete_application(row["id"], keep_files=keep_files)
+    finally:
+        current.shutdown()
+    [stored] = await db.load_sessions(session_id=rewind.id, include_archived=True)
+    metadata = json.loads(stored["fork_metadata"])
+    assert "rewind_restore_pending" not in metadata
+    assert ("rewind_worktree_id" in metadata) is keep_files
+    if keep_files and move_directory:
+        assert stored["archived"] and restarted.get_session(rewind.id) is None
+        moved.rename(code)
+        assert (await restarted.unarchive_session(rewind.id, rewind.user_id)).id == rewind.id
+    else:
+        assert not stored["archived"] and restarted.get_session(rewind.id) is not None
+    await restarted.close_session_owners()
+
+
+@pytest.mark.parametrize("scenario", ["delete", "retry", "archive-during-retry"])
+async def test_deleted_application_rewind_can_resume_after_restart(am, db, mgr, sent, models, monkeypatch, scenario):
+    row = await _create_app(am, db)
+    parent_id = row["session_id"]
+    await models.emit(mgr, {"type": "result", "session_id": parent_id})
+    rewind = await mgr.fork_session(parent_id, 0)
+    code = Path(row["app_dir"])
+    assert "rewind_worktree_id" in json.loads(rewind.fork_metadata)
+    if scenario == "retry":
+        await mgr.archive_session(rewind.id, replace=False)
+        rewind = await mgr.unarchive_session(rewind.id, rewind.user_id)
+        assert "rewind_restore_pending" not in json.loads(rewind.fork_metadata)
+    if scenario != "delete":
+        app_data = Path(str(code) + ".data")
+        app_data.mkdir()
+        remove = shutil.rmtree
+
+        def refuse_data(path, *args, **kwargs):
+            if Path(path) == app_data:
+                raise PermissionError("data removal interrupted")
+            return remove(path, *args, **kwargs)
+
+        with monkeypatch.context() as fault:
+            fault.setattr(shutil, "rmtree", refuse_data)
+            with pytest.raises(ApplicationError, match="data removal interrupted"):
+                await am.delete_application(row["id"])
+        assert not code.exists()
+        assert (await am.get_application(row["id"]))["deletion"]["phase"] == "files"
+    else:
+        await am.delete_application(row["id"])
+        assert not code.exists()
+        assert "rewind_worktree_id" not in json.loads(rewind.fork_metadata)
+
+    await mgr.close_session_owners()
+    restarted = SessionManager()
+    await restarted.initialize(db)
+    if scenario != "delete":
+        assert restarted.get_session(rewind.id) is None
+        events = []
+
+        async def observe(event):
+            events.append(event)
+
+        restarted.on_broadcast("connected-account", observe, user_id=rewind.user_id)
+        if scenario == "archive-during-retry":
+            load = db.load_sessions
+            intercepted = False
+
+            async def archive_after_discovery(**kwargs):
+                nonlocal intercepted
+                rows = await load(**kwargs)
+                if rows and kwargs.get("session_id") == rewind.id and not intercepted:
+                    intercepted = True
+                    await restarted.archive_agent(rewind.agent_id, user_id=rewind.user_id)
+                return rows
+
+            monkeypatch.setattr(db, "load_sessions", archive_after_discovery)
+        current = ApplicationManager()
+        current.bind(restarted, db)
+        try:
+            await current.delete_application(row["id"])
+        finally:
+            current.shutdown()
+        recovered = [event for event in events
+                     if event["type"] == "session_unarchived" and event["session_id"] == rewind.id]
+        if scenario == "archive-during-retry":
+            assert intercepted and not recovered
+            await restarted.unarchive_agent(rewind.agent_id, rewind.user_id)
+            assert restarted.get_session(rewind.id) is None
+            assert (await db.get_session_binding(rewind.id))["archived"]
+            return
+        assert [event["session"]["id"] for event in recovered] == [rewind.id]
+    assert restarted.get_session(rewind.id) is not None
+
+    class Rebuild(FakeRunBase):
+        async def _start(self, prompt, working_dir, resume_id, *, credential):
+            assert Path(working_dir) == code
+            Path(working_dir).mkdir()
+
+        async def _stream(self):
+            yield HarnessEvent(type="result")
+
+    monkeypatch.setattr(restarted, "_make_run", model_run_factory(lambda *_args: Rebuild()))
+    receipt = await restarted.start_message(rewind.id, "Rebuild this application", wiki_mode=None)
+    result = await asyncio.wait_for(receipt.wait(), 3)
+    assert result.outcome.status == "success" and code.is_dir()
 
 
 @pytest.mark.parametrize("action", ["archive", "delete"])

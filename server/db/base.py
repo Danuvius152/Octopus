@@ -102,6 +102,7 @@ class DatabaseBase:
             "id", "name", "description", "avatar", "system_prompt", "model", "credential_id", "mcp_servers",
             "tool_allow", "tool_deny", "is_system", "archived", "created_at", "updated_at", "backend", "subagents",
             "pinned", "pin_order", "user_id", "reasoning_effort", "service_tier", "context_settings_revision",
+            "deletion_pending",
         )),
         ("active_session_count", "(SELECT COUNT(*) FROM sessions s WHERE s.agent_id = a.id AND s.archived = 0)"),
     )

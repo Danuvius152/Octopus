@@ -44,6 +44,7 @@ account's exported rows. A configuration error identifies the Agent and field.
 | Content | Account archive behavior |
 | --- | --- |
 | Account and agents | Preserve account ID, username, password verifier, required keys/DEK, agent configuration, ownership and credential associations |
+| Pending Agent deletion | Preserve the original archived Agent row and its pending status with any remaining private tree and retirement evidence. Verify the included paths before publication. An explicit retry under the same Agent ID completes cleanup. |
 | Unfinished application deletion | Preserve its phase, original keep-files choice and failure, and collect the remaining code/data. Only `files` with `keep_files=false` permits an already removed code directory; other missing code remains an error. Runtime stays excluded. A retained build status does not resume a writer or block transfer once live writes are retired. Excluded session/BG/delegation history does not restore execution authority. The imported app remains closed; opening the account neither runs it nor resumes file removal. Explicit retry continues the remaining phase. |
 | Account files | Preserve private agent memory and the same account's `agents/shared-memory/`, ordinary workspace files, attachments, research materials, application code/configuration and `.data`; reinstall rebuildable `.runtime` dependencies |
 | Wiki | Preserve registered vault content, sources/proofs, content history, business identities and the durable facts needed for query and maintenance, including a registered external vault within the supported home layout |
@@ -73,7 +74,7 @@ original process. Restoring committed installation records preserves saved
 relationships and grants. Provider access and new writes are established on
 the target through the [Connector lifecycle](implemented/connectors.md#oauth-and-lifecycle).
 
-Current archives contain complete main format 14 and Wiki format 17. GitHub
+Current archives contain complete main format 15 and Wiki format 17. GitHub
 installations preserve their canonical numeric identity, display label, original
 installation ID, encrypted grant and Agent links through export/import. The
 importer rejects an older main marker before creating the target; it does not
@@ -119,6 +120,7 @@ leases, waiters, threads, writers or permission to replay an operation.
 | Resource | Account transfer | Complete backup and restoration conditions |
 | --- | --- | --- |
 | Agent context revisions | Preserve settings; rebuild each target `context_settings_revision` as 0. Exclude session `context_state`. | Preserve both fields and original binding/revision relationships. See [context storage](implemented/current-storage-format.md#complete-record-projections). |
+| Agent deletion responsibility | Preserve the pending Agent and its recorded private paths. | Keep the original row, remaining private directory and any retirement receipt together. An already absent directory can be settled by retry. See [Agent hard deletion](implemented/agent-refactor.md#creation-names-and-lifecycle). |
 | Compact payload and native effect evidence | Exclude with chats. | Preserve ACK/root evidence, Claude command UUID/local-command result/failure and maintenance effect/business status separately. Do not replay compaction. |
 | `messages.git_ignored_baseline` | Exclude with chats. | Retain raw nullable versioned JSON with original message, HEAD and clean observation. Missing evidence stays missing; restoration grants no file-revert permission. See [safe rewind](implemented/session-rewind.md). |
 | Structured Question resolution | Exclude with chats. | Retain original form, question, source, answer and close-reason associations. Legacy text cannot reconstruct missing structure/provenance. |
@@ -130,6 +132,7 @@ leases, waiters, threads, writers or permission to replay an operation.
 | App Server input evidence | Exclude `client_submissions` with chats. | Preserve original input/attempt/RPC/thread/turn associations and matching provider history. Unknown acceptance and preparation changes stay unknown; saved terminals do not establish consumption. Missing native history remains a resume failure. |
 | Ticket handoff | Exclude with chats and task history. | Preserve the batch registration and marked returns with the human input, and the original receipt, replay boundary, human scope, source task position and native history with the handoff. Preserve `ticket_batch_progress_only` with its adoption binding and confirmed input records in `client_submissions`. An adopted update without the flag remains a supplement. Preserve legacy answered progress input IDs with their original steer records. Later tickets inherit the selection once the handoff has a confirmed native first input. Check pending or uncertain work under the [original ID](implemented/input-reliability.md#ticket-handoffs). |
 | Fork creation and copied history | Exclude fork message/session records and work trees collected solely for excluded conversations. | Preserve `copied_input`, copied terminal keys, native creation checkpoints, selected native home and copied cwd while recovery depends on them. Unknown creation stays unknown. Cleanup requires saved actual artifact identity and confirmed non-executing retirement; an ACK, preallocated hint or current transport cannot substitute. |
+| Rewind file revert | Exclude with chats. | Retain the `reverting` row, copied history, worktree path, saved writer scope and any revert result. A relocated backup carries the original writer identity. Reopening it cannot prove retirement outside that scope, and recovery never repeats Git file operations. See [rewind recovery](implemented/session-rewind.md#crash-recovery). |
 | Fork-owned copy directory | Same session-JSON exclusion. | Keep the initializing row, `fork_metadata.owned_copy_dir` receipt and referenced independent directory while recovery depends on them. Missing/mismatched proof preserves the directory; relocation does not grant cleanup rights. Restore does not recreate the copy thread. See [fork recovery](implemented/session-fork.md#crash-safety--limits). |
 
 ### Prepare and export

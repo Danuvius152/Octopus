@@ -13,22 +13,43 @@ preparation and decoding the saved protocol's explicit file-effect facts.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import re
 from collections import Counter
-from typing import Any
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from .db.base import DatabaseBusy
+from .fork_git import (
+    GitResult,
+    GitRetirementCancelled,
+    GitRetirementPending,
+    StashObservation,
+    WorktreeChanged,
+    git_scope,
+    require_rewind_worktree,
+    reserved_worktree,
+    worktree_blocked,
+    worktree_for,
+    worktree_lock,
+    worktree_retiring,
+)
+from .fork_git import run_git as _git
 from .harness.native_output import recorded_file_change_paths
 from .knowledge import decode_context
 from .models import MessageContent, MessageRole
 from .tool_pairs import pair_tool_records
 
+if TYPE_CHECKING:
+    from .database import Database
+    from .fork_git import Worktree
+
 logger = logging.getLogger(__name__)
 
+type GitCall = Callable[..., Awaitable[GitResult]]
 
 def consumed_fork_metadata(metadata: str | None) -> str | None:
     """Installation retires composer hints, preserving copied-directory identity."""
@@ -37,6 +58,7 @@ def consumed_fork_metadata(metadata: str | None) -> str | None:
     meta = json.loads(metadata)
     durable = {key: meta[key] for key in ("full_copy", "duplicated_from") if key in meta}
     return json.dumps(durable) if durable else None
+
 
 # Tools that read but don't change the world — excluded from side-effect
 # disclosure so the popover isn't drowned in "47 Read calls".
@@ -80,32 +102,28 @@ _LOST_HISTORY_HEADER = (
 # ------------------------------------------------------------------ git anchor
 
 
-async def _git(working_dir: str, *args: str, timeout: float = 10.0) -> tuple[int, str, str]:
-    """Run a git command in `working_dir`. Returns (returncode, stdout, stderr).
-    On spawn failure / timeout returns (-1, "", <reason>)."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "git", *args,
-            cwd=working_dir,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (OSError, ValueError):
-        return (-1, "", "git not spawnable")
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        return (-1, "", "git timed out")
-    return (
-        proc.returncode if proc.returncode is not None else -1,
-        os.fsdecode(out),
-        err.decode(errors="replace"),
-    )
+def record_git_result(
+    record: dict[str, Any], result: GitResult, *, file_operation: bool = False, stash: StashObservation | None = None,
+) -> None:
+    record["git_result"] = {
+        "exit_code": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
+        "timed_out": result.timed_out, "output_failed": result.output_failed,
+        "binding_failed": result.binding_failed, "retired": True,
+    }
+    if result.configuration is not None:
+        record["git_result"]["configuration"] = {
+            "phase": result.configuration.phase,
+            "exit_code": result.configuration.exit_code,
+            "output_failed": result.configuration.output_failed,
+        }
+    if file_operation:
+        record["ran"] = bool(record.get("ran")) or result.started
+    if stash is not None:
+        if stash.verify:
+            verified = result.verified_success and result.stdout.strip() == stash.oid
+            record["stash_ref"] = stash.oid if verified else None
+        elif result.returncode == 0:
+            record["stash_ref"] = stash.oid
 
 
 IGNORED_BASELINE_BYTES = 262144
@@ -136,11 +154,12 @@ def decode_ignored_baseline(raw: str) -> list[str]:
     return paths
 
 
-async def _index_observable(top: str) -> bool:
+async def _index_observable(top: str, git: GitCall) -> bool:
     # assume-unchanged and skip-worktree can hide edits from status. Do not
     # mutate their flags to manufacture a clean-tree proof.
-    rc, out, err = await _git(top, "ls-files", "-v", "-z")
-    if rc or err or (out and not out.endswith("\0")):
+    result = await git(top, "ls-files", "-v", "-z")
+    out = result.stdout
+    if result.failed or result.stderr or (out and not out.endswith("\0")):
         return False
     try:
         return all(len(row) >= 3 and row[:2] == "H " and _repo_path(row[2:]) == row[2:]
@@ -149,25 +168,47 @@ async def _index_observable(top: str) -> bool:
         return False
 
 
-async def capture_git_anchor(working_dir: str) -> tuple[str | None, bool | None, str | None]:
+async def capture_git_anchor(
+    working_dir: str, *, db: Database | None = None, session_id: str | None = None,
+    fork_metadata: str | None = None,
+) -> tuple[str | None, bool | None, str | None]:
     """One matching status observation owns clean and historical ignored paths.
 
     The serialized evidence is private message data. A missing/oversize ignored
     observation cannot prove absence, but does not erase a reliable HEAD/clean.
     These observations are not an atomic filesystem snapshot.
     """
-    top = await _git_toplevel(working_dir)
+    try:
+        worktree = worktree_for(working_dir)
+        require_rewind_worktree(working_dir, fork_metadata, worktree=worktree)
+    except WorktreeChanged:
+        return (None, None, None)
+    lock = worktree_lock(worktree)
+    if not lock.locked():
+        async with lock:
+            try:
+                blocked = await worktree_blocked(db, worktree) if db is not None else worktree_retiring(worktree)
+                if not blocked:
+                    with git_scope(worktree, db, session_id):
+                        return await _capture_git_anchor(working_dir)
+            except (DatabaseBusy, GitRetirementPending):
+                pass
+    return (None, None, None)
+
+
+async def _capture_git_anchor(working_dir: str) -> tuple[str | None, bool | None, str | None]:
+    top = await _git_toplevel(working_dir, _git)
     if top is None:
         return (None, None, None)
-    rc, out, err = await _git(top, "rev-parse", "HEAD")
-    if rc != 0 or not out.strip():
+    head_result = await _git(top, "rev-parse", "HEAD")
+    if head_result.failed or not head_result.stdout.strip():
         return (None, None, None)
-    head = out.strip()
-    rc2, out2, err2 = await _git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
-    if rc2 or err or err2 or not await _index_observable(top):
+    head = head_result.stdout.strip()
+    status = await _git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+    if status.failed or head_result.stderr or status.stderr or not await _index_observable(top, _git):
         return (head, None, None)
     try:
-        dirty, ignored = _porcelain_status(out2)
+        dirty, ignored = _porcelain_status(status.stdout)
     except ValueError:
         return (head, None, None)
     raw = json.dumps({"version": 1, "paths": ignored}, separators=(",", ":"))
@@ -600,11 +641,11 @@ def _porcelain_status(porcelain: str) -> tuple[list[str], list[str]]:
     return list(dict.fromkeys(paths)), list(dict.fromkeys(ignored))
 
 
-async def _git_toplevel(working_dir: str) -> str | None:
-    rc, out, err = await _git(working_dir, "rev-parse", "--show-toplevel")
-    if rc != 0 or err or not out.strip():
+async def _git_toplevel(working_dir: str, git: GitCall) -> str | None:
+    result = await git(working_dir, "rev-parse", "--show-toplevel")
+    if result.failed or result.stderr or not result.stdout.strip():
         return None
-    return out.removesuffix("\n")
+    return result.stdout.removesuffix("\n")
 
 
 def _norm(path: str, base: str) -> str:
@@ -613,9 +654,10 @@ def _norm(path: str, base: str) -> str:
     return os.path.abspath(p)
 
 
-async def _head_entries(top: str, head: str) -> dict[str, tuple[str, str]]:
-    rc, out, err = await _git(top, "ls-tree", "-r", "-t", "-z", "--full-tree", head)
-    if rc or err or (out and not out.endswith("\0")):
+async def _head_entries(top: str, head: str, git: GitCall) -> dict[str, tuple[str, str]]:
+    result = await git(top, "ls-tree", "-r", "-t", "-z", "--full-tree", head)
+    out = result.stdout
+    if result.failed or result.stderr or (out and not out.endswith("\0")):
         raise ValueError("HEAD entries could not be read safely")
     entries: dict[str, tuple[str, str]] = {}
     for row in out[:-1].split("\0") if out else []:
@@ -636,7 +678,7 @@ def _covered(path: str, covers: list[str]) -> bool:
 
 async def _path_baseline_reason(
     top: str, path: str, entries: dict[str, tuple[str, str]],
-    historical_ignored: list[str] | None, current_ignored: list[str],
+    historical_ignored: list[str] | None, current_ignored: list[str], git: GitCall,
 ) -> str | None:
     parts = path.split("/")
     if ".git" in parts:
@@ -650,7 +692,7 @@ async def _path_baseline_reason(
     parent = os.path.dirname(os.path.join(top, path))
     while not os.path.exists(parent):
         parent = os.path.dirname(parent)
-    if not os.path.isdir(parent) or await _git_toplevel(parent) != top:
+    if not os.path.isdir(parent) or await _git_toplevel(parent, git) != top:
         return "Path does not belong to the same working tree"
     if os.path.isdir(os.path.join(top, path)) and not os.path.islink(os.path.join(top, path)):
         return "Directory is not a supported file baseline"
@@ -679,7 +721,21 @@ async def safe_revert_preflight(
     message M's captured git state. Returns (available, refused_reason,
     dirty_paths_to_revert). All four must hold; otherwise refuse with a precise
     reason and the fork still creates without a revert."""
-    top = await _git_toplevel(working_dir)
+    try:
+        worktree = reserved_worktree(working_dir)
+    except WorktreeChanged as error:
+        return False, str(error), []
+    with git_scope(worktree, None, None, inherit=True):
+        return await _inspect_revert(
+            await _git_toplevel(working_dir, _git), agent_touched_paths,
+            fork_head, fork_clean, fork_ignored_baseline, _git,
+        )
+
+
+async def _inspect_revert(
+    top: str | None, agent_touched_paths: list[str],
+    fork_head: str | None, fork_clean: bool | None, fork_ignored_baseline: str | None, git: GitCall,
+) -> tuple[bool, str | None, list[str]]:
     if top is None:
         return (False, "Not a git repo", [])
     if not fork_clean:
@@ -689,18 +745,18 @@ async def safe_revert_preflight(
             "uncommitted work",
             [],
         )
-    rc, out, _ = await _git(working_dir, "rev-parse", "HEAD")
-    if rc != 0 or not out.strip():
+    head = await git(top, "rev-parse", "HEAD")
+    if head.failed or not head.stdout.strip():
         return (False, "Not a git repo", [])
-    if not fork_head or fork_head != out.strip():
+    if not fork_head or fork_head != head.stdout.strip():
         return (False, "HEAD has moved since the fork-point", [])
-    rc2, porcelain, err = await _git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
-    if rc2 or err:
+    status = await git(top, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+    if status.failed or status.stderr:
         return (False, "Git status could not be read reliably", [])
-    if not await _index_observable(top):
+    if not await _index_observable(top, git):
         return (False, "Git index may hide working-tree changes", [])
     try:
-        dirty_rel, ignored = _porcelain_status(porcelain)
+        dirty_rel, ignored = _porcelain_status(status.stdout)
     except ValueError:
         return (False, "Git status could not be parsed safely", [])
     # The classifier supplies exact absolute paths. Other callers may supply
@@ -716,14 +772,14 @@ async def safe_revert_preflight(
             return (False, "Agent file path is outside the repository", [])
         touched_abs.add(absolute)
     try:
-        entries = await _head_entries(top, fork_head)
+        entries = await _head_entries(top, fork_head, git)
         historical = decode_ignored_baseline(fork_ignored_baseline) if fork_ignored_baseline is not None else None
     except (ValueError, TypeError):
         return (False, "Git file baseline could not be read safely", [])
     uncovered = []
     for absolute in sorted(touched_abs):
         path = os.path.relpath(absolute, top)
-        reason = await _path_baseline_reason(top, path, entries, historical, ignored)
+        reason = await _path_baseline_reason(top, path, entries, historical, ignored, git)
         if reason:
             uncovered.append(f"{path}: {reason}")
     if uncovered:
@@ -746,96 +802,146 @@ async def safe_revert_files(
     fork_clean: bool | None,
     fork_id: str,
     fork_ignored_baseline: str | None = None,
+    *,
+    worktree: Worktree | None = None,
+    progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the §5.6.3 preflight, then (if it passes and there's anything dirty)
     stash + checkout the agent-touched files back to their fork-point state.
     Never rolls back the fork on failure — the outcome is recorded into the
     durable `fork_revert_record`."""
-    available, reason, dirty = await safe_revert_preflight(
-        working_dir, agent_touched_paths, fork_head, fork_clean, fork_ignored_baseline
-    )
+    result = progress if progress is not None else {}
+    preflight_failure: GitResult | None = None
+    try:
+        worktree = worktree or reserved_worktree(working_dir)
+    except WorktreeChanged as error:
+        result.update(ran=False, files=[], stash_ref=None, status="refused", refused_reason=str(error), error=None)
+        return result
+
+    async def observe(cwd: str, *args: str, file_operation: bool = False, stash: StashObservation | None = None) -> GitResult:
+        nonlocal preflight_failure
+        result.pop("git_result", None)
+        try:
+            with git_scope(worktree, None, None, inherit=True):
+                observed = await _git(cwd, *args)
+        except (GitRetirementPending, GitRetirementCancelled) as error:
+            error.file_operation = file_operation
+            error.stash = stash
+            raise
+        if not file_operation and (observed.failed or observed.stderr) and (
+            preflight_failure is None or observed.failed and not preflight_failure.failed
+        ):
+            preflight_failure = observed
+        record_git_result(result, observed if file_operation or stash is not None else preflight_failure or observed,
+                          file_operation=file_operation, stash=stash)
+        return observed
+
+    top = await _git_toplevel(working_dir, observe)
+    reason: str | None
+    dirty: list[str]
+    if top is not None and worktree is not None and not worktree.matches(top):
+        available, reason, dirty = False, "Git working tree changed before file revert", []
+    else:
+        available, reason, dirty = await _inspect_revert(
+            top, agent_touched_paths, fork_head, fork_clean, fork_ignored_baseline, observe,
+        )
     if not available:
-        return {
+        result.update({
             "ran": False,
             "files": [],
             "stash_ref": None,
             "status": "refused",
             "refused_reason": reason,
             "error": None,
-        }
+        })
+        return result
     if not dirty:
         # Preflight passed but nothing is dirty — nothing to restore.
-        return {
+        result.update({
             "ran": True,
             "files": [],
             "stash_ref": None,
             "status": "completed",
             "refused_reason": None,
             "error": None,
-        }
-    top = await _git_toplevel(working_dir) or working_dir
-    stash_msg = f"octopus: pre-fork stash {fork_id} {uuid4().hex}"
-    result: dict[str, Any] = {
+        })
+        return result
+    preflight_failure = None
+    result.update({
         "ran": False, "files": dirty, "stash_ref": None, "status": "failed",
         "refused_reason": None, "error": None,
-    }
+    })
+    lookup = await observe(working_dir, "rev-parse", "--show-toplevel")
+    if lookup.failed or lookup.stderr:
+        result["error"] = f"git worktree lookup failed: {lookup.diagnostic().strip()[:500]}"
+        return result
+    current = lookup.stdout.removesuffix("\n")
+    if current != top or (worktree is not None and not worktree.matches(current)):
+        result["error"] = "Git working tree changed before file revert"
+        return result
+    top = current
+    stash_msg = f"octopus: pre-fork stash {fork_id} {uuid4().hex}"
     # Staged deletions (including rename sources) no longer exist in the index.
     # `stash push -u -- old-name` creates a stash, then fails in git-add. Save
     # their original index in the stash, but restore those HEAD paths explicitly.
-    rc, removed, err = await _git(
+    lookup = await observe(
         top, "--literal-pathspecs", "diff", "--cached", "--no-renames",
         "--name-only", "--diff-filter=D", "-z", "--", *dirty,
     )
-    if rc != 0 or (removed and not removed.endswith("\0")):
-        result["error"] = f"git staged-deletion lookup failed: {err.strip()[:500]}"
+    removed = lookup.stdout
+    if lookup.failed or (removed and not removed.endswith("\0")):
+        result["error"] = f"git staged-deletion lookup failed: {lookup.diagnostic().strip()[:500]}"
         return result
     deleted = removed[:-1].split("\0") if removed else []
     deleted_set = set(deleted)
     present = [path for path in dirty if path not in deleted_set or os.path.lexists(os.path.join(top, path))]
     snapshot_oid: str | None = None
-    # Even an unsuccessful stash can already have changed the worktree.
-    result["ran"] = True
     if present:
         # -u also saves untracked files; every path keeps its literal meaning.
-        rc, _out, err = await _git(
-            top, "--literal-pathspecs", "stash", "push", "-u", "-m", stash_msg, "--", *present,
+        stash = await observe(
+            top, "--literal-pathspecs", "stash", "push", "-u", "-m", stash_msg, "--", *present, file_operation=True,
         )
     else:
         # Only staged deletions remain. Git's native create/store saves their
         # index and working-tree snapshot without widening the mutation scope.
-        rc, commit, err = await _git(top, "stash", "create", stash_msg)
-        if rc == 0 and commit.strip():
-            snapshot_oid = commit.strip()
-            rc, _out, err = await _git(top, "stash", "store", "-m", stash_msg, snapshot_oid)
-        elif rc == 0:
-            rc, err = -1, "Git did not produce a deletion snapshot"
-    if rc != 0:
-        result["error"] = f"git stash failed: {err.strip()[:500]}"
+        stash = await observe(top, "stash", "create", stash_msg, file_operation=True)
+        if not stash.failed:
+            if not stash.stdout.strip():
+                result["error"] = "git stash failed: Git did not produce a deletion snapshot"
+                return result
+            snapshot_oid = stash.stdout.strip()
+            if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", snapshot_oid):
+                result["error"] = "git stash failed: Git returned an invalid snapshot identity"
+                return result
+            stash = await observe(top, "stash", "store", "-m", stash_msg, snapshot_oid,
+                                  file_operation=True, stash=StashObservation(snapshot_oid))
+    if stash.failed:
+        result["error"] = f"git stash failed: {stash.diagnostic().strip()[:500]}"
         return result
     if snapshot_oid is None:
-        rc, entries, err = await _git(top, "stash", "list", "--format=%H%x00%gs")
-        matches = [oid for line in entries.splitlines()
+        listing = await observe(top, "stash", "list", "--format=%H%x00%gs")
+        matches = [oid for line in listing.stdout.splitlines()
                    if "\0" in line for oid, subject in [line.split("\0", 1)]
                    if subject == stash_msg or subject.endswith(": " + stash_msg)]
-        if rc != 0 or len(matches) != 1:
-            result["error"] = f"Created snapshot could not be identified uniquely; inspect stash marker {stash_msg}: {err.strip()}"
+        if listing.failed or len(matches) != 1:
+            result["error"] = f"Created snapshot could not be identified uniquely; inspect stash marker {stash_msg}: {listing.diagnostic().strip()}"
             return result
         snapshot_oid = matches[0]
     if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", snapshot_oid):
         result["error"] = f"Created snapshot has an invalid object identity; inspect stash marker {stash_msg}"
         return result
-    rc, verified, err = await _git(top, "rev-parse", "--verify", f"{snapshot_oid}^{{commit}}")
-    if rc != 0 or verified.strip() != snapshot_oid:
-        result["error"] = f"Created snapshot identity could not be verified; inspect stash marker {stash_msg}: {err.strip()}"
+    verified = await observe(top, "rev-parse", "--verify", f"{snapshot_oid}^{{commit}}",
+                             stash=StashObservation(snapshot_oid, verify=True))
+    if verified.failed or result["stash_ref"] is None:
+        result["error"] = f"Git snapshot verification failed; inspect stash marker {stash_msg}: {verified.diagnostic().strip()}"
         return result
-    result["stash_ref"] = snapshot_oid
     if deleted:
-        rc, _out, err = await _git(
+        restored = await observe(
             top, "--literal-pathspecs", "restore", f"--source={fork_head}",
-            "--staged", "--worktree", "--", *deleted,
+            "--staged", "--worktree", "--", *deleted, file_operation=True,
         )
-        if rc != 0:
-            result["error"] = f"git restore failed (original changes remain in stash): {err.strip()[:500]}"
+        if restored.failed:
+            result["error"] = f"git restore failed (original changes remain in stash): {restored.diagnostic().strip()[:500]}"
             return result
     result.update(ran=True, status="completed")
     return result

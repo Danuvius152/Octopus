@@ -6,6 +6,7 @@ import asyncio
 
 from ..config import settings
 from ..diagnostics import exception_diagnostic
+from ..fork_git import git_executions_pending
 from ..service_health import ServiceHealth
 from .base import _BACKEND_RETIRE_TIMEOUT, Session, SessionManagerBase, logger
 from .owner import SessionOwner, SessionOwnerUnavailable
@@ -19,8 +20,9 @@ class OwnershipMixin(SessionManagerBase):
                     for owner in self._session_owners.values() for reason in owner.drain_blockers()]
         if any(not task.done() for task in self._owned_tasks):
             blockers.append("owned operation")
-        if (self._agent_lifecycle_lock.locked() or any(self._agent_operations.values())
-                or any(not task.done() for task in self._agent_archive_tasks.values())):
+        if git_executions_pending():
+            blockers.append("Git execution")
+        if self._agent_lifecycle_lock.locked() or any(self._agent_operations.values()) or self._agent_lifecycle_tasks:
             blockers.append("agent lifecycle")
         if self.db is None or self.db.configuration_lock.locked():
             blockers.append("configuration")

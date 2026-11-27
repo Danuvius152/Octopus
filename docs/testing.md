@@ -217,6 +217,17 @@ exit, including shell toolchain setup, direct Bun entry points and any final
 input capture performed by the command. A stop request prevents further gate
 or browser-partition dispatch.
 
+Once the original runner and descendants have retired, the coordinator
+saves the original child PID and exit code before releasing the reservation.
+It uses the process handle even if the signal interrupted startup before the
+launch record was written. If no child started, the record has no PID or child
+exit code. The outer command returns 130 for `SIGINT` and 143 for `SIGTERM`
+or soft stop after retirement is confirmed. A cleanup failure after recording
+retirement preserves that exit code and the readable record. The original
+control directory still owns the reservation until `cleanup` succeeds.
+Unconfirmed retirement leaves the reservation in place without publishing
+a retirement record. A caught signal with unconfirmed retirement exits 1.
+
 If a focused check fails before review completes, preserve the fixed candidate
 and its failure evidence. Wait for Vera's verdict on that candidate and assess
 the results together before changing it. When a verified review finding

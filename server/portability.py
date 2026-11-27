@@ -20,6 +20,7 @@ from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from .agent_memory import retirement_name, verify_pending_agent_paths
 from .config import Settings
 from .db.portability import (
     read_account,
@@ -42,9 +43,9 @@ PATH_SETTINGS = (*_DIRECTORIES, *_FILES)
 _SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 
 
-def software_version() -> str:
+def software_version(*, source: Path | None = None) -> str:
     """Identify the installed Python implementation, including uncommitted builds."""
-    root = Path(__file__).parent
+    root = Path(__file__).parent if source is None else source / "server"
     digest = hashlib.sha256()
     for path in sorted(root.rglob("*.py")):
         digest.update(path.relative_to(root).as_posix().encode() + b"\0" + path.read_bytes())
@@ -159,6 +160,25 @@ def _copy_tree(
 
     copy(source)
     return links
+
+
+def _verify_agent_deletion_paths(account: Path, agent_ids: list[str], entries: dict, roots: list[str]) -> None:
+    """A transferred cleanup responsibility addresses only an ordinary private tree."""
+    if entries.get(account.as_posix(), {}).get("kind") != "directory" or not any(
+        account.is_relative_to(Path(root)) for root in roots
+    ):
+        raise ValueError("Unfinished Agent deletion requires the account's directory as a published resource")
+    agents = account / "agents"
+    for path in (agents, *(agents / identifier for identifier in agent_ids)):
+        entry = entries.get(path.as_posix())
+        if entry is not None and entry["kind"] != "directory":
+            raise ValueError(f"Unfinished Agent deletion addresses a non-directory: {path}")
+    for identifier in agent_ids:
+        slot = agents / retirement_name(identifier)
+        details = entries.get(slot.as_posix())
+        if details is not None:
+            if details["kind"] != "directory" or details["mode"] != 0o700:
+                raise ValueError(f"Unfinished Agent deletion has an invalid retirement directory: {slot}")
 
 
 def _application_address(value: str, home: Path) -> Path:
@@ -282,7 +302,15 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
         if active:
             raise ValueError("Selected account has unfinished writes; settle them on the source before exporting")
         applications = snapshot_account(source, staging / db_relative, user_id, key=source_key)
+        pending_agents = [row[0] for row in source.execute(
+            "SELECT id FROM agents WHERE user_id=? AND deletion_pending=1", (user_id,),
+        )]
     roots = [account]
+    if pending_agents:
+        try:
+            verify_pending_agent_paths(paths["users_root"], user_id, pending_agents)
+        except NotADirectoryError as error:
+            raise ValueError("Unfinished Agent deletion addresses a non-directory") from error
     excluded = {account / "codex", *(Path(os.environ.get(variable) or Path.home() / default).expanduser().resolve()
                  for variable, default in _PROVIDER_HOMES.values()),
                 *(Path(str(paths["db_path"]) + suffix) for suffix in ("", *_SQLITE_SIDECARS)), paths["master_key_file"]}
@@ -356,6 +384,8 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
     resource_roots = [*roots, paths["db_path"], paths["master_key_file"]]
     published_roots = _minimal_roots(resource_roots)
     root_names = [_relative(path, home) for path in published_roots]
+    if pending_agents:
+        _verify_agent_deletion_paths(Path(_relative(account, home)), pending_agents, entries, root_names)
     _verify_application_archive(applications, app_files.targets, entries, root_names, home)
     return {"format": FORMAT, "software": software_version(), "source_home": str(home), "user_id": user_id,
             "config": values, "entries": entries, "roots": root_names, "wiki": wiki, "applications": app_files.targets}
@@ -567,7 +597,12 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
         with closing(sqlite3.connect(":memory:")) as reader:
             reader.row_factory = sqlite3.Row
             reader.deserialize(package.read("files/" + db_relative))
-            applications = read_account(reader, user_id, key=key)["applications"]
+            rows = read_account(reader, user_id, key=key)
+            applications = rows["applications"]
+            pending_agents = [agent["id"] for agent in rows["agents"] if agent["deletion_pending"]]
+            if pending_agents:
+                account = Path(config.users_root) / user_id
+                _verify_agent_deletion_paths(Path(_relative(account, home)), pending_agents, manifest["entries"], manifest["roots"])
         roots = manifest["roots"]
         env_relative = db_relative + ".import.env"
         _empty_targets(home, [*roots, env_relative])
@@ -582,6 +617,10 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
         with tempfile.TemporaryDirectory(prefix=".octopus-import-", dir=home) as directory:
             staging = Path(directory)
             entries = manifest["entries"]
+            pending_slots = {
+                _relative(Path(config.users_root) / user_id / "agents" / retirement_name(identifier), home)
+                for identifier in pending_agents
+            }
             for name, entry in sorted(entries.items(), key=lambda item: (len(Path(item[0]).parts), item[0])):
                 path = staging / name
                 if entry["kind"] == "symlink":
@@ -589,6 +628,8 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
                 path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 if entry["kind"] == "directory":
                     path.mkdir(exist_ok=True)
+                    if name in pending_slots:
+                        path.chmod(entry["mode"])
                 else:
                     with package.open("files/" + name) as source, path.open("xb") as target:
                         shutil.copyfileobj(source, target)
@@ -599,6 +640,8 @@ def import_account(archive: Path, *, home: Path | None = None) -> Settings:
                     path = staging / name
                     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     path.symlink_to(os.path.relpath(home / entry["target"], (home / name).parent))
+            if pending_agents:
+                verify_pending_agent_paths(staging / _relative(Path(config.users_root), home), user_id, pending_agents)
             app_addresses, absent_app_paths = _verify_application_archive(
                 applications, manifest.get("applications"), entries, roots, source_home,
             )

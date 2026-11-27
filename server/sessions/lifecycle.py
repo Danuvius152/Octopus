@@ -9,21 +9,30 @@ so no call site moved.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
+from pydantic import TypeAdapter
+
+from ..aio import complete_cleanup
 from ..attachments import AttachmentRecord, save_upload
 from ..config import settings
 from ..credential_bindings import validate_credential_binding
 from ..db.applications import ApplicationDeleting, application_deletion_blocks_session
+from ..db.base import DatabaseBusy
+from ..db.sessions import prepare_imported_message_rows
 from ..db.users import owner_is_available as owner_is_available_in_transaction
+from ..fork_git import WorktreeChanged, require_rewind_worktree
 from ..harness import get_harness, model_settings
 from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
 from ..models import (
+    DispatchState,
     MessageContent,
+    MessageRole,
     SessionArchiveFailureStage,
     SessionArchiveResult,
     SessionDefaultsSource,
@@ -41,7 +50,9 @@ from .base import (
     Session,
     SessionManagerBase,
     _session_from_row,
+    logger,
     resolve_working_dir,
+    rewind_restore_marker,
 )
 from .configuration import validate_session_settings, validate_session_tool_policy
 from .handoff import TICKET_BATCH_RETURN_STATES
@@ -62,6 +73,21 @@ from .submission import ReturnRefused
 # the slice free of a router import; the read-only manage view pages back
 # through the same `…/messages` cursor.
 _ARCHIVED_MESSAGE_WINDOW = 200
+_IMPORT_MESSAGES_JSON = TypeAdapter(Sequence[MessageContent])
+
+
+def _imported_tool_input(message: MessageContent) -> dict[str, Any] | None:
+    # Request and replay readers interpret these keys on dialogue rows.
+    # Other rows can carry tool arguments with the same names.
+    if message.type != "text" or not message.tool_input:
+        return message.tool_input
+    if message.role == MessageRole.user:
+        reserved = {"request_context", "handoff_id", "handoff_withdrawn", "copied_input"}
+    elif message.role == MessageRole.assistant:
+        reserved = {"handoff_withdrawn"}
+    else:
+        return message.tool_input
+    return {key: value for key, value in message.tool_input.items() if key not in reserved} or None
 
 
 class SessionArchiveFailed(RuntimeError):
@@ -70,6 +96,10 @@ class SessionArchiveFailed(RuntimeError):
     def __init__(self, result: SessionArchiveResult):
         super().__init__(result.message)
         self.result = result
+
+
+class AgentLifecycleConflict(ValueError):
+    """A competing Agent lifecycle command owns settlement."""
 
 
 class LifecycleMixin(SessionManagerBase):
@@ -151,22 +181,65 @@ class LifecycleMixin(SessionManagerBase):
         for sid in session_ids:
             await self.retire_application_session_work(sid)
 
-    async def release_application_writers(self, session_ids: list[str]) -> None:
-        for sid in session_ids:
-            session = self.sessions.get(sid)
-            if session is not None:
+    async def release_application_writers(self, session_ids: list[str], *, rewind_updates: dict[str, str]) -> None:
+        for sid in dict.fromkeys([*session_ids, *rewind_updates]):
+            async with self._session_lifecycle_lock(sid):
+                session = self.sessions.get(sid)
+                if session is None:
+                    await self._reload_released_rewind(sid, binding_released=sid in rewind_updates)
+                    continue
                 owner = self._session_owners.get(id(session))
                 if owner is None:
                     # A file-cleanup retry can finish after startup without
                     # ever creating an Owner for the closed builder.
-                    self._release_application_admission(session)
+                    self._release_application_admission(session, rewind_metadata=rewind_updates.get(sid))
                 elif not owner.failed:
-                    await owner.call_runtime(ReleaseApplication())
+                    await owner.call_runtime(ReleaseApplication(rewind_updates.get(sid)))
                 self.reopen_application_session_work(session.id)
 
-    def _release_application_admission(self, session: Session) -> None:
+    async def _reload_released_rewind(self, session_id: str, *, binding_released: bool) -> Session | None:
+        db = self.input_database()
+        while True:
+            try:
+                rows = await db.load_sessions(session_id=session_id)
+                if not rows or rows[0]["fork_status"] != "ready":
+                    return None
+                agent_id = rows[0]["agent_id"]
+                async with self.agent_operation(agent_id, creates_session=False):
+                    current = await db.load_sessions(session_id=session_id)
+                    if not current or current[0]["fork_status"] != "ready" or current[0]["agent_id"] != agent_id:
+                        return None
+                    session = _session_from_row(current[0])
+                    session.restore_message_state(*await db.message_sequence_state(session_id))
+                    await db.require_application_session_writable(session_id)
+                    has_inputs = await db.session_has_inputs(session_id)
+                    metadata = json.loads(session.fork_metadata or "{}")
+                    marker = rewind_restore_marker(metadata) if isinstance(metadata, dict) else None
+                    if marker is not None:
+                        await self._settle_rewind_restore(db, session, marker)
+                    elif binding_released:
+                        require_rewind_worktree(session.working_dir, session.fork_metadata)
+                    else:
+                        return None
+                    self.sessions[session_id] = session
+                    self._unavailable_rewind_archives.discard(session_id)
+                    self.reopen_application_session_work(session_id)
+                    await self._publish_lifecycle({
+                        "type": "session_unarchived", "session_id": session.id, "name": session.name,
+                        "session": session_info(session, has_inputs=has_inputs).model_dump(mode="json"),
+                        "dispatch_state": self._session_dispatch_snapshot(session),
+                    }, user_id=session.user_id)
+                    return session
+            except DatabaseBusy:
+                await asyncio.sleep(0.05)
+            except (ApplicationDeleting, SessionAdmissionClosed, WorktreeChanged, json.JSONDecodeError):
+                return None
+
+    def _release_application_admission(self, session: Session, *, rewind_metadata: str | None) -> None:
         if (self.sessions.get(session.id) is session and session._archive_reservation is None
                 and not self.session_deleting(session.id)):
+            if rewind_metadata is not None:
+                session.fork_metadata = rewind_metadata
             session._admission_closed = False
 
     async def retire_application_session_work(self, session_id: str) -> None:
@@ -234,14 +307,20 @@ class LifecycleMixin(SessionManagerBase):
             raise SessionAdmissionClosed("Agent admission is closed")
 
     @asynccontextmanager
-    async def agent_operation(self, agent_id: str | None) -> AsyncIterator[None]:
-        """Reserve agent work; archive joins it outside the lock.
+    async def agent_operation(self, agent_id: str | None, *, creates_session: bool = True) -> AsyncIterator[None]:
+        """Reserve agent work; archive and deletion join it outside the lock.
+
+        Only work that can create a session competes with hard deletion. An
+        existing session already prevents the delete in SQLite.
 
         Global turn admission is checked by start_message, which also records
         a refused application/delegation attempt. Session restoration must
         remain available to confirm earlier receipts during shutdown recovery.
         """
         async with self._agent_lifecycle_lock:
+            change = self._agent_lifecycle_tasks.get(agent_id) if agent_id is not None else None
+            if creates_session and change is not None and change[0] == "delete":
+                raise SessionAdmissionClosed("Agent admission is closed during hard deletion")
             await self.require_active_agent(agent_id)
             completion = asyncio.get_running_loop().create_future()
             owners = self._agent_operations.setdefault(agent_id, set())
@@ -253,11 +332,11 @@ class LifecycleMixin(SessionManagerBase):
             completion.set_result(None)
 
     async def _run_agent_operation[T](
-        self, agent_id: str | None, command: Callable[[], Awaitable[T]],
+        self, agent_id: str | None, command: Callable[[], Awaitable[T]], *, creates_session: bool = True,
     ) -> T:
         """Keep the original lifecycle command alive when its waiter leaves."""
         async def run() -> T:
-            async with self.agent_operation(agent_id):
+            async with self.agent_operation(agent_id, creates_session=creates_session):
                 return await command()
 
         task = asyncio.create_task(run(), name=f"agent-operation-{agent_id}")
@@ -284,55 +363,105 @@ class LifecycleMixin(SessionManagerBase):
             owners.discard(completion)
             completion.set_result(None)
 
-    async def archive_agent(self, agent_id: str) -> None:
+    async def archive_agent(
+        self, agent_id: str, *, user_id: str | None = None,
+        notify: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        return await self._change_agent_lifecycle(agent_id, user_id, "archive", notify)
+
+    async def unarchive_agent(
+        self, agent_id: str, user_id: str | None, *,
+        notify: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        return await self._change_agent_lifecycle(agent_id, user_id, "restore", notify)
+
+    async def delete_agent(
+        self, agent_id: str, user_id: str | None, *,
+        notify: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        await self._change_agent_lifecycle(agent_id, user_id, "delete", notify)
+
+    async def _change_agent_lifecycle(
+        self, agent_id: str, user_id: str | None, action: Literal["archive", "restore", "delete"],
+        notify: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> dict[str, Any]:
+        """Own an Agent transition until its effects and notification settle."""
         from ..agent_manager import AgentError, AgentManager
 
-        assert self.db is not None
-        async with self._agent_lifecycle_lock:
-            agent = await self.db.get_agent_identity(agent_id)
-            if agent is None:
-                raise AgentError("Agent not found")
-            if agent["is_system"]:
-                raise AgentError("The Default Agent cannot be archived")
-            task = self._agent_archive_tasks.get(agent_id)
-            if task is None or task.done():
-                self._closed_agents.add(agent_id)
+        db = self.input_database()
+        manager = AgentManager(db)
+        if user_id is None and (notify is not None or action == "delete"):
+            raise AgentError("Agent not found")
 
-                async def finish() -> None:
-                    assert self.db is not None  # This operation drains before DB close.
-                    # No lifecycle lock spans creation, model retirement or DB
-                    # settlement. New creation and old-session sends are closed.
-                    pending = tuple(self._agent_operations.get(agent_id, ()))
-                    if pending:
-                        await asyncio.gather(*(asyncio.shield(item) for item in pending))
+        async def finish(pending: tuple[asyncio.Future[None], ...]) -> dict[str, Any]:
+            try:
+                if pending:
+                    await asyncio.gather(*(asyncio.shield(item) for item in pending))
+                if action == "archive":
                     if self._schedule_runner is not None:
                         await self._schedule_runner.suspend_agent(agent_id)
                     await self.evict_agent_sessions(agent_id)
-                    await AgentManager(self.db).archive_agent(agent_id)
+                    await manager.archive_agent(agent_id)
+                    result = await manager.get_agent(agent_id, user_id)
+                    if result is None:
+                        raise AgentError("Agent not found")
+                elif action == "restore":
+                    # Queue restores before the shared, fail-fast memory mutation.
+                    async with self._agent_restore_lock:
+                        result = await manager.unarchive_agent(agent_id, user_id)
+                    self._closed_agents.discard(agent_id)
+                    if self._schedule_runner is not None:
+                        await self._schedule_runner.restore_agent(agent_id)
+                else:
+                    result = await manager.delete_agent(agent_id, user_id=user_id)
+                    self._closed_agents.discard(agent_id)
+                try:
+                    if notify is not None:
+                        await notify(result)
+                finally:
+                    if action == "delete" and self._schedule_runner is not None:
+                        try:
+                            await self._schedule_runner.remove_deleted_agent_schedules(agent_id)
+                        except Exception:
+                            logger.exception("Could not clear registrations for deleted Agent %s", agent_id)
+                return result
+            finally:
+                self._agent_lifecycle_tasks.pop(agent_id)
 
-                task = asyncio.create_task(finish(), name=f"archive-agent-{agent_id}")
-                self._agent_archive_tasks[agent_id] = task
-                self._own_task(task)
-        await asyncio.shield(task)
-
-    async def unarchive_agent(self, agent_id: str, user_id: str | None) -> dict[str, Any]:
-        from ..agent_manager import AgentError, AgentManager
-
-        assert self.db is not None
         async with self._agent_lifecycle_lock:
-            agent = await self.db.get_agent_identity(agent_id, user_id=user_id)
-            if agent is None or agent.get("user_id") != user_id:
-                raise AgentError("Agent not found")
-            operation = self._agent_archive_tasks.get(agent_id)
-            if operation is not None:
-                if not operation.done() or operation.cancelled() or operation.exception() is not None:
-                    raise ValueError("Agent archive retirement is not confirmed")
-            agent = await AgentManager(self.db).unarchive_agent(agent_id, user_id)
-            self._closed_agents.discard(agent_id)
-            self._agent_archive_tasks.pop(agent_id, None)
-        if self._schedule_runner is not None:
-            await self._schedule_runner.restore_agent(agent_id)
-        return agent
+            db.health.require_healthy()
+            existing = self._agent_lifecycle_tasks.get(agent_id)
+            if existing is not None and action == existing[0] == "delete":
+                _, task, owner = existing
+                if user_id != owner:
+                    raise AgentError("Agent not found")
+            else:
+                agent = await manager.get_agent(agent_id, user_id)
+                if agent is None or (action == "restore" and agent["user_id"] != user_id):
+                    raise AgentError("Agent not found")
+                if agent["is_system"] and action != "restore":
+                    verb = "archived" if action == "archive" else "deleted"
+                    raise AgentError(f"The Default Agent cannot be {verb}")
+                if agent["deletion_pending"] and action != "delete":
+                    raise AgentLifecycleConflict("Agent deletion is unfinished; retry deletion")
+                existing = self._agent_lifecycle_tasks.get(agent_id)
+                if existing is not None:
+                    kind, task, _ = existing
+                    if action == "restore" and kind == "archive":
+                        raise AgentLifecycleConflict("Agent archive retirement is not confirmed")
+                    if kind != action:
+                        raise AgentLifecycleConflict(f"Agent {kind} is still in progress; retry")
+                else:
+                    if action == "restore" and agent_id in self._closed_agents and not agent["archived"]:
+                        # A failed archive can retain an unresolved writer.
+                        raise ValueError("Agent archive retirement is not confirmed")
+                    if action == "archive" or (action == "restore" and agent["archived"]):
+                        self._closed_agents.add(agent_id)
+                    pending = tuple(self._agent_operations.get(agent_id, ())) if action != "restore" else ()
+                    task = asyncio.create_task(finish(pending), name=f"{action}-agent-{agent_id}")
+                    self._agent_lifecycle_tasks[agent_id] = (action, task, agent["user_id"])
+                    self._own_task(task)
+        return await asyncio.shield(task)
 
     async def _owner_extra_roots(self, user_id: str | None) -> list[str]:
         """The additional paths this account may work in (§6).
@@ -360,7 +489,7 @@ class LifecycleMixin(SessionManagerBase):
         async def create() -> Session:
             async with db.configuration_lock:
                 return await self._create_session(
-                    agent_id, name, working_dir, credential_id, origin, backend,
+                    agent_id, name or None, working_dir, credential_id, origin, backend,
                     parent_session_id, delegation_request, app_id,
                     model=model, reasoning_effort=reasoning_effort, service_tier=service_tier,
                     validate_models=validate_models or any(value is not None for value in (model, reasoning_effort, service_tier)),
@@ -381,7 +510,7 @@ class LifecycleMixin(SessionManagerBase):
         app_id: str | None = None,
         *, persist: bool = True, defaults_source: SessionDefaultsSource | None = None,
         model: str | None = None, reasoning_effort: str | None = None, service_tier: str | None = None,
-        validate_models: bool = False,
+        validate_models: bool = False, session_id: str | None = None,
     ) -> Session:
         """Create a conversation thread owned by `agent_id`.
 
@@ -406,14 +535,14 @@ class LifecycleMixin(SessionManagerBase):
         if defaults_source is None and backend != agent_backend:
             validate_session_tool_policy(backend, agent)
 
-        if not name:
+        if name is None:
             label = (agent or {}).get("name", "Agent")
             stamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
             name = f"{label} — {stamp}"
 
         owner_id = (agent or {}).get("user_id")
         extra_roots = await self._owner_extra_roots(owner_id)
-        sid = uuid.uuid4().hex[:12]
+        sid = session_id or uuid.uuid4().hex[:12]
         session = Session(
             id=sid,
             name=name,
@@ -446,8 +575,8 @@ class LifecycleMixin(SessionManagerBase):
             if validate_models:
                 await validate_session_settings(self.db, session, agent)
             else:
-                # Archive carries forward saved values, which may predate the
-                # current catalog. The next turn validates controls as usual.
+                # With no new model controls, validate binding now and check
+                # inherited or carried controls when a turn runs.
                 credential = model_settings.effective_settings(session, agent)["credential_id"]
                 await validate_credential_binding(self.db, credential, backend, owner_id)
         if self.db and persist:
@@ -477,7 +606,7 @@ class LifecycleMixin(SessionManagerBase):
         claude_session_id: str | None = None, credential_id: str | None = None,
         messages: list[MessageContent] | None = None, agent_id: str | None = None,
         origin: str = "user", backend: str | None = None,
-    ) -> Session:
+    ) -> SessionDetail:
         return await self._run_agent_operation(
             agent_id, lambda: self._import_session(
                 name, working_dir, claude_session_id, credential_id, messages,
@@ -495,51 +624,57 @@ class LifecycleMixin(SessionManagerBase):
         agent_id: str | None = None,
         origin: str = "user",
         backend: str | None = None,
-    ) -> Session:
-        agent = await self.db.get_agent(agent_id) if (self.db and agent_id) else None
-        backend = backend or (agent or {}).get("backend") or settings.default_backend
-        get_harness(backend)
-        if self.db:
-            await validate_credential_binding(
-                self.db, credential_id or (agent or {}).get("credential_id"),
-                backend, (agent or {}).get("user_id"),
-            )
-        owner_id = (agent or {}).get("user_id")
-        extra_roots = await self._owner_extra_roots(owner_id)
+    ) -> SessionDetail:
+        db = self.input_database()
         sid = uuid.uuid4().hex[:12]
-        session = Session(
-            id=sid,
-            name=name,
-            working_dir=resolve_working_dir(
-                confine(working_dir, user_id=owner_id, extra_roots=extra_roots)
-            ),
-            claude_session_id=claude_session_id,
-            credential_id=credential_id,
-            agent_id=agent_id,
-            origin=origin,
-            backend=backend,
-            # As in `create_session`: an imported transcript belongs to whoever
-            # owns the agent it is imported under.
-            user_id=owner_id,
-        )
-        if self.db:
-            await self.db.save_session(
-                session_id=session.id,
-                name=session.name,
-                working_dir=session.working_dir,
-                created_at=session.created_at,
-                claude_session_id=session.claude_session_id,
-                credential_id=session.credential_id,
-                agent_id=session.agent_id,
-                origin=session.origin,
-                backend=session.backend,
-                user_id=session.user_id,
+        history = [
+            message.model_copy(update={
+                "seq": seq, "created_at": message.created_at or datetime.now(UTC).isoformat(),
+                "tool_input": _imported_tool_input(message),
+            })
+            for seq, message in enumerate(messages or [])
+        ]
+        message_count = len(history)
+        # SQLite accepts JSON that the HTTP response serializer can refuse.
+        _IMPORT_MESSAGES_JSON.dump_json(history)
+        rows = prepare_imported_message_rows(sid, history)
+
+        async with db.configuration_lock:
+            session = await self._create_session(
+                agent_id, name, working_dir, credential_id, origin, backend,
+                persist=False, session_id=sid,
             )
-        if messages:
-            for msg in messages:
-                await self._persist_message(session, msg)
-        self.sessions[sid] = session
-        return session
+            session.claude_session_id = claude_session_id
+            detail = SessionDetail(
+                **session_info(session, message_count).model_dump(),
+                dispatch_state=DispatchState(**self._session_dispatch_snapshot(session)),
+                next_message_seq=message_count,
+            )
+            detail.model_dump_json()
+            await db.install_session_history(
+                dict(
+                    id=session.id,
+                    name=session.name,
+                    working_dir=session.working_dir,
+                    created_at=session.created_at,
+                    claude_session_id=session.claude_session_id,
+                    credential_id=session.credential_id,
+                    agent_id=session.agent_id,
+                    origin=session.origin,
+                    backend=session.backend,
+                    user_id=session.user_id,
+                    defaults_source=session.defaults_source,
+                    model=session.model,
+                    reasoning_effort=session.reasoning_effort,
+                    service_tier=session.service_tier,
+                ),
+                rows,
+            )
+            session.restore_message_state(message_count, message_count, 0)
+            self.sessions[sid] = session
+
+        detail.messages = history
+        return detail
 
     async def archive_session(
         self, session_id: str, *, replace: bool = True, only_request_id: str | None = None,
@@ -724,7 +859,7 @@ class LifecycleMixin(SessionManagerBase):
                 async with db.configuration_lock:
                     credential_id = await db.get_archived_credential_id(old.id, old.user_id)
                     new = await self._create_session(
-                        agent_id=old.agent_id, name=old.name, working_dir=old.working_dir,
+                        agent_id=old.agent_id, name=old.name or None, working_dir=old.working_dir,
                         credential_id=credential_id, origin=old.origin, backend=old.backend, app_id=old.app_id,
                         defaults_source=old.defaults_source, model=old.model,
                         reasoning_effort=old.reasoning_effort, service_tier=old.service_tier,
@@ -833,8 +968,9 @@ class LifecycleMixin(SessionManagerBase):
         job here rather than `list_sessions`'. Caller turns them into Pydantic
         models for the response.
         """
-        database = self.input_database()
-        rows = await database.load_archived_sessions(user_id=user_id)
+        rows = await self.input_database().load_archived_sessions(
+            user_id=user_id, unavailable_rewinds=tuple(self._unavailable_rewind_archives),
+        )
         out: list[dict[str, Any]] = []
         for row in rows:
             out.append(session_info(row, row["message_count"], archived=True,
@@ -844,7 +980,7 @@ class LifecycleMixin(SessionManagerBase):
     async def load_archived_session_info(
         self, session_id: str, user_id: str | None = None,
     ) -> SessionInfo | None:
-        rows = await self.input_database().load_archived_sessions(user_id=user_id, session_id=session_id)
+        rows = await self._load_archived_history(session_id, user_id)
         if not rows:
             return None
         row = rows[0]
@@ -859,7 +995,7 @@ class LifecycleMixin(SessionManagerBase):
         one of `user_id`'s, which a caller must not be able to tell apart.
         """
         database = self.input_database()
-        rows = await database.load_archived_sessions(user_id=user_id, session_id=session_id)
+        rows = await self._load_archived_history(session_id, user_id)
         match = rows[0] if rows else None
         if match is None:
             return None
@@ -883,6 +1019,12 @@ class LifecycleMixin(SessionManagerBase):
             oldest_loaded_seq=oldest,
             has_more_messages=await database.has_messages_before(session_id, oldest),
             next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
+        )
+
+    async def _load_archived_history(self, session_id: str, user_id: str | None) -> list[dict[str, Any]]:
+        return await self.input_database().load_archived_sessions(
+            user_id=user_id, session_id=session_id,
+            unavailable_rewinds=(session_id,) if session_id in self._unavailable_rewind_archives else (),
         )
 
     async def join_browser_restorations(self) -> None:
@@ -956,7 +1098,7 @@ class LifecycleMixin(SessionManagerBase):
 
                     async def run() -> tuple[int, str] | None:
                         try:
-                            async with self.agent_operation(binding["agent_id"]):
+                            async with self.agent_operation(binding["agent_id"], creates_session=False):
                                 await self._unarchive_session(session_id, user_id)
                             return None
                         except ValueError as error:
@@ -992,6 +1134,7 @@ class LifecycleMixin(SessionManagerBase):
             raise ValueError(f"Archived session {session_id} not found")
         return await self._run_agent_operation(
             binding["agent_id"], lambda: self._unarchive_session(session_id, user_id, release_notice=release_notice),
+            creates_session=False,
         )
 
     async def _publish_lifecycle(
@@ -1049,7 +1192,7 @@ class LifecycleMixin(SessionManagerBase):
         if self.db is None:
             raise ValueError("DB not initialized")
         await self.db.require_application_session_writable(session_id)
-        rows = await self.db.load_archived_sessions(user_id=user_id, session_id=session_id)
+        rows = await self._load_archived_history(session_id, user_id)
         match = rows[0] if rows else None
         if match is None:
             raise SessionAdmissionClosed(f"Archived session {session_id} not found")
@@ -1068,19 +1211,46 @@ class LifecycleMixin(SessionManagerBase):
                     raise SessionAdmissionClosed("The calling ticket batch is paused or its human authorization has changed")
             # Recheck the process-local owner after the storage reads as well.
             self._require_task_return(returning, session_id, user_id)
-        await self.db.update_session_field(session_id, archived=False)
-        # Reload into the in-memory map so writes (sendMessage etc.)
-        # immediately route to this session.
-        session = _session_from_row(match)
-        paused, revision, order = self._archived_dispatch.pop(session_id, (False, 0, 0))
-        session._dispatch_paused = paused
-        session._dispatch_revision, session._dispatch_order = revision + 1, order
-        session.restore_message_state(*message_state)
-        self.sessions[session.id] = session
-        self.reopen_application_session_work(session.id)
-        from .owner_runtime import ReadContext
+        def require_directory() -> None:
+            require_rewind_worktree(match["working_dir"], match["fork_metadata"])
 
-        await self._session_owner(session).call_runtime(ReadContext())
+        db = self.db
+        marker = None
+        original_metadata = match["fork_metadata"]
+        try:
+            fork_metadata = json.loads(original_metadata or "{}")
+        except json.JSONDecodeError:
+            fork_metadata = None
+        if isinstance(fork_metadata, dict) and isinstance(fork_metadata.get("rewind_worktree_id"), list):
+            marker = uuid.uuid4().hex
+
+        async def install() -> Session:
+            session = _session_from_row(match)
+            try:
+                if marker is None:
+                    await db.update_session_field(session_id, archived=False)
+                elif not await db.begin_bound_archive_restore(
+                    session_id, original_metadata, marker, was_archived=match["archived"],
+                    require_current_directory=require_directory,
+                ):
+                    raise SessionAdmissionClosed("The original archive restore was superseded")
+                else:
+                    await self._settle_rewind_restore(db, session, marker)
+            except (WorktreeChanged, ApplicationDeleting) as error:
+                raise SessionAdmissionClosed(str(error)) from error
+            paused, revision, order = self._archived_dispatch.pop(session_id, (False, 0, 0))
+            session._dispatch_paused = paused
+            session._dispatch_revision, session._dispatch_order = revision + 1, order
+            session.restore_message_state(*message_state)
+            self.sessions[session.id] = session
+            self._unavailable_rewind_archives.discard(session.id)
+            self.reopen_application_session_work(session.id)
+            from .owner_runtime import ReadContext
+
+            await self._session_owner(session).call_runtime(ReadContext())
+            return session
+
+        session = await complete_cleanup(install())
         return session, match["has_inputs"]
 
     def _require_task_return(self, owned: OwnedTaskContext, session_id: str, user_id: str | None) -> None:
@@ -1129,9 +1299,12 @@ class LifecycleMixin(SessionManagerBase):
             if isinstance(eligibility, ReturnRefused):
                 return None
             agent_id, _ = eligibility
-            session = await self._run_agent_operation(agent_id, lambda: self._unarchive_session(
-                reference.session_id, reference.user_id, returning=owned, wait_for_lifecycle=wait_for_lifecycle,
-            ))
+            session = await self._run_agent_operation(
+                agent_id, lambda: self._unarchive_session(
+                    reference.session_id, reference.user_id, returning=owned, wait_for_lifecycle=wait_for_lifecycle,
+                ),
+                creates_session=False,
+            )
         except SessionAdmissionBusy:
             raise
         except (SessionAdmissionClosed, ApplicationDeleting):
@@ -1139,13 +1312,17 @@ class LifecycleMixin(SessionManagerBase):
         context = receive_return(owned, session_id=session.id, user_id=session.user_id, work_id=binding.work_id)
         return (session, context) if context is not None else None
 
+    def _is_archived_history(self, session_id: str, binding: dict[str, Any]) -> bool:
+        return bool(binding["archived"] or session_id in self._unavailable_rewind_archives)
+
     async def session_presence(self, session_id: str, user_id: str) -> SessionPresence:
         binding = await self.input_database().get_session_binding(session_id)
         # A post-commit hook can fail after the row disappears. Read the
         # registration after SQLite so absence cannot hide such an operation.
         deletion = self._archived_deletions.get(session_id)
         return SessionPresence(
-            archived=binding["archived"] if binding is not None and binding["user_id"] == user_id else None,
+            archived=self._is_archived_history(session_id, binding)
+            if binding is not None and binding["user_id"] == user_id else None,
             deletion_pending=deletion is not None and deletion[0] == user_id,
         )
 
@@ -1180,7 +1357,7 @@ class LifecycleMixin(SessionManagerBase):
                 audience, task = archived
             else:
                 binding = await self.db.get_session_binding(session_id) if self.db is not None else None
-                if binding is None or not binding["archived"]:
+                if binding is None or not self._is_archived_history(session_id, binding):
                     return False
                 audience, task = binding["user_id"], None
             if archived_user_id is not None and audience != archived_user_id:
@@ -1258,6 +1435,7 @@ class LifecycleMixin(SessionManagerBase):
             self.sessions.pop(session_id)
             self._session_removed(session)
         self._archived_dispatch.pop(session_id, None)
+        self._unavailable_rewind_archives.discard(session_id)
         self._archived_deletions.pop(session_id, None)
         await self._broadcast({"type": "session_deleted", "session_id": session_id}, user_id=audience)
         # Native transcripts and already authorized downloads may still use

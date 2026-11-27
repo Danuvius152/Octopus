@@ -594,7 +594,7 @@ async def test_ack_updates_saved_input_notices_while_root_remains_active(native_
     monkeypatch.setattr("server.harness.codex_rpc.RPC_TIMEOUT", .05 if late else 5)
     anchor = [("a" * 40, False, None)]
 
-    async def capture_anchor(_working_dir):
+    async def capture_anchor(_working_dir, **_scope):
         return anchor[0]
 
     monkeypatch.setattr("server.sessions.owner_runtime.fork_helpers.capture_git_anchor", capture_anchor)

@@ -108,6 +108,7 @@ def verify_main(db: sqlite3.Connection) -> int:
 
 
 def _verify_main_facts(db: sqlite3.Connection) -> None:
+    from .agent_memory import valid_private_agent_identity
     """Check retained facts shared by current inspection and finite publication."""
     from pydantic import ValidationError
 
@@ -132,6 +133,16 @@ def _verify_main_facts(db: sqlite3.Connection) -> None:
         raise RuntimeError("Primary database contains inputs outside the current contract")
     if db.execute("SELECT 1 FROM agents WHERE typeof(context_settings_revision)!='integer' OR context_settings_revision<0 LIMIT 1").fetchone():
         raise RuntimeError("Primary database contains an invalid context settings revision")
+    pending_deletions = db.execute("""
+        SELECT a.id, a.user_id, a.deletion_pending, a.archived, a.is_system,
+               EXISTS(SELECT 1 FROM users WHERE id=a.user_id),
+               EXISTS(SELECT 1 FROM sessions WHERE agent_id=a.id)
+        FROM agents a WHERE a.deletion_pending IS NOT 0
+    """)
+    for agent_id, user_id, pending, archived, protected, has_owner, has_sessions in pending_deletions:
+        if (pending != 1 or archived != 1 or protected != 0 or not has_owner or has_sessions
+                or not valid_private_agent_identity(agent_id, user_id)):
+            raise RuntimeError("Primary database contains an invalid Agent deletion responsibility")
     try:
         for (raw,) in db.execute("SELECT git_ignored_baseline FROM messages WHERE git_ignored_baseline IS NOT NULL"):
             decode_ignored_baseline(raw)

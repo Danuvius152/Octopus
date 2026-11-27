@@ -17,7 +17,10 @@ from ..config import settings
 from ..context_models import ContextState
 from ..credential_use import CredentialUse
 from ..database import Database
+from ..db.applications import ApplicationDeleting
+from ..db.base import DatabaseBusy
 from ..diagnostics import exception_diagnostic
+from ..fork_git import WorktreeChanged, require_rewind_worktree
 from ..harness import (
     HarnessCredential,
     HarnessEvent,
@@ -34,6 +37,7 @@ from ..session_operations import OperationKind
 from .fork_directory import ForkDirectoryError, require_saved_copy
 from .observation import RequestObservation
 from .restoration import RestoreOperation
+from .runtime_types import SessionAdmissionClosed
 from .submission import (
     RequestCompletion,
     ReturnAdmission,
@@ -47,12 +51,19 @@ from .submission import (
 if TYPE_CHECKING:
     from ..harness.events import NativeQuestionRef
     from ..knowledge import KnowledgeContext, OwnedTaskContext
+    from ..service_scope import GitWriterScope
     from .owner import SessionOwner
     from .owner_questions import QuestionNotification
     from .owner_runtime import ReleaseArchive, ReserveFork
     from .runtime_types import _Attempt, _Settlement
 
 logger = logging.getLogger(__name__)
+
+
+def rewind_restore_marker(metadata: dict[str, Any]) -> str | bool | None:
+    marker = metadata.get("rewind_restore_pending")
+    return marker if isinstance(marker, (str, bool)) and marker else None
+
 
 TICKET_BATCH_ORIGINS = frozenset({"user", "fork"})
 
@@ -563,11 +574,11 @@ class SessionManagerBase:
     async def _create_session(self, agent_id: str | None, *, origin: str = "user", persist: bool = True) -> Session:
         raise NotImplementedError
 
-    def agent_operation(self, agent_id: str | None) -> AbstractAsyncContextManager[None]:
+    def agent_operation(self, agent_id: str | None, *, creates_session: bool = True) -> AbstractAsyncContextManager[None]:
         raise NotImplementedError
 
     async def _run_agent_operation[T](
-        self, agent_id: str | None, command: Callable[[], Awaitable[T]],
+        self, agent_id: str | None, command: Callable[[], Awaitable[T]], *, creates_session: bool = True,
     ) -> T:
         raise NotImplementedError
 
@@ -818,6 +829,7 @@ class SessionManagerBase:
         self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
         # Serialize planning through allocation of the shared fork parent.
         self._fork_allocation_locks: weakref.WeakValueDictionary[str | None, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._git_writer_scope: GitWriterScope | None = None
         # The phase survives live-instance replacement while an operation or fire observes it.
         self._session_relationships: weakref.WeakValueDictionary[str, SessionRelationship] = weakref.WeakValueDictionary()
         # Archived sessions need their original audience even if a post-commit hook fails.
@@ -825,6 +837,7 @@ class SessionManagerBase:
         # Carry Stop and dispatch ordering to the next live owner in this
         # service generation. No input or execution is retained here.
         self._archived_dispatch: dict[str, tuple[bool, int, int]] = {}
+        self._unavailable_rewind_archives: set[str] = set()
         self._dispatch_generation = uuid.uuid4().hex
         self._retired_dispatch_generations: frozenset[str] = frozenset()
         # Only browser restoration identities survive their original task.
@@ -841,10 +854,12 @@ class SessionManagerBase:
         self._credential_refreshes: dict[tuple[str | None, str], asyncio.Task[HarnessCredential | None]] = {}
         self._credential_refresh_closed = False
         self._agent_lifecycle_lock = asyncio.Lock()
+        self._agent_restore_lock = asyncio.Lock()
         self._wiki_dispatch_locks: dict[str | None, asyncio.Lock] = {}
         self._closed_agents: set[str] = set()
         self._agent_operations: dict[str | None, set[asyncio.Future[None]]] = {}
-        self._agent_archive_tasks: dict[str, asyncio.Task[None]] = {}
+        self._agent_lifecycle_tasks: dict[str, tuple[Literal["archive", "restore", "delete"],
+                                                    asyncio.Task[dict[str, Any]], str | None]] = {}
         # Audience and delivery responsibility are independent registration facts.
         self._broadcast_callbacks: dict[str, tuple[Callable, str | None, bool]] = {}
         # Business observers receive the same completion value as the receipt;
@@ -868,12 +883,43 @@ class SessionManagerBase:
     def set_schedule_runner(self, runner: Any) -> None:
         self._schedule_runner = runner
 
+    async def _settle_rewind_restore(self, db: Database, session: Session, marker: str | bool) -> None:
+        """Settle the original operation before projecting a restored session."""
+
+        def require_directory() -> None:
+            require_rewind_worktree(session.working_dir, session.fork_metadata)
+
+        async def retry_write[T](write: Callable[[], Awaitable[T]]) -> T:
+            while True:
+                try:
+                    return await write()
+                except DatabaseBusy:
+                    await asyncio.sleep(0.05)
+
+        try:
+            metadata = await retry_write(lambda: db.settle_bound_archive_restore(
+                session.id, marker, archived=False, require_current_directory=require_directory,
+            ))
+        except (WorktreeChanged, ApplicationDeleting):
+            await retry_write(lambda: db.settle_bound_archive_restore(session.id, marker, archived=True))
+            raise
+        if metadata is None:
+            raise SessionAdmissionClosed("The original archive restore was superseded")
+        try:
+            require_rewind_worktree(session.working_dir, metadata)
+        except WorktreeChanged:
+            await retry_write(lambda: db.rearchive_confirmed_bound_restore(session.id, metadata))
+            raise
+        session.fork_metadata = metadata
+
     async def initialize(self, db: Database, *, previous_writers_retired: bool = False,
+                         git_writer_scope: GitWriterScope | None = None,
                          defer_copy_delivery: bool = False) -> None:
         if self._input_state == "initializing":
             raise RuntimeError("SessionManager initialization is already in progress")
         self._input_state = "initializing"
         self._admission_closed = False
+        self._git_writer_scope = git_writer_scope
         try:
             await self._initialize_storage(db, previous_writers_retired=previous_writers_retired)
             if not defer_copy_delivery:
@@ -924,11 +970,13 @@ class SessionManagerBase:
             self._schedule_runner = None
             self._archived_deletions.clear()
         self._agent_lifecycle_lock = asyncio.Lock()
+        self._agent_restore_lock = asyncio.Lock()
         self._closed_agents.clear()
         self._wiki_dispatch_locks.clear()
         self._agent_operations.clear()
-        self._agent_archive_tasks.clear()
+        self._agent_lifecycle_tasks.clear()
         self._archived_dispatch.clear()
+        self._unavailable_rewind_archives.clear()
         self.db = db
         self._dispatch_generation = uuid.uuid4().hex
         self._browser_restorations.clear()
@@ -950,9 +998,14 @@ class SessionManagerBase:
         db.add_close_hook(self.drain_turns)
         db.add_close_hook(self.drain_credential_refreshes)
         self._recovered_copy_deliveries.clear()
+        # Resolve incomplete forks before registering executable sessions.
+        await self._recover_incomplete_forks()
         rows = await db.load_sessions()
         for row in rows:
             session = _session_from_row(row)
+            if session.fork_status in {"initializing", "reverting"}:
+                self.sessions.pop(session.id, None)
+                continue
             if session.context_state is not None:
                 from ..context_models import align_context
                 from .context import read_session_context_target
@@ -963,8 +1016,6 @@ class SessionManagerBase:
                     if state != session.context_state:
                         await db.update_session_field(session.id, context_state=state.model_dump_json() if state else None)
                         session.context_state = state
-            from ..db.applications import ApplicationDeleting
-
             try:
                 await db.require_application_session_writable(session.id)
             except ApplicationDeleting:
@@ -975,15 +1026,28 @@ class SessionManagerBase:
                     metadata = json.loads(session.fork_metadata)
                 except json.JSONDecodeError:
                     metadata = None
-                if isinstance(metadata, dict) and metadata.get("copy_delivery_pending") is True:
-                    if not await db.full_copy_has_admitted_input(session.id):
+                if isinstance(metadata, dict):
+                    marker = rewind_restore_marker(metadata)
+                    try:
+                        if marker is None:
+                            require_rewind_worktree(session.working_dir, session.fork_metadata)
+                        elif session._admission_closed:
+                            # Application deletion will settle this before publication.
+                            self.sessions.pop(session.id, None)
+                            continue
+                        else:
+                            await self._settle_rewind_restore(db, session, marker)
+                    except (WorktreeChanged, ApplicationDeleting, SessionAdmissionClosed):
+                        self.sessions.pop(session.id, None)
+                        if marker is None:
+                            self._unavailable_rewind_archives.add(session.id)
+                        continue
+                    if metadata.get("copy_delivery_pending") is True and not await db.full_copy_has_admitted_input(session.id):
                         self.sessions.pop(session.id, None)
                         self._recovered_copy_deliveries.append((session, metadata))
                         continue
             self.sessions[session.id] = session
         logger.info("Loaded %d sessions from database", len(rows))
-        # Sweep forks left mid-saga by a crash (session-rewind.md §5.6.7).
-        await self._recover_incomplete_forks()
 
     def on_broadcast(
         self, key: str, callback: Callable, user_id: str | None = None, *, required: bool = False,

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..knowledge import require_open
 from ..schedule_ai import interval_trigger, local_timezone, validate_run_at
+from .agents import require_agent_not_deleting
 from .base import DatabaseBase
 from .transaction import Transaction
 
@@ -98,6 +99,7 @@ class SchedulesMixin(DatabaseBase):
         `origin_session_id`, when set, is the session the `/schedule` command was
         typed in — fires append into it instead of a throwaway session."""
         async with self.transaction(write=True) as tx:
+            await require_agent_not_deleting(tx, agent_id)
             async with self._definition_write(
                 tx, request, run_at=run_at if require_future else None, timezone=timezone,
                 check_interval=interval_seconds is not None or not (cron or run_at), interval_seconds=interval_seconds,
@@ -243,6 +245,10 @@ class SchedulesMixin(DatabaseBase):
                 return
             if "enabled" in updates:
                 updates["enabled"] = int(updates["enabled"])
+                if updates["enabled"]:
+                    target = await tx.fetch_one("SELECT agent_id FROM schedules WHERE id=?", (schedule_id,))
+                    if target is not None:
+                        await require_agent_not_deleting(tx, target[0])
             check_interval, interval_seconds, timezone = False, None, updates.get("timezone")
             if updates.keys() & {"interval_seconds", "cron", "run_at", "timezone"} or updates.get("enabled"):
                 raw = await tx.fetch_one("SELECT interval_seconds,cron,run_at,timezone FROM schedules WHERE id=?", (schedule_id,))

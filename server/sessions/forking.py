@@ -6,9 +6,9 @@ import asyncio
 import json
 import os
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
-from dataclasses import replace
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager, nullcontext
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +18,20 @@ from ..aio import complete_cleanup
 from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
 from ..credential_bindings import CredentialBindingError
+from ..db.applications import ApplicationDeleting
+from ..db.base import DatabaseBusy
+from ..fork_git import (
+    GitRetirementCancelled,
+    GitRetirementPending,
+    StashObservation,
+    WorktreeChanged,
+    git_scope,
+    matches_worktree,
+    require_rewind_worktree,
+    worktree_blocked,
+    worktree_for,
+    worktree_lock,
+)
 from ..harness import HarnessRun, get_harness
 from ..harness.fork import ForkCheckpoint, ForkCwd, ForkHooks, read_fork_checkpoint
 from ..models import MessageContent
@@ -42,6 +56,8 @@ from .fork_git_layout import GitLayoutError, require_independent_git_layout
 from .owner_runtime import OwnForkProcess, ReserveFork, RetireProcess
 
 if TYPE_CHECKING:
+    from ..database import Database
+    from ..fork_git import GitResult, Worktree
     from .owner import SessionOwner
 
 
@@ -93,8 +109,8 @@ class ForkingMixin(SessionManagerBase):
             ~/.claude/projects/ here); on cleanup failure leave the row for the
             next boot to retry idempotently; (2) only after cleanup succeeds,
             delete the row + copied messages.
-          - 'reverting': FINALIZE — git ops were in flight at crash; mark the
-            durable revert record `unknown_post_crash` and promote to 'ready'.
+          - 'reverting': retain the history until evidence covers the original
+            Git writer, then finalize without repeating the file effects.
         Idempotent — safe on every boot."""
         if self.db is None:
             return
@@ -166,43 +182,148 @@ class ForkingMixin(SessionManagerBase):
                 logger.info("fork %s: purged incomplete (initializing) saga", fork_id)
             elif status == "reverting":
                 try:
-                    rec = (
-                        json.loads(row["fork_revert_record"])
-                        if row["fork_revert_record"]
-                        else {}
-                    )
+                    metadata = json.loads(row["fork_metadata"] or "{}")
                 except json.JSONDecodeError:
-                    rec = {}
-                rec.setdefault("ran", True)
-                rec.setdefault("files", [])
-                rec.setdefault("stash_ref", None)
-                rec.setdefault("refused_reason", None)
-                rec["status"] = "unknown_post_crash"
-                rec["error"] = (
-                    "Server crashed during fork file-revert. Inspect `git "
-                    "status` and `git stash list` for "
-                    f"'octopus: pre-fork stash {fork_id}'."
+                    metadata = {}
+                scope = self._git_writer_scope
+                retired = isinstance(metadata, dict) and (
+                    metadata.get("revert_git_retired") is True
+                    or (scope is not None and scope.covers_previous(metadata.get("revert_writer")))
                 )
-                metadata = json.loads(row["fork_metadata"] or "{}")
-                metadata["first_turn_note"] = fork_helpers.render_first_turn_note(
-                    parent_label=row["forked_from_session_id"], n=(row["fork_after_seq"] or 0) + 1,
-                    summary=metadata.get("side_effect_summary", {}), revert_record=rec,
+                if not retired:
+                    self.sessions.pop(fork_id, None)
+                    continue
+                try:
+                    record = json.loads(row["fork_revert_record"] or "{}")
+                except json.JSONDecodeError:
+                    record = {}
+                self._record_interrupted_revert(fork_id, record)
+                result, details = self._revert_fields(
+                    row["forked_from_session_id"], (row["fork_after_seq"] or 0) + 1, metadata, record,
                 )
-                await self.db.update_session_field(
-                    fork_id,
-                    fork_revert_record=json.dumps(rec),
-                    fork_metadata=json.dumps(metadata),
-                    fork_status="ready",
-                )
-                sess = self.sessions.get(fork_id)
-                if sess is not None:
-                    sess.fork_revert_record = json.dumps(rec)
-                    sess.fork_metadata = json.dumps(metadata)
-                    sess.fork_status = "ready"
-                logger.info(
-                    "fork %s: finalized interrupted revert as unknown_post_crash",
-                    fork_id,
-                )
+                saved_identity = metadata.get("rewind_worktree_id")
+
+                def require_directory(identity=saved_identity, working_dir=row["working_dir"]) -> None:
+                    if not matches_worktree(working_dir, identity):
+                        raise WorktreeChanged("The reserved Git worktree moved or was replaced")
+
+                try:
+                    await self.db.finish_fork_revert(fork_id, result, details, require_current_directory=require_directory)
+                    require_directory()
+                except WorktreeChanged:
+                    metadata["revert_git_retired"] = True
+                    await self.db.update_session_field(fork_id, fork_status="reverting",
+                                                       fork_revert_record=result, fork_metadata=json.dumps(metadata))
+
+    @staticmethod
+    def _record_interrupted_revert(fork_id: str, record: dict[str, Any]) -> None:
+        if record.get("status") in {"completed", "refused", "failed", "unknown_post_crash"}:
+            return
+        record.setdefault("ran", True)
+        record.setdefault("files", [])
+        record.setdefault("stash_ref", None)
+        record.setdefault("refused_reason", None)
+        record.update(status="unknown_post_crash", error=(
+            "Fork file revert was interrupted. Inspect `git status` and "
+            f"`git stash list` for 'octopus: pre-fork stash {fork_id}'."
+        ))
+
+    @staticmethod
+    def _revert_fields(
+        parent_label: str, message_number: int, metadata: dict[str, Any], record: dict[str, Any],
+    ) -> tuple[str, str]:
+        metadata = metadata.copy()
+        metadata.pop("revert_worktree", None)
+        metadata.pop("revert_writer", None)
+        metadata.pop("revert_git_retired", None)
+        metadata["first_turn_note"] = fork_helpers.render_first_turn_note(
+            parent_label=parent_label, n=message_number,
+            summary=metadata.get("side_effect_summary", {}), revert_record=record,
+        )
+        return json.dumps(record), json.dumps(metadata)
+
+    @staticmethod
+    def _retirement_pending() -> ForkError:
+        return ForkError(
+            "The original Git execution has not been confirmed retired",
+            reason="git_retirement_pending", status_code=409,
+        )
+
+    async def _install_reverted_fork(
+        self, db: Database, fork: Session, *, parent_label: str, message_number: int,
+        metadata: dict[str, Any], record: dict[str, Any], worktree: Worktree, interrupted: bool = False,
+    ) -> bool:
+        result, details = self._revert_fields(parent_label, message_number, metadata, record)
+
+        def require_directory() -> None:
+            worktree.require_current(fork.working_dir)
+
+        while True:
+            try:
+                async with self._agent_lifecycle_lock if interrupted else nullcontext():
+                    admit = not interrupted or (
+                        not self._admission_closed and fork.agent_id not in self._closed_agents
+                    )
+                    try:
+                        disposition = await db.finish_fork_revert(
+                            fork.id, result, details, require_current_directory=require_directory,
+                        )
+                        require_directory()
+                    except WorktreeChanged:
+                        # Exit is proved, but this candidate cannot use today's
+                        # path. Retain the file result without fencing the tree.
+                        metadata["revert_git_retired"] = True
+                        await db.update_session_field(fork.id, fork_status="reverting",
+                                                      fork_revert_record=result, fork_metadata=json.dumps(metadata))
+                        if interrupted:
+                            return False
+                        raise
+                    if disposition is None:
+                        raise RuntimeError(f"Fork {fork.id} no longer has its original reverting state")
+                    archived, application_deleting = disposition
+                    fork.fork_revert_record = result
+                    fork.fork_metadata = details
+                    fork.fork_status = "ready"
+                    if admit and not archived:
+                        fork._admission_closed = application_deleting
+                        self.sessions[fork.id] = fork
+                        self._session_owner(fork)
+                    return not archived
+            except DatabaseBusy:
+                # BEGIN never acquired the write. Keep the original result
+                # and retry only this commit, without replaying any Git work.
+                await asyncio.sleep(0.05)
+
+    async def _finish_interrupted_revert(
+        self, db: Database, fork: Session, worktree: Worktree, *,
+        execution: asyncio.Task[GitResult] | None, timed_out: bool, file_operation: bool,
+        stash: StashObservation | None,
+        parent_label: str, message_number: int, metadata: dict[str, Any], record: dict[str, Any],
+    ) -> None:
+        # The partial observation can retain a verified stash identity.
+        # Its file result is still unknown until recovery records the outcome.
+        record.pop("status", None)
+        partial = record.copy()
+        if stash is not None and stash.verify:
+            partial["stash_ref"] = None
+        if file_operation and not partial.get("ran"):
+            partial.pop("ran", None)
+        try:
+            await db.update_session_field(fork.id, fork_revert_record=json.dumps(partial))
+        except DatabaseBusy:
+            # Optional partial observation. The original owner still holds
+            # the record for the required terminal commit.
+            pass
+        if execution is not None:
+            observed = await asyncio.shield(execution)
+            fork_helpers.record_git_result(record, replace(observed, timed_out=timed_out),
+                                           file_operation=file_operation, stash=stash)
+        self._record_interrupted_revert(fork.id, record)
+        async with worktree_lock(worktree):
+            await self._install_reverted_fork(
+                db, fork, parent_label=parent_label, message_number=message_number, metadata=metadata, record=record,
+                worktree=worktree, interrupted=True,
+            )
 
     async def fork_session(
         self, parent_id: str, rewind_to_msg_seq: int, *,
@@ -215,27 +336,40 @@ class ForkingMixin(SessionManagerBase):
         await self._require_unambiguous_transcript(parent)
 
         async def rewind() -> Session:
-            with self._session_relationship(parent_id).changing() as settle:
-                return await self._fork_session(
-                    parent_id, rewind_to_msg_seq, revert_files=revert_files, label=label,
-                    user_id=user_id, settle_relationship=settle,
-                )
+            worktree = worktree_for(parent.working_dir)
+            require_rewind_worktree(parent.working_dir, parent.fork_metadata, worktree=worktree)
+            with ExitStack() as relationship:
+                async with worktree_lock(worktree):
+                    if await worktree_blocked(self.input_database(), worktree):
+                        raise self._retirement_pending()
+                    settle = relationship.enter_context(self._session_relationship(parent_id).changing())
+                    original, fork = await self._prepare_rewind(
+                        parent_id, rewind_to_msg_seq, revert_files=revert_files, label=label,
+                        user_id=user_id, worktree=worktree,
+                    )
+                try:
+                    await self._archive_original(original, successor=fork, settle_relationship=settle)
+                except Exception:
+                    logger.exception("fork %s is ready; parent %s archive did not complete", fork.id, parent_id)
+                return fork
 
         try:
             return await self._run_agent_operation(parent.agent_id, rewind)
+        except WorktreeChanged as exc:
+            raise ForkError(str(exc), reason="fork_worktree_changed", status_code=409) from exc
         except ValueError as exc:
             raise ForkError(str(exc), reason="agent_admission_closed", status_code=409) from exc
 
-    async def _fork_session(
+    async def _prepare_rewind(
         self,
         parent_id: str,
         rewind_to_msg_seq: int,
         *,
-        settle_relationship: Callable[[], None],
+        worktree: Worktree,
         revert_files: bool = False,
         label: str | None = None,
         user_id: str | None = None,
-    ) -> Session:
+    ) -> tuple[Session, Session]:
         """Fork `parent_id` by rewinding to *before* the user message at
         `seq=rewind_to_msg_seq` and re-spawning as a new branch
         (session-rewind.md §5.1). Returns the new fork Session. The saga is
@@ -297,13 +431,15 @@ class ForkingMixin(SessionManagerBase):
             snapshot = await self.db.snapshot_fork_messages(parent_id, fork_after_seq)
             copied = [MessageContent(**row) for row in snapshot.messages]
             summary = await fork_helpers.classify_side_effects(self.db, parent_id, M)
-            metadata = {
+            metadata: dict[str, Any] = {
                 "prefilled_prompt": prefilled_prompt,
                 "side_effect_summary": summary,
                 "fork_label": label,
                 "first_turn_note": fork_helpers.render_first_turn_note(
                     parent_label=source.name, n=M, summary=summary),
             }
+            if worktree.identity is not None:
+                metadata["rewind_worktree_id"] = worktree.identity
             candidate = replace(source, id=fork_id, claude_session_id=None,
                                 fork_metadata=json.dumps(metadata), _run=ActiveRun())
             async with self.db.configuration_lock:
@@ -382,62 +518,70 @@ class ForkingMixin(SessionManagerBase):
             )
             if revert_files:
                 fork.fork_status = "reverting"
-                await self.db.update_session_field(fork_id, fork_status="reverting")
-            else:
-                fork.fork_status = "ready"
-                await self.db.update_session_field(fork_id, fork_status="ready")
-
-            # 8. Safe-revert as a SEPARATE post-create step (durable record).
-            if revert_files:
-                record = await fork_helpers.safe_revert_files(
-                    source.working_dir,
-                    summary["agent_touched_paths"],
-                    target.get("git_head"),
-                    target.get("git_status_clean"),
-                    fork_id,
-                    target.get("git_ignored_baseline"),
-                )
-                fork.fork_revert_record = json.dumps(record)
-                await self.db.update_session_field(
-                    fork_id, fork_revert_record=fork.fork_revert_record
-                )
-                # Re-render the first-turn note with the real revert outcome.
-                metadata["first_turn_note"] = fork_helpers.render_first_turn_note(
-                    parent_label=source.name, n=M, summary=summary, revert_record=record
-                )
+                metadata["revert_worktree"] = str(worktree.path)
+                if self._git_writer_scope is not None:
+                    metadata["revert_writer"] = asdict(self._git_writer_scope)
                 fork.fork_metadata = json.dumps(metadata)
-                await self.db.update_session_field(
-                    fork_id, fork_metadata=fork.fork_metadata
-                )
-                fork.fork_status = "ready"
-                await self.db.update_session_field(fork_id, fork_status="ready")
+                progress: dict[str, Any] = {"ran": False}
+                try:
+                    await complete_cleanup(self.db.update_session_field(
+                        fork_id, fork_status="reverting", fork_metadata=fork.fork_metadata,
+                    ))
+                    with git_scope(worktree, self.db, parent.id):
+                        record = await fork_helpers.safe_revert_files(
+                            source.working_dir, summary["agent_touched_paths"], target.get("git_head"),
+                            target.get("git_status_clean"), fork_id, target.get("git_ignored_baseline"),
+                            worktree=worktree, progress=progress,
+                        )
+                except (GitRetirementPending, asyncio.CancelledError) as error:
+                    pending = error if isinstance(error, (GitRetirementPending, GitRetirementCancelled)) else None
+                    self._own_task(asyncio.create_task(
+                        self._finish_interrupted_revert(
+                            self.db, fork, worktree, execution=pending.execution if pending else None,
+                            timed_out=pending.timed_out if pending else False,
+                            file_operation=pending.file_operation if pending else False,
+                            stash=pending.stash if pending else None,
+                            parent_label=source.name, message_number=M, metadata=metadata, record=progress,
+                        ),
+                        name=f"fork-revert-retirement-{fork.id}",
+                    ))
+                    if isinstance(error, GitRetirementPending):
+                        raise self._retirement_pending() from error
+                    raise
+                if not await complete_cleanup(self._install_reverted_fork(
+                    self.db, fork, parent_label=source.name, message_number=M, metadata=metadata, record=record,
+                    worktree=worktree,
+                )):
+                    raise ForkError("The fork was archived during file revert", reason="fork_archived", status_code=409)
+            else:
+                db = self.db
 
-            # Only the fully prepared candidate is visible to session commands.
-            # Install its original owner in the same event-loop turn.
-            self.sessions[fork_id] = fork
-            self._session_owner(fork)
+                async def admit_rewind() -> None:
+                    def require_directory() -> None:
+                        worktree.require_current(source.working_dir)
+
+                    try:
+                        if await worktree_blocked(db, worktree):
+                            raise self._retirement_pending()
+                        await db.update_session_field(
+                            fork_id, fork_status="ready", require_current_directory=require_directory,
+                        )
+                        require_directory()
+                    except (WorktreeChanged, ForkError):
+                        await db.delete_session(fork_id)
+                        raise
+                    fork.fork_status = "ready"
+                    self.sessions[fork_id] = fork
+                    self._session_owner(fork)
+
+                await complete_cleanup(admit_rewind())
 
             # The installed successor is now capturable by application deletion.
             # External archive must obey this reservation until this point too.
             await self._release_session_reservation(owner, ReserveFork(False))
             reservation_held = False
 
-            # 9. Rewind, not branch: the fork takes the parent's place. Archive
-            # the parent and surface the swap with the same `session_archived`
-            # event `/archive` uses, so the fork slots into the sidebar wearing
-            # the original's identity. The fork is already fully ready; an
-            # archival hiccup must not fail it (worst case the parent lingers,
-            # recoverable by a manual archive), so only announce the swap when
-            # the parent actually went away.
-            try:
-                await self._archive_original(parent, successor=fork, settle_relationship=settle_relationship)
-            except Exception:
-                logger.exception(
-                    "fork %s is ready; parent %s archive did not complete",
-                    fork.id,
-                    parent_id,
-                )
-            return fork
+            return parent, fork
         finally:
             if reservation_held and self.sessions.get(parent.id) is parent:
                 await self._release_session_reservation(owner, ReserveFork(False))
@@ -775,13 +919,27 @@ class ForkingMixin(SessionManagerBase):
                 status_code=400,
             )
         summary = await fork_helpers.classify_side_effects(self.db, parent_id, M)
-        available, reason, _dirty = await fork_helpers.safe_revert_preflight(
-            parent.working_dir,
-            summary["agent_touched_paths"],
-            target.get("git_head"),
-            target.get("git_status_clean"),
-            target.get("git_ignored_baseline"),
-        )
+        try:
+            worktree = worktree_for(parent.working_dir)
+            require_rewind_worktree(parent.working_dir, parent.fork_metadata, worktree=worktree)
+        except WorktreeChanged as error:
+            raise ForkError(str(error), reason="fork_worktree_changed", status_code=409) from error
+        async with worktree_lock(worktree):
+            blocked = await worktree_blocked(self.input_database(), worktree)
+            available = False
+            reason: str | None = str(self._retirement_pending())
+            if not blocked:
+                try:
+                    await self.input_database().require_application_session_writable(parent.id)
+                    with git_scope(worktree, self.input_database(), parent.id):
+                        available, reason, _dirty = await fork_helpers.safe_revert_preflight(
+                            parent.working_dir, summary["agent_touched_paths"], target.get("git_head"),
+                            target.get("git_status_clean"), target.get("git_ignored_baseline"),
+                        )
+                except GitRetirementPending:
+                    blocked = True
+                except ApplicationDeleting as error:
+                    blocked, reason = True, str(error)
         return {
             "rewind_to_msg_seq": M,
             "prefilled_prompt": (
@@ -789,7 +947,7 @@ class ForkingMixin(SessionManagerBase):
             ),
             "side_effect_summary": summary,
             "revert": {"available": available, "refused_reason": reason},
-            "can_fork": get_harness(parent.backend).can_fork,
+            "can_fork": not blocked and get_harness(parent.backend).can_fork,
         }
 
     async def fork_ancestor_ids(self, session_id: str) -> list[str]:

@@ -657,10 +657,10 @@ async def test_timeout_before_chat_input_is_recorded_preserves_complete_draft(ma
     entered, release = asyncio.Event(), asyncio.Event()
     capture = fork_helpers.capture_git_anchor
 
-    async def hold_git_anchor(*args):
+    async def hold_git_anchor(*args, **kwargs):
         entered.set()
         await release.wait()
-        return await capture(*args)
+        return await capture(*args, **kwargs)
 
     monkeypatch.setattr(fork_helpers, "capture_git_anchor", hold_git_anchor)
     receipt = await manager.start_message(session.id, "Keep this draft", attachment_ids=[upload.id])

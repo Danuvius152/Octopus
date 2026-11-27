@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from server import fork_git
 from server.database import Database
 from server.models import SessionStatus
 from server.session_manager import SessionManager
@@ -3027,21 +3028,19 @@ async def test_steer_backlog_is_bounded(manager, monkeypatch):
     session = await _new(manager, "Steer capacity")
     backend, original = await _start_steerable(manager, monkeypatch, session)
     entered, release = asyncio.Event(), asyncio.Event()
-    spawn = asyncio.create_subprocess_exec
+    spawn = fork_git._spawn_git
     gate_next = True
-    processes = []
 
-    async def capture_before_frame(*arguments, **kwargs):
+    async def capture_before_frame(args, **kwargs):
         nonlocal gate_next
-        process = await spawn(*arguments, **kwargs)
-        if gate_next and arguments[:3] == ("git", "rev-parse", "--show-toplevel"):
+        process = await spawn(args, **kwargs)
+        if gate_next and args == ("rev-parse", "--show-toplevel"):
             gate_next = False
-            processes.append(process)
             entered.set()
             await release.wait()
         return process
 
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_before_frame)
+    monkeypatch.setattr(fork_git, "_spawn_git", capture_before_frame)
     corrections = []
     try:
         for index in range(_MAX_PENDING_STEERS):
@@ -3057,7 +3056,6 @@ async def test_steer_backlog_is_bounded(manager, monkeypatch):
     finally:
         release.set()
         await manager.delete_session(session.id)
-        await asyncio.gather(*(process.wait() for process in processes))
     completions = await asyncio.wait_for(asyncio.gather(
         original.wait(), *(receipt.wait() for receipt in corrections), overflow.wait(),
     ), 2)

@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from server import fork_helpers
+from server import fork_git, fork_helpers
 from server.sessions.client_submissions import submit_client_message
 from tests.claude_runtime import SID, inputs
 from tests.claude_runtime import claude_runtime as claude_runtime
@@ -210,7 +210,7 @@ async def test_post_stash_failure_records_actual_effect_and_warns_the_successor(
 
     async def unavailable_stash_list(cwd, *args, **kwargs):
         if args[:2] == ("stash", "list"):
-            return 1, "", "snapshot lookup unavailable"
+            return fork_git.GitResult(1, "", "snapshot lookup unavailable")
         return await real_git(cwd, *args, **kwargs)
 
     monkeypatch.setattr(fork_helpers, "_git", unavailable_stash_list)
