@@ -32,10 +32,12 @@ def test_session_info():
         status=SessionStatus.idle,
         created_at="2026-01-01T00:00:00Z",
         message_count=5,
+        configuration_version=2,
     )
     assert info.id == "abc123"
     assert info.status == SessionStatus.idle
     assert info.message_count == 5
+    assert info.configuration_version == 2
 
 
 def test_message_content():

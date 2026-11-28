@@ -663,8 +663,8 @@ The package override also upgrades `rehype-katex` and `micromark-extension-math`
 renderer in those consumers. Keep the override until their declared ranges
 support the patched renderer. The
 [`math-rendering` browser smoke](../web/e2e/math-rendering.spec.ts) checks real
-chat/file preview math, layout and locally loaded fonts; only model-based file
-name resolution is mocked.
+chat/file preview math, layout and locally loaded fonts. File preview uses an
+explicit `/showme` path through the real file endpoint.
 
 Shared JSON fixtures are imported as data, including the Wiki command cases used
 by frontend and backend tests. Do not widen Vite's filesystem roots to make an

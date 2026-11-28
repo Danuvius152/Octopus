@@ -146,7 +146,8 @@ async def test_duplicate_uses_the_engine_at_its_reservation(manager, tmp_path, m
     monkeypatch.setattr(owner, "call_runtime", call)
     monkeypatch.setattr(manager, "resolve_credential_by_id", resolve)
     copying = asyncio.create_task(manager.duplicate_session(parent.id))
-    fields = {"expected_backend": "claude-code", "backend": "codex", "model": None,
+    fields = {"expected_backend": "claude-code", "expected_configuration_version": parent.configuration_version,
+              "backend": "codex", "model": None,
               "reasoning_effort": None, "service_tier": None, "credential_id": None}
     try:
         await asyncio.wait_for(reserved.wait(), 2)
@@ -1014,18 +1015,14 @@ async def test_cancelled_preview_keeps_its_original_git_execution_in_drain(manag
 
 async def test_rewind_checks_the_reserved_tree_again_before_ready_commit(manager, tmp_path, monkeypatch):
     parent, repo = await _rewind_repository(manager, tmp_path, "a.py")
-    write = manager.db.update_session_field
-    changed = False
+    finish = manager.db.finish_rewind_fork
 
-    async def replace_before_commit(session_id, **fields):
-        nonlocal changed
-        if fields.get("fork_status") == "ready" and not changed:
-            changed = True
-            repo.rename(tmp_path / "old-tree")
-            repo.mkdir()
-        await write(session_id, **fields)
+    async def replace_before_commit(session_id, **kwargs):
+        repo.rename(tmp_path / "old-tree")
+        repo.mkdir()
+        return await finish(session_id, **kwargs)
 
-    monkeypatch.setattr(manager.db, "update_session_field", replace_before_commit)
+    monkeypatch.setattr(manager.db, "finish_rewind_fork", replace_before_commit)
     with pytest.raises(ForkError) as blocked:
         await manager.fork_session(parent.id, 0)
     assert blocked.value.reason == "fork_worktree_changed"
@@ -1069,15 +1066,14 @@ async def test_rewind_directory_permission_failure_keeps_storage_available(manag
 
     monkeypatch.setattr(os, "open", open_directory)
     if boundary == "ready":
-        update = manager.db.update_session_field
+        finish = manager.db.finish_rewind_fork
 
-        async def write(session_id, **fields):
+        async def write(session_id, **kwargs):
             nonlocal deny
-            if fields.get("fork_status") == "ready":
-                deny = True
-            await update(session_id, **fields)
+            deny = True
+            return await finish(session_id, **kwargs)
 
-        monkeypatch.setattr(manager.db, "update_session_field", write)
+        monkeypatch.setattr(manager.db, "finish_rewind_fork", write)
         with pytest.raises(ForkError) as rejected:
             await manager.fork_session(parent.id, 0)
         assert rejected.value.reason == "fork_worktree_changed"

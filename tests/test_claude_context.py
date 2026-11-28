@@ -119,7 +119,7 @@ async def test_replacing_held_claude_resumes_history_committed_during_preparatio
     await wait_dispatch_idle(manager, session.id)
     original = session._run.backend
     assert original is not None and original.is_alive()
-    await manager.update_session_configuration(session.id, {"model": "next-model"}, session.user_id)
+    await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "next-model"}, session.user_id)
     prepared, release = asyncio.Event(), asyncio.Event()
     prepare = OwnerRuntime._prepare_backend_input
 

@@ -22,6 +22,7 @@ import { SidebarManage } from "./components/SidebarManage";
 import { SignIn } from "./components/SignIn";
 import { useViewportHeight } from "./hooks/useViewportHeight";
 import { loadIdentity } from "./lib/loadIdentity";
+import { RequestDeadline } from "./lib/requestDeadline";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useSessionStore } from "./stores/sessionStore";
 
@@ -70,15 +71,18 @@ function AuthenticatedApp() {
   const signOut = async () => {
     const { token: bearer, accountGeneration } = useSessionStore.getState();
     if (!bearer) return;
+    const deadline = new RequestDeadline();
     try {
-      // Give the server a chance to revoke the original bearer before unload.
-      await fetch(`${window.location.origin}/api/auth/logout`, {
+      // Bound the browser's wait and let the keepalive request continue.
+      await deadline.wait(fetch(`${window.location.origin}/api/auth/logout`, {
         method: "POST",
         headers: { Authorization: `Bearer ${bearer}` },
         keepalive: true,
-      });
+      }));
     } catch {
       // The original login can still sign out locally when the server is unreachable.
+    } finally {
+      deadline.finish();
     }
     const current = useSessionStore.getState();
     if (current.token !== bearer || current.accountGeneration !== accountGeneration) return;

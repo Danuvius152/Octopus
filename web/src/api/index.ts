@@ -11,7 +11,7 @@
  * without navigating the nested OpenAPI structure.
  */
 
-import type { components } from "./contracts";
+import type { components, paths } from "./contracts";
 
 export type WorkspaceEditReceipt = components["schemas"]["WorkspaceEditReceipt"];
 
@@ -39,7 +39,8 @@ export type CredentialInfo = components["schemas"]["CredentialInfo"];
 export type FileViewerMetadata = components["schemas"]["FileViewerMetadata"];
 export type FilePickerSources = components["schemas"]["FilePickerSources"];
 export type FilePickerResult = components["schemas"]["FilePickerResult"];
-export type ShowMeResolveResponse = components["schemas"]["ShowMeResolveResponse"];
+export type ShowMeResolveResponse = paths["/api/sessions/{session_id}/showme/resolve"]["post"]["responses"][200]["content"]["application/json"];
+export type ShowMeFileResponse = components["schemas"]["ShowMeFileResponse"];
 export type ShowMeEditTarget = components["schemas"]["ShowMeEditTarget"];
 export type ShowMeFileErrorResponse = components["schemas"]["ShowMeFileErrorResponse"];
 export type FilePosition = NonNullable<ShowMeEditTarget["position"]>;

@@ -6,6 +6,7 @@ import { act, renderHook } from "@testing-library/react";
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type Agent, type Application, type SessionInfo } from "../stores/sessionStore";
 import { applyTranscript } from "../lib/transcript";
+import { sessions as sessionList } from "../lib/sessionList";
 
 it("merges an unseen delayed steer before a higher sequence without repeating either row", () => {
   useSessionStore.setState({ messages: {}, lastAppliedSeq: {}, streamingText: {}, streamingItems: {} });
@@ -84,7 +85,7 @@ it.each(["question_answer", "question_closed"])("retains the late request histor
 
 it("restores the original session and rejects a delayed archive projection", () => {
   const original: SessionInfo = { id: "woken-original", name: "Original", archived: false,
-    working_dir: "/work", status: "idle", created_at: "now", message_count: 0, transcript_integrity: "ok",
+    working_dir: "/work", status: "idle", created_at: "now", message_count: 0, transcript_integrity: "ok", configuration_version: 0,
     origin: "user", backend: "codex", can_steer: true, can_fork: true, fork_is_full_copy: false,
     can_observe_context: true, can_compact: false };
   useSessionStore.setState({ sessions: [], archivedSessions: [original], activeSessionId: "another-session", sessionMembership: {} });
@@ -174,20 +175,21 @@ describe("archive replacement settings", () => {
   it.each([
     { model: "gpt-5.4", reasoning_effort: "high", service_tier: "fast" },
     { model: null, reasoning_effort: null, service_tier: null },
-  ])("uses the server's settings, including explicit inheritance: %j", (settings) => {
-    useSessionStore.setState({ sessions: [old, { ...old, id: event.new_session_id }] });
+  ])("keeps the complete successor settings despite a partial event: %j", (settings) => {
+    const successor = { ...old, id: event.new_session_id, configuration_version: 0 };
+    useSessionStore.setState({ sessions: [old, successor] });
     handleWsMessage({ ...event, ...settings });
     const store = useSessionStore.getState();
     expect(store.activeSessionId).toBe(old.id);
-    expect(store.sessions).toEqual([expect.objectContaining({ id: event.new_session_id, ...settings })]);
+    expect(store.sessions).toEqual([successor]);
     expect(store.archivedSessions).toEqual([expect.objectContaining({ ...old, archived: true })]);
   });
 
-  it("changes only the successor fields carried by a sparse frame", () => {
+  it("retains the complete successor when a sparse frame links it", () => {
     const successor = { ...old, id: event.new_session_id, name: "Read earlier", working_dir: "/actual" };
     useSessionStore.setState({ sessions: [old, successor] });
     handleWsMessage({ type: event.type, old_session_id: old.id, new_session_id: successor.id, model: null });
-    expect(useSessionStore.getState().sessions).toEqual([{ ...successor, model: null }]);
+    expect(useSessionStore.getState().sessions).toEqual([successor]);
     expect(useSessionStore.getState().sessionSuccessors[old.id]).toBe(successor.id);
     expect(useSessionStore.getState().activeSessionId).toBe(old.id);
   });
@@ -198,9 +200,7 @@ describe("archive replacement settings", () => {
     handleWsMessage(event);
     handleWsMessage({ type: event.type, old_session_id: old.id, model: null });
     expect(useSessionStore.getState().sessionSuccessors[old.id]).toBe(successor.id);
-    expect(useSessionStore.getState().sessions).toEqual([{
-      ...successor, name: event.name, model: null, reasoning_effort: event.reasoning_effort, service_tier: event.service_tier,
-    }]);
+    expect(useSessionStore.getState().sessions).toEqual([successor]);
     handleWsMessage({ type: event.type, old_session_id: old.id, new_session_id: null });
     expect(useSessionStore.getState().sessionSuccessors[old.id]).toBeUndefined();
   });
@@ -215,13 +215,19 @@ describe("archive replacement settings", () => {
     expect(useSessionStore.getState().activeSessionId).toBe(fresh.id);
   });
 
-  it("updates an existing successor loaded before its settings were persisted", () => {
-    useSessionStore.setState({ sessions: [old, { ...old, id: event.new_session_id, model: null }] });
+  it("preserves a newer HTTP configuration snapshot when a partial archive event arrives", () => {
+    const successor = { ...old, id: event.new_session_id, model: "saved-after-archive",
+      reasoning_effort: null, service_tier: null, configuration_version: 2 };
+    useSessionStore.setState({ sessions: [old] });
+    const observed = sessionList.observe(successor.id);
+    try {
+      expect(sessionList.detail(successor, observed.observation, null)).toBe(true);
+    } finally {
+      observed.finish();
+    }
     handleWsMessage(event);
-    expect(useSessionStore.getState().sessions).toEqual([expect.objectContaining({
-      id: event.new_session_id, model: event.model,
-      reasoning_effort: event.reasoning_effort, service_tier: event.service_tier,
-    })]);
+    expect(useSessionStore.getState().sessions).toEqual([successor]);
+    expect(useSessionStore.getState().sessionSuccessors[old.id]).toBe(successor.id);
   });
 });
 

@@ -1,4 +1,6 @@
 import { accountToken, enterAccountCredentials } from "./current-account";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 /**
  * End-to-end coverage of applications (docs/implemented/applications.md).
  *
@@ -45,6 +47,51 @@ async function getApp(request: APIRequestContext, name: string): Promise<AppRow>
 // ---------------------------------------------------------------------------
 // Pure UI
 // ---------------------------------------------------------------------------
+
+test("directory navigation loads relative resources after the static redirect", async ({ page, request }) => {
+  const agents = await (await request.get(`${API}/agents`, { headers })).json() as { id: string }[];
+  const created = await request.post(`${API}/applications`, {
+    headers: jsonHeaders,
+    data: {
+      name: "Static Directory Navigation", description: "Offline static files",
+      agent_id: agents[0].id, entrypoint: "pages/index.html",
+    },
+  });
+  expect(created.status()).toBe(201);
+  const app = await created.json() as AppRow;
+  const directory = "课程 # 1";
+  const appPath = `/apps/${app.id}`;
+  const nestedPath = `${appPath}/${encodeURIComponent(directory)}`;
+  const paths = [
+    { target: nestedPath, folder: join(app.app_dir, directory), name: "nested" },
+    { target: appPath, folder: app.app_dir, name: "root" },
+  ];
+  await page.context().addCookies([
+    { name: "octopus_app_token", value: accountToken(), domain: "localhost", path: "/apps" },
+  ]);
+
+  for (const { target, folder, name } of paths) {
+    mkdirSync(join(folder, "pages"), { recursive: true });
+    writeFileSync(join(folder, "pages", "index.html"), [
+      '<meta charset="utf-8"><link rel="stylesheet" href="./style.css">',
+      '<h1>Loading</h1><img src="./image.svg" alt="Sample">',
+      '<script src="./script.js"></script>',
+    ].join(""));
+    writeFileSync(join(folder, "script.js"), `document.querySelector("h1").textContent = "${name} script loaded";`);
+    writeFileSync(join(folder, "style.css"), "h1 { color: rgb(27, 43, 59); }");
+    writeFileSync(join(folder, "image.svg"), '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"/>');
+
+    const query = "?view=preview%2fnotes&view=second";
+    const response = await page.goto(target + query);
+    expect(response?.status()).toBe(200);
+    const url = new URL(page.url());
+    expect(url.pathname + url.search).toBe(`${target}/${query}`);
+    const heading = page.getByRole("heading");
+    await expect(heading).toHaveText(`${name} script loaded`);
+    await expect(heading).toHaveCSS("color", "rgb(27, 43, 59)");
+    await expect(page.getByRole("img", { name: "Sample" })).toHaveJSProperty("naturalWidth", 12);
+  }
+});
 
 test.describe("Applications UI", () => {
   async function draftApps(page: Page) {

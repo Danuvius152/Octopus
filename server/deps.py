@@ -27,6 +27,7 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .application_resources import ApplicationDataRecord
 from .credential_use import CredentialUse
 from .mcp_identity import McpScope, scope_is_authorized, scope_is_live
 from .mcp_identity import verify as verify_mcp_scope
@@ -247,34 +248,35 @@ ViewerToken = Annotated[str, Depends(viewer_token)]
 
 @dataclass(frozen=True)
 class ViewerAuthority:
-    user_id: str | None
+    user_id: str
     extra_roots: list[str]
+    applications: tuple[ApplicationDataRecord, ...] = ()
 
 
 async def resolve_viewer_authority(token: str) -> ViewerAuthority | None:
     """Resolve the credential and its account's directory grants together."""
-    if not token:
+    if not token or _user_manager is None:
         return None
-    user = await _account_for_bearer(token)
-    if user is None:
-        scope = verify_mcp_scope(token)
-        if scope is None or scope.user_id is None or _user_manager is None:
-            return None
-        user = await _user_manager.db.get_user(scope.user_id)
-        if user is None or user["disabled_at"] or not scope_is_live(scope):
-            return None
-    # For account tokens, this row is part of the same committed read that
-    # checked revocation and account state. Runtime scopes use the current owner
-    # row and check their in-process lease after reading it.
+    db = _user_manager.db
+    account = await db.get_viewer_account(token_digest(token))
+    if account is not None:
+        user, applications = account
+        return ViewerAuthority(user["id"], decode_extra_roots(user.get("extra_roots")), applications)
+    scope = verify_mcp_scope(token)
+    if scope is None or scope.user_id is None:
+        return None
+    user = await db.get_user(scope.user_id)
+    if user is None or user["disabled_at"] or not scope_is_live(scope):
+        return None
     return ViewerAuthority(user["id"], decode_extra_roots(user.get("extra_roots")))
 
 
 async def resolve_viewer_run_authority(
-    token: str, user_id: str | None, credential_id: str | None, backend: str,
+    token: str, user_id: str, credential_id: str | None, backend: str,
     credential_use: CredentialUse | None,
 ) -> ViewerAuthority | None:
     """Authorize a viewer's model launch against contemporaneous grants and credentials."""
-    if not token or user_id is None or _user_manager is None:
+    if not token or _user_manager is None:
         return None
     scope = verify_mcp_scope(token)
     if scope is not None and (scope.user_id != user_id or not scope_is_live(scope)):

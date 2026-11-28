@@ -282,7 +282,7 @@ async def test_live_steer_reaches_the_original_active_root(live_product, tmp_pat
     manager, database, session, metrics = live_product
     # Match the live fixture's forced effort in the saved configuration too.
     # A Codex session created across engines follows its own model defaults.
-    await manager.update_session_configuration(session.id, {"reasoning_effort": "low"}, session.user_id)
+    await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "reasoning_effort": "low"}, session.user_id)
     ready, release = tmp_path / "steer-ready", tmp_path / "steer-release"
     receipt, run = await live_run(manager, session,
         "This is an active-root steering protocol check. Do not spawn helpers. "

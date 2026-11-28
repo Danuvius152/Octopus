@@ -261,7 +261,7 @@ async def test_stop_authorization_and_overall_deadline_prevent_another_business_
 
     manager, database, session, _, starts, events = native_runtime
     credential = await _bind_credential(manager, "codex")
-    await manager.update_session_configuration(session.id, {"credential_id": credential}, session.user_id)
+    await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "credential_id": credential}, session.user_id)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
     monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 3 if action == "deadline" else .3)
     if action == "deadline":
@@ -431,7 +431,7 @@ async def test_preparation_quota_failure_preserves_classification_before_transie
 
     manager, database, session, _, starts, _ = native_runtime
     credential = await _bind_credential(manager, "codex")
-    await manager.update_session_configuration(session.id, {"credential_id": credential}, session.user_id)
+    await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "credential_id": credential}, session.user_id)
     starts.clear()
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 0)
     monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", .001)

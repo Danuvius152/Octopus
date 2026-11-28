@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { ChatView } from "./ChatView";
 import { mockChatViewport } from "./chatViewport.test-support";
 import { VirtuosoMockContext } from "react-virtuoso";
+import type { ModelSettings } from "../api";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { schedules } from "../lib/scheduleList";
 import { sessions } from "../lib/sessionList";
@@ -13,7 +14,7 @@ const commandCases = commandCasesData as { message: string; mode: "read" | "main
 
 const session = {
   id: "wiki-session", name: "Wiki chat", working_dir: "/tmp",
-  created_at: "2026-10-12", status: "idle", backend: "codex",
+  created_at: "2026-10-12", status: "idle", backend: "codex", configuration_version: 0,
 } as SessionInfo;
 
 beforeEach(() => {
@@ -37,7 +38,7 @@ it("shows the configured runtime default after clearing a conversation model", a
   const selected = { ...session, model: "original-model", credential_id: "codex-login", defaults_source: "backend" } as SessionInfo;
   useSessionStore.setState({ sessions: [selected], activeSessionId: selected.id, mainView: "chat" });
   const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => init?.method === "PATCH"
-    ? Response.json({ ...selected, model: null })
+    ? Response.json({ ...selected, model: null, configuration_version: 1 })
     : Response.json({ models: [{ id: "first-candidate", name: "First candidate" }, { id: "cli-model", name: "CLI model" }],
       default_model: "cli-model" }));
   vi.stubGlobal("fetch", fetchMock);
@@ -84,16 +85,47 @@ it("keeps each login's confirmed CLI default when returning to an earlier conver
 it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
   "keeps a reopened model draft through real store return (%s, new save already pending: %s)", async (status, newPending) => {
   useSessionStore.getState().setToken("model-account");
-  const selected = { ...session, model: "original-model", reasoning_effort: null, service_tier: null };
+  const selected: SessionInfo = { ...session, model: "original-model", reasoning_effort: null,
+    service_tier: null, credential_id: null, defaults_source: "backend" };
+  const reasoningEfforts = ["low", "high"];
+  const serviceTiers = ["default", "fast"];
+  const catalog = {
+    models: [
+      { id: "original-model", name: "Original Model" },
+      { id: "old-model", name: "Old Model" },
+      { id: "new-model", name: "New Model" },
+    ].map((model) => ({ ...model, reasoning_efforts: reasoningEfforts, service_tiers: serviceTiers })),
+    reasoning_efforts: reasoningEfforts, service_tiers: serviceTiers,
+  } satisfies ModelSettings;
+  let saved: SessionInfo = selected;
   useSessionStore.setState({ sessions: [selected], activeSessionId: selected.id, mainView: "chat", dispatchGeneration: "model-service" });
-  const saves: { body: unknown; reply: ReturnType<typeof deferred<Response>> }[] = [];
-  vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+  type Save = {
+    body: Pick<SessionInfo, "model"> & Partial<Pick<SessionInfo, "reasoning_effort">> & {
+      expected_backend: string;
+      expected_configuration_version: number;
+    };
+    reply: ReturnType<typeof deferred<Response>>;
+  };
+  const saves: Save[] = [];
+  const accept = ({ body, reply }: Save) => {
+    const { expected_backend, expected_configuration_version, ...changes } = body;
+    expect(expected_backend).toBe(saved.backend);
+    expect(expected_configuration_version).toBe(saved.configuration_version);
+    const updated = { ...saved, ...changes, configuration_version: saved.configuration_version + 1 };
+    const model = catalog.models.find((option) => option.id === updated.model);
+    expect(model).toBeDefined();
+    if (updated.reasoning_effort) expect(model?.reasoning_efforts).toContain(updated.reasoning_effort);
+    saved = updated;
+    reply.resolve(Response.json(saved));
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: unknown, init?: RequestInit) => {
     if (init?.method === "PATCH") {
       const reply = deferred<Response>();
       saves.push({ body: JSON.parse(String(init.body)), reply });
       return reply.promise;
     }
-    return Response.json({ models: [{ id: "old-model", name: "Old Model" }, { id: "new-model", name: "New Model" }], reasoning_efforts: ["low", "high"], service_tiers: ["default", "fast"] });
+    if (String(url).endsWith("/info")) return Response.json(saved);
+    return Response.json(catalog);
   }));
   try {
     renderChat();
@@ -103,8 +135,12 @@ it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
     const initial = settings();
     await waitFor(() => expect(initial.getByLabelText("Model")).toBeEnabled());
     fireEvent.change(initial.getByLabelText("Model"), { target: { value: "old-model" } });
+    fireEvent.change(initial.getByLabelText("Reasoning effort"), { target: { value: "high" } });
     fireEvent.click(initial.getByRole("button", { name: "Apply" }));
     expect(saves).toHaveLength(1);
+    expect(saves[0].body).toEqual({
+      model: "old-model", reasoning_effort: "high", expected_backend: "codex", expected_configuration_version: 0,
+    });
     act(() => {
       useSessionStore.getState().openManage("connectors");
       useSessionStore.getState().showChat();
@@ -115,11 +151,11 @@ it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
     await waitFor(() => expect(model).toBeEnabled());
     fireEvent.change(model, { target: { value: "new-model" } });
     if (newPending) fireEvent.click(draft.getByRole("button", { name: "Apply" }));
-    await act(async () => saves[0].reply.resolve(status === 200
-      ? Response.json({ ...selected, model: "old-model", reasoning_effort: "high" })
-      : Response.json({ detail: "Old opening refusal" }, { status })));
-    expect(useSessionStore.getState().sessions[0]).toMatchObject(status === 200
-      ? { model: "old-model", reasoning_effort: "high" } : { model: "original-model", reasoning_effort: null });
+    await act(async () => {
+      if (status === 200) accept(saves[0]);
+      else saves[0].reply.resolve(Response.json({ detail: "Old opening refusal" }, { status }));
+    });
+    expect(useSessionStore.getState().sessions[0]).toMatchObject(saved);
     const current = settings();
     expect(current.getByLabelText("Model")).toHaveValue("new-model");
     expect(current.getByLabelText("Reasoning effort")).toHaveValue("");
@@ -129,8 +165,20 @@ it.each([[200, false], [400, false], [200, true], [400, true]] as const)(
     expect(screen.queryByText("Old opening refusal")).toBeNull();
     expect(useSessionStore.getState().messages[session.id] ?? []).toEqual([]);
     if (!newPending) fireEvent.click(save);
-    expect(saves.map((save) => save.body)).toEqual([{ model: "old-model", expected_backend: "codex" }, { model: "new-model", expected_backend: "codex" }]);
-    await act(async () => saves[1].reply.resolve(Response.json({ ...selected, model: "new-model", reasoning_effort: "high" })));
+    expect(saves).toHaveLength(2);
+    expect(saves[1].body).toEqual({ model: "new-model", expected_backend: "codex", expected_configuration_version: 0 });
+    if (status === 200) {
+      await act(async () => saves[1].reply.resolve(Response.json({
+        detail: { code: "configuration_version_conflict" },
+      }, { status: 409 })));
+      expect(await settings().findByText("Current saved settings")).toBeVisible();
+      expect(settings().getByLabelText("Model")).toHaveValue("new-model");
+      expect(settings().getByLabelText("Reasoning effort")).toHaveValue("high");
+      expect(saves).toHaveLength(2);
+      fireEvent.click(settings().getByRole("button", { name: "Apply changes" }));
+      expect(saves[2].body).toEqual({ model: "new-model", expected_backend: "codex", expected_configuration_version: 1 });
+    }
+    await act(async () => accept(saves.at(-1)!));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(useSessionStore.getState().messages[session.id]).toEqual([expect.objectContaining({ type: "notice", content: "Conversation settings apply from the next turn." })]);
   } finally { vi.unstubAllGlobals(); }

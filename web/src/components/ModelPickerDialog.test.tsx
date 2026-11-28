@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { sessions } from "../lib/sessionList";
 import { useSessionStore, type Agent, type CredentialInfo, type SessionInfo } from "../stores/sessionStore";
@@ -9,7 +9,7 @@ import { backendCatalogFixture } from "../test-support/backendCatalog";
 const session = {
   id: "session1", name: "Existing", working_dir: "/tmp", created_at: "2026-10-11",
   status: "idle", backend: "codex", model: "model-a", reasoning_effort: null,
-  claude_session_id: "original-thread", agent_id: "agent1",
+  claude_session_id: "original-thread", agent_id: "agent1", configuration_version: 2,
 } as SessionInfo;
 const catalog = {
   default_model: "model-a", default_reasoning_effort: "max",
@@ -49,10 +49,301 @@ it("defaults to Normal and changes only speed while retaining the conversation",
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
-  expect(JSON.parse(String(request?.[1].body))).toEqual({ service_tier: "fast", expected_backend: "codex" });
+  expect(JSON.parse(String(request?.[1].body))).toEqual({ service_tier: "fast", expected_backend: "codex", expected_configuration_version: 2 });
   expect(useSessionStore.getState().sessions[0]).toMatchObject({
     model: "model-a", reasoning_effort: null, service_tier: "fast", claude_session_id: "original-thread",
   });
+});
+
+it("shows the newer configuration and waits for confirmation before retrying the retained draft", async () => {
+  const opened = { ...session, reasoning_effort: "low", service_tier: "fast" as const };
+  const current = { ...opened, configuration_version: 3, model: "model-b",
+    reasoning_effort: "high", service_tier: "default" as const };
+  const patches: unknown[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      if (patches.length === 1) return json({ detail: {
+        code: "configuration_version_conflict", message: "The conversation settings changed.",
+      } }, 409);
+      return json({ ...current, ...patch, configuration_version: 4 });
+    }
+    return json(String(url).endsWith("/info") ? current : catalog);
+  });
+  const close = vi.fn();
+  const { rerender } = render(<ModelPickerDialog session={opened} open onOpenChange={close} />);
+  const effort = await screen.findByLabelText("Reasoning effort");
+  await waitFor(() => expect(effort).toBeEnabled());
+  rerender(<ModelPickerDialog session={current} open onOpenChange={close} />);
+  fireEvent.change(effort, { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+  expect(await screen.findByText("Current saved settings")).toBeVisible();
+  await waitFor(() => expect(screen.getByLabelText("Model")).toHaveDisplayValue("Model B"));
+  expect(effort).toHaveValue("");
+  expect(patches).toEqual([{ reasoning_effort: null, expected_backend: "codex", expected_configuration_version: 2 }]);
+  expect(close).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches).toEqual([
+    { reasoning_effort: null, expected_backend: "codex", expected_configuration_version: 2 },
+    { reasoning_effort: null, expected_backend: "codex", expected_configuration_version: 3 },
+  ]);
+});
+
+it.each([false, true])("rebases edits after an unconfirmed engine switch (switch back: %s)", async (switchBack) => {
+  const opened = { ...session, claude_session_id: null, has_inputs: false, message_count: 0 };
+  const current: SessionInfo = { ...opened, backend: "claude-code", defaults_source: "backend",
+    model: "model-b", reasoning_effort: "low", service_tier: "default", configuration_version: 3 };
+  const patches: Record<string, unknown>[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      if (patches.length === 1) throw new TypeError("Connection lost");
+      if (patches.length === 2) return json({ detail: { code: "configuration_version_conflict" } }, 409);
+      return json({ ...current, ...patch, configuration_version: 4 });
+    }
+    if (String(url).endsWith("/info")) return json(current);
+    if (String(url).endsWith(`/sessions/${opened.id}`)) return json({ ...current, messages: [] });
+    return json(catalog);
+  });
+  const close = vi.fn();
+  render(<ModelPickerDialog session={opened} open onOpenChange={close} />);
+  fireEvent.click(screen.getByRole("radio", { name: "Claude Code" }));
+  await waitFor(() => expect(screen.getByLabelText("Reasoning effort")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "high" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(await screen.findByText("Connection lost")).toBeVisible();
+  if (switchBack) fireEvent.click(screen.getByRole("radio", { name: "Codex" }));
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(await screen.findByText("Current saved settings")).toBeVisible();
+  await waitFor(() => expect(screen.getByLabelText("Model")).toHaveDisplayValue(switchBack ? "Agent default (Model A)" : "Model B"));
+  expect(patches).toHaveLength(2);
+  expect(close).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches[2]).toEqual({
+    expected_backend: "claude-code", expected_configuration_version: 3,
+    ...(switchBack ? { backend: "codex", reasoning_effort: null, model: null, service_tier: null, credential_id: null }
+      : { backend: "claude-code", reasoning_effort: "high" }),
+  });
+});
+
+it("keeps edits to both engines when the saved engine changes during a conflict", async () => {
+  const opened = { ...session, claude_session_id: null, has_inputs: false, message_count: 0 };
+  const saved: SessionInfo = { ...opened, backend: "claude-code", defaults_source: "backend",
+    model: "model-a", reasoning_effort: "high", configuration_version: 3 };
+  const patches: unknown[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      if (patches.length === 1) return json({ detail: { code: "configuration_version_conflict" } }, 409);
+      return json({ ...saved, ...patch, configuration_version: 4 });
+    }
+    return json(String(url).endsWith("/info") ? saved : catalog);
+  });
+  const close = vi.fn();
+  render(<ModelPickerDialog session={opened} open onOpenChange={close} />);
+  const chooseEngine = (name: string) => fireEvent.click(screen.getByRole("radio", { name }));
+  const chooseField = async (name: string, value: string) => {
+    const selector = await screen.findByLabelText(name);
+    await waitFor(() => expect(selector).toBeEnabled());
+    fireEvent.change(selector, { target: { value } });
+  };
+  chooseEngine("Claude Code");
+  await chooseField("Model", "model-b");
+  await chooseField("Reasoning effort", "low");
+  await chooseField("Reasoning effort", "");
+  chooseEngine("Codex");
+  await chooseField("Reasoning effort", "high");
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+  expect(await screen.findByText("Current saved settings")).toBeVisible();
+  expect(screen.getByLabelText("Reasoning effort")).toHaveValue("high");
+  chooseEngine("Claude Code");
+  await waitFor(() => expect(screen.getByLabelText("Model")).toHaveDisplayValue("Model B"));
+  expect(screen.getByLabelText("Reasoning effort")).toHaveValue("");
+  expect(patches).toHaveLength(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches[1]).toEqual({ backend: "claude-code", model: "model-b", reasoning_effort: null,
+    expected_backend: "claude-code", expected_configuration_version: 3 });
+});
+
+it.each(["both engines", "engine catalog down", "Claude only"] as const)(
+  "can inspect an earlier draft and confirm a clear after another page switches engines (%s)", async (availability) => {
+  const opened = { ...session, model: "model-b", reasoning_effort: "low", claude_session_id: null };
+  const saved: SessionInfo = { ...opened, backend: "claude-code", defaults_source: "backend",
+    model: "model-b", reasoning_effort: "high", configuration_version: 3 };
+  const patches: unknown[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      if (patches.length === 1) return json({ detail: { code: "configuration_version_conflict" } }, 409);
+      return json({ ...saved, ...patch, configuration_version: 4 });
+    }
+    if (String(url).endsWith("/api/backends")) return json({ detail: "Unavailable" }, 503);
+    return json(String(url).endsWith("/info") ? saved : catalog);
+  });
+  if (availability === "engine catalog down") useSessionStore.setState({ backendCatalog: { status: "idle" } });
+  if (availability === "Claude only") useSessionStore.setState({
+    backendCatalog: { status: "ready", catalog: backendCatalogFixture(["claude-code"]) },
+  });
+  const close = vi.fn();
+  render(<ModelPickerDialog session={opened} open onOpenChange={close} />);
+  const effort = await screen.findByLabelText("Reasoning effort");
+  await waitFor(() => expect(effort).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Model"), { target: { value: "model-a" } });
+  fireEvent.change(effort, { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(await screen.findByText("Current saved settings")).toBeVisible();
+  expect(screen.getByRole("radio", { name: "Claude Code" })).toBeChecked();
+  await waitFor(() => expect(screen.getByLabelText("Reasoning effort")).toHaveValue(""));
+  expect(screen.getByLabelText("Model")).toHaveDisplayValue("Model B");
+  const retained = screen.getByRole("region", { name: "Unapplied edits for Codex" });
+  expect(within(retained).getByText("model-a")).toBeVisible();
+  expect(within(retained).getByText(/Applying the current changes discards these edits/)).toBeVisible();
+  if (availability === "both engines") {
+    expect(screen.getByRole("radio", { name: "Codex" })).toBeEnabled();
+  } else {
+    expect(screen.queryByRole("radio", { name: "Codex" })).toBeNull();
+    expect(within(retained).getByText(/Codex is currently unavailable/)).toBeVisible();
+  }
+  if (availability === "engine catalog down") {
+    await waitFor(() => expect(useSessionStore.getState().backendCatalog.status).toBe("failed"));
+  }
+  expect(patches).toEqual([{ model: "model-a", reasoning_effort: null,
+    expected_backend: "codex", expected_configuration_version: 2 }]);
+  expect(close).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches[1]).toEqual({ reasoning_effort: null,
+    expected_backend: "claude-code", expected_configuration_version: 3 });
+});
+
+it.each([
+  ["Clear reasoning effort override", null],
+  ["Use earlier reasoning effort choice (high)", "high"],
+] as const)("requires a choice when a second conflict restores an older draft: %s", async (choice, effortToSave) => {
+  const opened = { ...session, reasoning_effort: "low", claude_session_id: null };
+  const claude: SessionInfo = { ...opened, backend: "claude-code", defaults_source: "backend",
+    reasoning_effort: "high", configuration_version: 3 };
+  const codex: SessionInfo = { ...opened, reasoning_effort: "low", configuration_version: 4 };
+  const patches: unknown[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      if (patches.length < 3) return json({ detail: { code: "configuration_version_conflict" } }, 409);
+      return json({ ...codex, ...patch, configuration_version: 5 });
+    }
+    return json(String(url).endsWith("/info") ? (patches.length === 1 ? claude : codex) : catalog);
+  });
+  const close = vi.fn();
+  render(<ModelPickerDialog session={opened} open onOpenChange={close} />);
+  await waitFor(() => expect(screen.getByLabelText("Reasoning effort")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "high" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(screen.getByRole("radio", { name: "Claude Code" })).toBeChecked());
+  await waitFor(() => expect(screen.getByLabelText("Reasoning effort")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+
+  await waitFor(() => expect(screen.getByRole("radio", { name: "Codex" })).toBeChecked());
+  const apply = screen.getByRole("button", { name: "Apply changes" });
+  expect(apply).toBeDisabled();
+  expect(patches).toEqual([
+    { reasoning_effort: "high", expected_backend: "codex", expected_configuration_version: 2 },
+    { reasoning_effort: null, expected_backend: "claude-code", expected_configuration_version: 3 },
+  ]);
+
+  fireEvent.click(screen.getByRole("button", { name: choice }));
+  expect(patches).toHaveLength(2);
+  expect(apply).toBeEnabled();
+  fireEvent.click(apply);
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches[2]).toEqual({ reasoning_effort: effortToSave,
+    expected_backend: "codex", expected_configuration_version: 4 });
+});
+
+it("shows the pending clear even if the new engine catalog is unavailable", async () => {
+  const opened = { ...session, reasoning_effort: "low", claude_session_id: null };
+  const saved: SessionInfo = { ...opened, backend: "claude-code", defaults_source: "backend",
+    reasoning_effort: "high", configuration_version: 3 };
+  const patches: unknown[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      if (patches.length === 1) return json({ detail: { code: "configuration_version_conflict" } }, 409);
+      return json({ ...saved, ...patch, configuration_version: 4 });
+    }
+    if (String(url).endsWith("/info")) return json(saved);
+    if (String(url).includes("/claude-code/models")) return json({ detail: "Catalog unavailable" }, 503);
+    return json(catalog);
+  });
+  const close = vi.fn();
+  render(<ModelPickerDialog session={opened} open onOpenChange={close} />);
+  const effort = await screen.findByLabelText("Reasoning effort");
+  await waitFor(() => expect(effort).toBeEnabled());
+  fireEvent.change(effort, { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Catalog unavailable");
+  const changes = screen.getByRole("region", { name: "Changes to apply" });
+  expect(within(changes).getByText("Reasoning effort")).toBeVisible();
+  expect(within(changes).getByText("Use default")).toBeVisible();
+  expect(patches).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches[1]).toEqual({ reasoning_effort: null,
+    expected_backend: "claude-code", expected_configuration_version: 3 });
+});
+
+it("can reselect the saved model and prevent another page's delayed save", async () => {
+  const opened = { ...session, configuration_version: 0 };
+  let saved = opened;
+  const olderPatch = { expected_backend: "codex", expected_configuration_version: 0, model: "model-b" };
+  const olderReceived = deferred<void>();
+  const pageBFinished = deferred<void>();
+  const patches: unknown[] = [];
+  fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+    if (init?.method !== "PATCH") return json(catalog);
+    const patch = JSON.parse(String(init.body));
+    patches.push(patch);
+    if (patch.model === olderPatch.model) {
+      olderReceived.resolve();
+      await pageBFinished.promise;
+    }
+    if (patch.expected_configuration_version !== saved.configuration_version) {
+      return json({ detail: { code: "configuration_version_conflict" } }, 409);
+    }
+    saved = { ...saved, model: patch.model, configuration_version: saved.configuration_version + 1 };
+    return json(saved);
+  });
+  const older = fetch("/api/sessions/session1", { method: "PATCH", body: JSON.stringify(olderPatch) });
+  await olderReceived.promise;
+  try {
+    const close = vi.fn();
+    render(<ModelPickerDialog session={opened} open onOpenChange={close} />);
+    const selector = await screen.findByLabelText("Model");
+    await waitFor(() => expect(selector).toBeEnabled());
+    fireEvent.change(selector, { target: { value: "model-b" } });
+    fireEvent.change(selector, { target: { value: "model-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  } finally {
+    pageBFinished.resolve();
+  }
+  expect((await older).status).toBe(409);
+  expect(patches).toEqual([olderPatch, { ...olderPatch, model: "model-a" }]);
+  expect(saved).toMatchObject({ model: "model-a", configuration_version: 1 });
 });
 
 it("uses the conversation engine and shows inherited values on the individual fields", async () => {
@@ -123,7 +414,7 @@ it("loads a different engine's directory and sends the complete settings of an e
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
   expect(JSON.parse(String(request?.[1].body))).toEqual({
-    backend: "claude-code", expected_backend: "codex", model: "sonnet",
+    backend: "claude-code", expected_backend: "codex", expected_configuration_version: 2, model: "sonnet",
     reasoning_effort: null, service_tier: null, credential_id: null,
   });
   expect(useSessionStore.getState().sessions[0]).toMatchObject({ backend: "claude-code", defaults_source: "backend" });
@@ -179,7 +470,7 @@ it("clears saved overrides using the known default when the catalog fails", asyn
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
   expect(JSON.parse(String(request?.[1].body))).toEqual({
-    expected_backend: "codex", model: null, reasoning_effort: null, service_tier: null,
+    expected_backend: "codex", expected_configuration_version: 2, model: null, reasoning_effort: null, service_tier: null,
   });
 });
 
@@ -251,7 +542,7 @@ it("repairs an incompatible inherited credential and effort in one request", asy
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   const changes = fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH");
   expect(changes).toHaveLength(1);
-  expect(JSON.parse(String(changes[0][1].body))).toEqual({ credential_id: "codex-key", reasoning_effort: "low", expected_backend: "codex" });
+  expect(JSON.parse(String(changes[0][1].body))).toEqual({ credential_id: "codex-key", reasoning_effort: "low", expected_backend: "codex", expected_configuration_version: 2 });
   expect(useSessionStore.getState().sessions[0]).toMatchObject({
     backend: "codex", model: "model-b", credential_id: "codex-key", reasoning_effort: "low", claude_session_id: "original-thread",
   });
@@ -274,7 +565,7 @@ it("restores credential inheritance without changing other overrides", async () 
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
-  expect(JSON.parse(String(request?.[1].body))).toEqual({ credential_id: null, expected_backend: "codex" });
+  expect(JSON.parse(String(request?.[1].body))).toEqual({ credential_id: null, expected_backend: "codex", expected_configuration_version: 2 });
   expect(useSessionStore.getState().sessions[0]).toMatchObject({ model: "model-a", reasoning_effort: "high", credential_id: null });
 });
 
@@ -336,7 +627,7 @@ it("can explicitly use Normal over an agent's Fast default and restore inheritan
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(true));
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
-  expect(JSON.parse(String(request?.[1].body))).toEqual({ service_tier: "default", expected_backend: "codex" });
+  expect(JSON.parse(String(request?.[1].body))).toEqual({ service_tier: "default", expected_backend: "codex", expected_configuration_version: 2 });
   const normal = { ...session, service_tier: "default" as const };
   rerender(<ModelPickerDialog session={normal} open={false} onOpenChange={vi.fn()} />);
   rerender(<ModelPickerDialog session={normal} open onOpenChange={vi.fn()} />);
@@ -345,7 +636,7 @@ it("can explicitly use Normal over an agent's Fast default and restore inheritan
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(2));
   const requests = fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH");
-  expect(JSON.parse(String(requests[1][1].body))).toEqual({ service_tier: null, expected_backend: "codex" });
+  expect(JSON.parse(String(requests[1][1].body))).toEqual({ service_tier: null, expected_backend: "codex", expected_configuration_version: 2 });
 });
 
 it.each(["codex", "claude-code"] as const)("%s changes effort alone and preserves the model, thread and concurrent sessions", async (backend) => {
@@ -361,7 +652,7 @@ it.each(["codex", "claude-code"] as const)("%s changes effort alone and preserve
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
-  expect(JSON.parse(String(request?.[1].body))).toEqual({ reasoning_effort: "high", expected_backend: backend });
+  expect(JSON.parse(String(request?.[1].body))).toEqual({ reasoning_effort: "high", expected_backend: backend, expected_configuration_version: 2 });
   const updated = useSessionStore.getState().sessions;
   expect(updated).toHaveLength(2);
   expect(updated[0]).toMatchObject({ model: "model-a", reasoning_effort: "high", claude_session_id: "original-thread" });
@@ -378,7 +669,7 @@ it("offers strengths supported by the selected model and can restore inheritance
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(true));
   const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
-  expect(JSON.parse(String(request?.[1].body))).toEqual({ model: "model-b", reasoning_effort: null, expected_backend: "codex" });
+  expect(JSON.parse(String(request?.[1].body))).toEqual({ model: "model-b", reasoning_effort: null, expected_backend: "codex", expected_configuration_version: 2 });
 });
 
 it("shows a server rejection and keeps the saved settings", async () => {
@@ -392,7 +683,7 @@ it("shows a server rejection and keeps the saved settings", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   expect(await screen.findByText("Effort unavailable for this model")).toBeVisible();
   fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "" } });
-  expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
   expect(close).not.toHaveBeenCalled();
   expect(useSessionStore.getState().sessions[0].reasoning_effort).toBeNull();
 });
@@ -414,7 +705,10 @@ it.each([
     if (init?.method === "PATCH") {
       const patch = JSON.parse(String(init.body));
       patches.push(patch);
-      saved = { ...saved, ...patch };
+      if (patch.expected_configuration_version !== saved.configuration_version) {
+        return json({ detail: { code: "configuration_version_conflict" } }, 409);
+      }
+      saved = { ...saved, ...patch, configuration_version: saved.configuration_version + 1 };
       if (patches.length === 1) {
         if (failure === "network") throw new Error(message);
         if (failure === "deadline") return originalReply.promise;
@@ -423,6 +717,7 @@ it.each([
       return json(saved);
     }
     if (String(url).includes("/models")) return json(catalog);
+    if (String(url).endsWith("/info")) return json(saved);
     if (String(url).endsWith(`/api/sessions/${session.id}?view=browser`)) return snapshot.promise;
     if (String(url).endsWith("/api/sessions")) return json([saved]);
     return json([]);
@@ -468,10 +763,15 @@ it.each([
   expect(screen.getByLabelText("Speed")).toHaveValue("");
   expect(apply).toBeEnabled();
   fireEvent.click(apply);
+  expect(await screen.findByText("Current saved settings")).toBeVisible();
+  expect(effort).toHaveValue("");
+  expect(close).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Apply changes" }));
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   expect(patches).toEqual([
-    { reasoning_effort: "low", expected_backend: "codex" },
-    { reasoning_effort: null, expected_backend: "codex" },
+    { reasoning_effort: "low", expected_backend: "codex", expected_configuration_version: 2 },
+    { reasoning_effort: null, expected_backend: "codex", expected_configuration_version: 2 },
+    { reasoning_effort: null, expected_backend: "codex", expected_configuration_version: 3 },
   ]);
   expect(saved).toMatchObject({ reasoning_effort: null, service_tier: "fast" });
 });
@@ -485,7 +785,7 @@ it("keeps an earlier unconfirmed field after a later PATCH is rejected", async (
     const patch = JSON.parse(String(init.body));
     patches.push(patch);
     if (patches.length === 1) throw new Error("Connection lost after save");
-    if ("service_tier" in patch) return json({ detail: "Speed unavailable for this model" }, 400);
+    if (patch.service_tier === "fast") return json({ detail: "Speed unavailable for this model" }, 400);
     return json({ ...session, ...patch });
   });
   const close = vi.fn();
@@ -508,9 +808,9 @@ it("keeps an earlier unconfirmed field after a later PATCH is rejected", async (
   fireEvent.click(apply);
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));
   expect(patches).toEqual([
-    { reasoning_effort: "low", expected_backend: "codex" },
-    { reasoning_effort: null, service_tier: "fast", expected_backend: "codex" },
-    { reasoning_effort: null, expected_backend: "codex" },
+    { reasoning_effort: "low", expected_backend: "codex", expected_configuration_version: 2 },
+    { reasoning_effort: null, service_tier: "fast", expected_backend: "codex", expected_configuration_version: 2 },
+    { reasoning_effort: null, service_tier: null, expected_backend: "codex", expected_configuration_version: 2 },
   ]);
 });
 

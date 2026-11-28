@@ -29,7 +29,7 @@ def failed(info, message="Provider refused the request"):
 async def test_unrelated_401_in_failed_root_does_not_revoke_credential(native_runtime, tmp_path):
     manager, database, session, mode, starts, events = native_runtime
     credential = await _bind_credential(manager, "codex")
-    await manager.update_session_configuration(session.id, {"credential_id": credential}, session.user_id)
+    await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "credential_id": credential}, session.user_id)
     mode[0] = "control_output"
     receipt = await manager.start_message(session.id, "Use the connector")
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)
@@ -46,7 +46,7 @@ async def test_unrelated_401_in_failed_root_does_not_revoke_credential(native_ru
 async def test_provider_auth_without_adoption_proof_preserves_current_login(native_runtime, tmp_path, info):
     manager, database, session, mode, starts, events = native_runtime
     credential = await _bind_credential(manager, "codex")
-    await manager.update_session_configuration(session.id, {"credential_id": credential}, session.user_id)
+    await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "credential_id": credential}, session.user_id)
     mode[0] = "control_output"
     receipt = await manager.start_message(session.id, "Original request")
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)

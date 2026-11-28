@@ -2631,7 +2631,9 @@ test.describe("/model", () => {
     });
     expect(imported.ok()).toBeTruthy();
     const old = await imported.json();
-    const updated = await request.patch(`${API}/sessions/${old.id}`, { headers, data: { ...settings, expected_backend: "codex" } });
+    const updated = await request.patch(`${API}/sessions/${old.id}`, {
+      headers, data: { ...settings, expected_backend: "codex", expected_configuration_version: old.configuration_version },
+    });
     expect(updated.ok()).toBeTruthy();
     await login(page);
     await page.locator(".session-item .session-name", { hasText: "Archive Settings Probe" }).click();

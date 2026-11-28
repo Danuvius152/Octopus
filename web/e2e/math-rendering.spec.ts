@@ -41,10 +41,6 @@ test("renders math and local fonts in chat and Markdown file preview", async ({ 
     await page.locator(".session-item .session-name", { hasText: name }).click();
     await renderedMath(page.locator(".msg-assistant .msg-content"));
 
-    // Isolate model-based filename resolution; the actual file/meta reads,
-    // Markdown renderer, CSS and font requests still run through the product.
-    await page.route(`**/api/sessions/${sessionId}/showme/resolve`, (route) =>
-      route.fulfill({ json: { path: "equations.md" } }));
     await page.locator(".chat-input-bar textarea").fill("/showme equations.md");
     await page.locator("button.btn-send").click();
     const dialog = page.getByRole("dialog");

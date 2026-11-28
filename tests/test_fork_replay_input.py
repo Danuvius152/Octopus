@@ -254,7 +254,7 @@ async def test_actual_utf8_frame_boundary_includes_enhancements_but_not_other_rp
     text = '中"\\\n' * 5000
 
     async def send(child, client_id):
-        await manager.update_session_configuration(child.id, {"model": "fixture", "reasoning_effort": "low"})
+        await manager.update_session_configuration(child.id, {"expected_backend": child.backend, "expected_configuration_version": child.configuration_version, "model": "fixture", "reasoning_effort": "low"})
         mode[0] = "rejected"
         await submit_client_message(manager, child.id, "Refuse before acceptance", [], "unsent", wiki_mode=None)
         await wait_dispatch_idle(manager, child.id)

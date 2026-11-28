@@ -85,7 +85,7 @@ async def test_python_producers_match_the_browser_samples(tmp_path, request, mon
         }, user["id"])
         assert samples["command_receipt"]["accepted"] is True
 
-        await manager.update_session_configuration(session.id, {"model": "context-model"}, user["id"])
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "context-model"}, user["id"])
 
         await _publish(manager, "agent_updated", agent)
         await db.save_application(app_id="application", name="Contract application", app_dir=str(tmp_path),

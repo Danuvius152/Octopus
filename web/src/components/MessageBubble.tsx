@@ -32,7 +32,8 @@ import { ToolInputDetails } from "./ToolInputDetails";
 import { nativeWorkKey } from "../lib/nativeOutput";
 import { chatRehypePlugins, chatRemarkPlugins } from "./chatMarkdown";
 import { markdownImageOptions } from "./MarkdownImage";
-import { ChatLink, chatLinkUrl } from "./MarkdownFileLink";
+import { chatLinkUrl } from "../lib/fileReference";
+import { ChatLink } from "./MarkdownFileLink";
 import {
   toolResultCardClass, toolResultHeaderClass, toolResultIconClass, toolResultLabelClass,
   toolResultPresentation, toolResultPreviewClass,

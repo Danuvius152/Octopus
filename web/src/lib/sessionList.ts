@@ -10,7 +10,6 @@ import { AgentChatCreations } from "./agentChatCreations";
 import { RequestDeadline } from "./requestDeadline";
 import type { SessionArchiveResult, SessionPresence } from "../api";
 
-type ArchiveFields = Partial<Pick<SessionInfo, "name" | "model" | "reasoning_effort" | "service_tier">>;
 
 interface Scope { account: number; token: string; generation: string | null; connection: number }
 export interface SessionObservation {
@@ -524,15 +523,28 @@ export class SessionList {
     this.publishChatRows([info], "confirmed", liveObservation);
     return true;
   }
-  patch(id: string, fields: Partial<SessionInfo>, observation?: SessionObservation): boolean {
+  patch(id: string, fields: Partial<Pick<SessionInfo, "name" | "status" | "transcript_integrity">>, observation?: SessionObservation): boolean {
     if (!this.canConfirm(observation)) return false;
     const store = useSessionStore.getState();
     this.commit(store.sessions.map((row) => row.id === id ? { ...row, ...fields } : row),
       store.archivedSessions.map((row) => row.id === id ? { ...row, ...fields } : row));
     return true;
   }
+  settingsSaved(info: SessionInfo, observation: SessionObservation): boolean {
+    if (!this.canConfirm(observation)) return false;
+    const store = useSessionStore.getState();
+    const { backend, defaults_source, has_inputs, configuration_version, model, reasoning_effort,
+      service_tier, credential_id, can_steer, can_observe_context, can_compact, compact_unavailable_reason,
+      can_fork } = info;
+    const apply = (row: SessionInfo) => row.id === info.id && row.configuration_version <= configuration_version
+      ? { ...row, backend, defaults_source, has_inputs, configuration_version, model, reasoning_effort,
+        service_tier, credential_id, can_steer, can_observe_context, can_compact, compact_unavailable_reason, can_fork }
+      : row;
+    this.commit(store.sessions.map(apply), store.archivedSessions.map(apply));
+    return true;
+  }
   archive(id: string, observation?: SessionObservation, successorId?: string | null,
-    activity?: SessionArchiveResult, fields: ArchiveFields = {},
+    activity?: SessionArchiveResult, name?: string,
   ): boolean {
     if (!this.canConfirm(observation)) return false;
     const store = useSessionStore.getState();
@@ -540,19 +552,11 @@ export class SessionList {
     if (!store.archivedSessions.some((row) => row.id === id)) this.invalidateTarget(id, true);
     const rows = [...store.sessions, ...store.archivedSessions];
     const old = rows.find((row) => row.id === id);
-    const patch = (row: SessionInfo): SessionInfo => {
-      if (row.id === id) return { ...row, archived: true,
-        name: successorId === null && fields.name !== undefined ? fields.name : row.name };
-      if (row.id !== targetId) return row;
-      const { name, model, reasoning_effort, service_tier } = fields;
-      return { ...row,
-        ...(name !== undefined && { name }),
-        ...(model !== undefined && { model }),
-        ...(reasoning_effort !== undefined && { reasoning_effort }),
-        ...(service_tier !== undefined && { service_tier }),
-      };
-    };
-    const live = store.sessions.filter((row) => row.id !== id).map(patch);
+    // The archive frame settles membership. Successor settings come from a
+    // complete row so their values always travel with their saved version.
+    const patch = (row: SessionInfo): SessionInfo => row.id === id ? { ...row, archived: true,
+      name: successorId === null && name !== undefined ? name : row.name } : row;
+    const live = store.sessions.filter((row) => row.id !== id);
     const archived = store.archivedSessions.map(patch);
     if (old && !archived.some((row) => row.id === id)) archived.push(patch(old));
     let links: Record<string, string> | undefined;

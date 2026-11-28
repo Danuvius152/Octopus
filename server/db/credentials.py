@@ -229,26 +229,32 @@ class CredentialsMixin(DatabaseBase):
 
     async def delete_credential(self, credential_id: str) -> bool:
         async with self.transaction(write=True) as tx:
-            return await self._delete_credential(tx, credential_id)
+            deleted, _ = await self._delete_credential(tx, credential_id)
+            return deleted
 
-    async def delete_owned_credential(self, credential_id: str, user_id: str | None) -> dict[str, Any] | None:
+    async def delete_owned_credential(
+        self, credential_id: str, user_id: str | None,
+    ) -> tuple[dict[str, Any], dict[str, int]] | None:
         async with self.transaction(write=True) as tx:
             if not await owner_is_available(tx, user_id):
                 raise CredentialOwnerUnavailable("Account is unavailable")
             row = await self._get_credential(tx, credential_id, user_id)
             if row is None or row["user_id"] != user_id:
                 return None
-            await self._delete_credential(tx, credential_id)
-            return row
+            _, unbound = await self._delete_credential(tx, credential_id)
+            return row, unbound
 
-    async def _delete_credential(self, tx: Transaction, credential_id: str) -> bool:
+    async def _delete_credential(self, tx: Transaction, credential_id: str) -> tuple[bool, dict[str, int]]:
         await tx.execute("UPDATE agents SET context_settings_revision=context_settings_revision+1 WHERE credential_id=?", (credential_id,))
         # Session bindings predate the credential FK. Clear them in the
         # deletion's transaction, so a rejected delete leaves defaults
         # intact just like the agent FK does.
-        await tx.execute("UPDATE sessions SET credential_id=NULL WHERE credential_id=?", (credential_id,))
+        unbound = await tx.fetch_all(
+            "UPDATE sessions SET credential_id=NULL, configuration_version=configuration_version+1 "
+            "WHERE credential_id=? RETURNING id, configuration_version", (credential_id,),
+        )
         # ON DELETE CASCADE on credential_secrets handles the secret row.
         cursor = await tx.execute(
             "DELETE FROM backend_credentials WHERE id = ?", (credential_id,)
         )
-        return cursor.rowcount > 0
+        return cursor.rowcount > 0, {session_id: version for session_id, version in unbound}

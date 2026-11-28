@@ -2530,7 +2530,8 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
                 nonlocal attempt_count
                 attempt_count += 1
                 if attempt_count == 1:
-                    changed = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", field: after})
+                    changed = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", field: after,
+                        "expected_configuration_version": session.configuration_version})
                     assert changed.status_code == 200, changed.text
                     yield HarnessEvent(type="session_started", session_id="saved-thread")
                     yield HarnessEvent(type="error", content="stream disconnected", is_error=True)
@@ -2546,7 +2547,8 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
 
     monkeypatch.setattr(manager, "_make_run", model_run_factory(factory))
     async with await _session_client(manager, session) as client:
-        configured = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", field: before})
+        configured = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", field: before,
+            "expected_configuration_version": session.configuration_version})
         assert configured.status_code == 200, configured.text
         events = await _request_events(manager, session, "work")
         assert settings_seen == [before, before], events

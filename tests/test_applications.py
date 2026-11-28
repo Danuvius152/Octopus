@@ -25,6 +25,7 @@ import shutil
 import sqlite3
 import sys
 from collections import Counter
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
@@ -32,6 +33,7 @@ from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from starlette.routing import Mount, Router
 
 from server import deps, fork_git, fork_helpers
 from server.agent_manager import AgentManager
@@ -277,6 +279,63 @@ async def test_archive_restore_preserves_concurrent_application_worktree_release
     assert "rewind_restore_pending" not in metadata
     assert mgr.get_session(rewind.id) is None
     assert (await mgr.unarchive_session(rewind.id, rewind.user_id)).id == rewind.id
+
+
+async def test_archive_restore_confirms_live_session_when_application_releases_settled_worktree(
+    am, db, mgr, sent, models, monkeypatch,
+):
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    rewind = await mgr.fork_session(row["session_id"], 0)
+    await mgr.archive_session(rewind.id, replace=False)
+    settle = mgr._settle_rewind_restore
+    transaction = db.transaction
+    delete = db.delete_application
+    restore_read = asyncio.Event()
+    deletion_committed = asyncio.Event()
+    restore_writer = None
+    events = []
+
+    async def observe(event):
+        if event.get("type") == "session_unarchived" and event.get("session_id") == rewind.id:
+            events.append(event)
+
+    async def mark_settled(*args):
+        nonlocal restore_writer
+        metadata = await settle(*args)
+        restore_writer = asyncio.current_task()
+        return metadata
+
+    @asynccontextmanager
+    async def pause_after_restore_read(*, write=True, **kwargs):
+        async with transaction(write=write, **kwargs) as tx:
+            yield tx
+        if not write and asyncio.current_task() is restore_writer and not restore_read.is_set():
+            restore_read.set()
+            await asyncio.wait_for(deletion_committed.wait(), 5)
+
+    async def observe_deletion(app_id, **kwargs):
+        result = await delete(app_id, **kwargs)
+        if app_id == row["id"]:
+            deletion_committed.set()
+        return result
+
+    mgr.on_broadcast("restore-receipt", observe, user_id=rewind.user_id)
+    monkeypatch.setattr(mgr, "_settle_rewind_restore", mark_settled)
+    monkeypatch.setattr(db, "transaction", pause_after_restore_read)
+    monkeypatch.setattr(db, "delete_application", observe_deletion)
+    restoring = asyncio.create_task(mgr.unarchive_session(rewind.id, rewind.user_id))
+    await asyncio.wait_for(restore_read.wait(), 5)
+    try:
+        await am.delete_application(row["id"])
+    finally:
+        restored = await restoring
+    [persisted] = await db.load_sessions(session_id=rewind.id, include_archived=True)
+    assert not persisted["archived"] and mgr.get_session(rewind.id) is restored
+    assert "rewind_worktree_id" not in json.loads(persisted["fork_metadata"])
+    assert restored.fork_metadata == persisted["fork_metadata"]
+    assert len(events) == 1 and events[0]["session"]["configuration_version"] == persisted["configuration_version"]
+    assert events[0]["session"]["archived"] is False
 
 
 @pytest.mark.parametrize(("keep_files", "move_directory"), [(True, True), (True, False), (False, True)])
@@ -2931,6 +2990,68 @@ async def test_static_serves_nested_assets(client):
     assert "javascript" in resp.headers["content-type"]
 
 
+@pytest.mark.parametrize("mount", [
+    "none", "included", "stripped", "synthesized", "synthesized-trailing-slash",
+    "synthesized-with-child-mount", "without-raw-path",
+])
+async def test_static_redirects_encoded_directory_and_serves_relative_asset(client, mount):
+    created = await _api_create(client, name="Directory URLs")
+    app_dir = Path(created["app_dir"])
+    directory = app_dir / "课 # %2F"
+    directory.mkdir()
+    (directory / "index.html").write_text('<script src="./script.js"></script>')
+    (directory / "script.js").write_text("console.log('nested')")
+    server_root = {
+        "none": "",
+        "synthesized": "/site #1%2f",
+        "synthesized-trailing-slash": "/portal/",
+        "synthesized-with-child-mount": "/site #1%2f",
+    }.get(mount, "/挂 载")
+    child_mount = "/child space" if mount == "synthesized-with-child-mount" else ""
+    external_root = server_root.rstrip("/")
+    prefix = external_root + child_mount
+    encoded_prefix = quote(prefix)
+    raw_prefix = encoded_prefix.lower() if mount == "included" else encoded_prefix
+    raw_prefix_bytes = raw_prefix.encode("ascii")
+    routed_app = Router(routes=[Mount(child_mount, app=app)]) if child_mount else app
+    app_url = f"{raw_prefix}/apps/{created['id']}"
+    encoded_directory = "%e8%af%be%20%23%20%252F%2f"
+    if mount == "without-raw-path":
+        encoded_directory = "%E8%AF%BE%20%23%20%252F"
+    directory_url = f"{app_url}/{encoded_directory}"
+    query = "view=a%2fb&view=b+c&empty=&flag"
+    token = client.headers["Authorization"].removeprefix("Bearer ")
+
+    async def entry(scope, receive, send):
+        if mount == "stripped":
+            scope["path"] = scope["path"].removeprefix(prefix)
+            scope["raw_path"] = scope["raw_path"].removeprefix(raw_prefix_bytes)
+        elif mount.startswith("synthesized"):
+            # The proxy strips its external prefix, then Uvicorn prepends its configured root_path.
+            scope["path"] = server_root + scope["path"].removeprefix(external_root)
+            raw_request = scope["raw_path"].removeprefix(quote(external_root).encode("ascii"))
+            scope["raw_path"] = server_root.encode("ascii") + raw_request
+        elif mount == "without-raw-path":
+            scope.pop("raw_path")
+        await routed_app(scope, receive, send)
+
+    transport = ASGITransport(app=entry, root_path=server_root)
+    async with AsyncClient(transport=transport, base_url="http://test") as browser:
+        browser.cookies.set("octopus_app_token", token, path=f"{encoded_prefix}/apps")
+        response = await browser.get(f"{directory_url}?{query}", follow_redirects=True)
+        assert response.status_code == 200, response.text
+        assert [item.status_code for item in response.history] == [307]
+        assert response.history[0].headers["location"] == f"{directory_url}/?{query}"
+        assert response.text == '<script src="./script.js"></script>'
+        script = await browser.get(response.url.join("./script.js"))
+        assert script.status_code == 200
+        assert script.text == "console.log('nested')"
+        assert not script.history
+        canonical = await browser.get(f"{directory_url}/?{query}", follow_redirects=True)
+        assert canonical.status_code == 200
+        assert not canonical.history
+
+
 @pytest.mark.asyncio
 async def test_static_accepts_query_token_and_cookie(client):
     token = client.headers["Authorization"].removeprefix("Bearer ")
@@ -3035,10 +3156,47 @@ async def test_static_missing_file_and_missing_app_are_404(client):
 
 @pytest.mark.asyncio
 async def test_static_bare_app_url_redirects_to_a_trailing_slash(client):
-    created = await _api_create(client, name="Redirected")
-    resp = await client.get(f"/apps/{created['id']}", headers=client.headers)
-    assert resp.status_code in (307, 308)
-    assert resp.headers["location"] == f"/apps/{created['id']}/"
+    created = await _api_create(client, name="Redirected", entrypoint="pages/index.html")
+    app_url = f"/apps/{created['id']}"
+    app_dir = Path(created["app_dir"])
+    (app_dir / "pages").mkdir()
+    (app_dir / "pages" / "index.html").write_text('<script src="./root.js"></script>')
+    (app_dir / "root.js").write_text("console.log('root')")
+    token = client.headers["Authorization"].removeprefix("Bearer ")
+
+    response = await client.get(
+        f"{app_url}?token={token}&path=missing", headers={"Authorization": ""}, follow_redirects=True,
+    )
+    assert [item.status_code for item in response.history] == [307]
+    assert response.history[0].headers["location"] == f"{app_url}/?token={token}&path=missing"
+    assert response.status_code == 200
+    assert response.text == '<script src="./root.js"></script>'
+    script = await client.get(response.url.join("./root.js"))
+    assert script.status_code == 200
+    assert script.text == "console.log('root')"
+
+
+async def test_directory_redirect_requires_authorization_and_a_servable_entrypoint(client, tmp_path):
+    created = await _api_create(client, name="Directory boundaries")
+    app_dir = Path(created["app_dir"])
+    (app_dir / "valid").mkdir()
+    (app_dir / "valid" / "index.html").write_text("nested")
+    (app_dir / "empty").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "index.html").write_text("outside")
+    (app_dir / "escape").symlink_to(outside, target_is_directory=True)
+    (app_dir / "empty" / "index.html").symlink_to(outside / "index.html")
+    app_url = f"/apps/{created['id']}"
+
+    for path in ("", "/valid"):
+        response = await client.get(app_url + path, headers={"Authorization": ""})
+        assert response.status_code == 401
+        assert "location" not in response.headers
+    for path in ("", "/missing", "/escape", "/empty", "/%2e%2e"):
+        response = await client.get(app_url + path)
+        assert response.status_code == 404
+        assert "location" not in response.headers
 
 
 # --------------------------------------------------------------------------- #
@@ -3517,10 +3675,51 @@ async def test_proxy_rejects_raw_prefix_mismatch_before_backend_acquisition(clie
 @pytest.mark.asyncio
 async def test_proxy_is_404_when_the_app_has_no_backend(client):
     app_row = await _api_create(client, name="Static Only")
-    Path(app_row["app_dir"], "index.html").write_text("<html></html>")
-    resp = await client.get(f"/apps/{app_row['id']}/api/anything", headers=client.headers)
+    app_dir = Path(app_row["app_dir"])
+    (app_dir / "api" / "anything").mkdir(parents=True)
+    (app_dir / "api" / "index.html").write_text("Static API alias")
+    (app_dir / "api" / "anything" / "index.html").write_text("Static directory")
+    app_url = f"/apps/{app_row['id']}"
+
+    resp = await client.get(f"{app_url}/api/anything")
     assert resp.status_code == 404
     assert "no backend" in resp.text.lower()
+    assert "location" not in resp.headers
+    assert "no backend" in (await client.get(f"{app_url}/api/")).text.lower()
+    alias = await client.get(f"{app_url}/api")
+    assert alias.status_code == 200
+    assert alias.text == "Static API alias"
+
+
+async def test_static_directory_does_not_override_the_agent_client(client):
+    row = await _api_create(client, name="Agent client routing")
+    directory = Path(row["app_dir"], "agent", "client.js")
+    directory.mkdir(parents=True)
+    (directory / "index.html").write_text("Static directory")
+
+    response = await client.get(f"/apps/{row['id']}/agent/client.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+    assert "export function createAgentClient(" in response.text
+
+
+async def test_static_directory_does_not_override_wiki_routes(client):
+    row = await _api_create(client, name="Wiki routing")
+    directory = Path(row["app_dir"], "wiki")
+    (directory / "read").mkdir(parents=True)
+    (directory / "index.html").write_text("Static Wiki alias")
+    (directory / "read" / "index.html").write_text("Static directory")
+    wiki_url = f"/apps/{row['id']}/wiki"
+
+    for suffix in ("/", "/read"):
+        response = await client.get(wiki_url + suffix)
+        assert response.status_code == 404
+        assert response.json()["detail"] == "No local wiki is registered for this account"
+        assert "location" not in response.headers
+    alias = await client.get(wiki_url, follow_redirects=True)
+    assert alias.status_code == 200
+    assert alias.text == "Static Wiki alias"
+    assert not alias.history
 
 
 @pytest.mark.asyncio

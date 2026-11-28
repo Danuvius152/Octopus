@@ -133,8 +133,10 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
     await database.update_agent(agent["id"], model="source-model-updated")
     assert (await database.get_agent(agent["id"]))["context_settings_revision"] == 2
     conversation = await manager.create_session(agent["id"], "Source context", str(working))
-    await manager.update_session_configuration(conversation.id, {"model": "conversation-model"}, owner["id"])
+    assert conversation.configuration_version == 0
+    await manager.update_session_configuration(conversation.id, {"expected_backend": conversation.backend, "expected_configuration_version": conversation.configuration_version, "model": "conversation-model"}, owner["id"])
     assert (await database.load_sessions())[0]["context_state"] is not None
+    assert conversation.configuration_version == 1
     applications = ApplicationManager()
     applications.bind(manager, database)
     try:
@@ -211,6 +213,8 @@ async def test_export_import_preserves_remaining_application_files_and_explicit_
         await retry.delete_application("partial")
         assert await copied.get_application("partial") is None
         assert not restored_code.exists() and not Path(data_dir_for(str(restored_code))).exists()
+        new_session = await replacement.create_session(imported_agent["id"], "Restored account conversation")
+        assert new_session.configuration_version == 0
     finally:
         retry.shutdown()
         await copied.close()

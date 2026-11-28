@@ -58,6 +58,7 @@ async def test_rewind_joins_original_notice_effects_and_retires_its_publisher(re
     archiving, release_archive = asyncio.Event(), asyncio.Event()
     has_notice = manager.db.has_delivery_notice
     update = manager.db.update_session_field
+    finish = manager.db.finish_rewind_fork
     delivered = []
 
     async def hold_completed_original_read(session_id, delivery_id):
@@ -69,13 +70,16 @@ async def test_rewind_joins_original_notice_effects_and_retires_its_publisher(re
             await release_read.wait()
         return result
 
-    async def observe_ready_child(session_id, **fields):
+    async def hold_parent_archive(session_id, **fields):
         if session_id == parent.id and fields.get("archived"):
             archiving.set()
             await release_archive.wait()
         await update(session_id, **fields)
-        if session_id != parent.id and fields.get("fork_status") == "ready":
-            child_ready.set()
+
+    async def observe_ready_child(session_id, *, require_current_directory):
+        binding = await finish(session_id, require_current_directory=require_current_directory)
+        child_ready.set()
+        return binding
 
     async def hold_original_publication(event):
         if event.get("type") == "delivery_notice" and event.get("session_id") == parent.id:
@@ -87,7 +91,8 @@ async def test_rewind_joins_original_notice_effects_and_retires_its_publisher(re
             delivered.append(event["content"])
 
     monkeypatch.setattr(manager.db, "has_delivery_notice", hold_completed_original_read)
-    monkeypatch.setattr(manager.db, "update_session_field", observe_ready_child)
+    monkeypatch.setattr(manager.db, "update_session_field", hold_parent_archive)
+    monkeypatch.setattr(manager.db, "finish_rewind_fork", observe_ready_child)
     manager.on_broadcast("hold-original-rewind-notice", hold_original_publication)
     manager.on_broadcast("receive-original-rewind-notice", receive_original_publication)
     notice = asyncio.create_task(manager.retain_result_notice(

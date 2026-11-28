@@ -2,7 +2,7 @@
 
 > **Status:** implemented — 当前格式准入、持久资源、完整记录与离线交接不变量。
 
-The main database uses format **15**, and Wiki uses format **17**. Each database
+The main database uses format **16**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -67,6 +67,14 @@ The exact collection and exclusions are maintained in
 Archive affects visibility; it is not a uniform age-based data deletion policy.
 
 ## Current field representations
+
+`sessions.configuration_version` is a nonnegative integer bounded by the largest
+JavaScript safe integer. It starts at zero, remains with the original session on
+archive restore, and advances with explicit settings saves and credential
+unbinding. Full backups preserve it with the session row. Account transfer
+excludes sessions and chat history, and history import initializes its own
+session version. The [settings contract](model-reasoning.md#persistence-and-precedence)
+owns the version's write scope and the browser precondition.
 
 The main database stores `agents.deletion_pending` on the original account-owned
 Agent row. A pending Agent is archived, belongs to an account and has no
@@ -508,14 +516,14 @@ keeps business closed. Reentry inspects actual committed facts under the same
 candidate and frozen inputs; it must not overwrite newer files/databases or
 replay model/tool effects. Runtime callbacks cannot be restored from JSON.
 
-The [main-format 14 to 15 converter](../../scripts/upgrade-main-14-to-15.py)
+The [main-format 15 to 16 converter](../../scripts/upgrade-main-15-to-16.py)
 runs under offline installation ownership after writer retirement. It uses
-the pinned format-14 source verifier and syncs a baseline bound to the
+the pinned format-15 source verifier and syncs a baseline bound to the
 database, source, candidate, converter and configuration before changing
-storage. One transaction adds the constrained `agents.deletion_pending` column
-with every existing Agent clear and advances `user_version`. Verification
+storage. One transaction adds the constrained `sessions.configuration_version`
+column at zero for existing sessions and advances `user_version`. Verification
 compares the complete current layout and the original tables, values, row IDs
-and sequences against the baseline. Reentry with committed format 15 requires
+and sequences against the baseline. Reentry with committed format 16 requires
 the same baseline and verifies the result read-only before first start.
 
 Only verified current storage permits candidate start and credential writes.

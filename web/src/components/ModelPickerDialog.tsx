@@ -3,7 +3,7 @@ import { accountFetch } from "../lib/accountFetch";
 import { loadSessionSnapshots } from "../lib/hydrateSession";
 import { selectSession } from "../lib/selectSession";
 import { ArchiveDeadline } from "../lib/sessionArchive";
-import { sessions as sessionList } from "../lib/sessionList";
+import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 import { backendLabel, useBackendCatalog } from "../hooks/useBackendCatalog";
 import { modelOption, useModelSettings, type RuntimeModelDefault } from "../hooks/useModelSettings";
 import { useSessionStore, type BackendKind, type SessionInfo } from "../stores/sessionStore";
@@ -24,8 +24,13 @@ interface ModelPickerProps {
 }
 
 type Draft = Pick<SessionInfo, "model" | "credential_id" | "reasoning_effort" | "service_tier">;
+type DraftField = keyof Draft;
+type EngineEdits = Partial<Record<BackendKind, Partial<Draft>>>;
 const blankDraft = { model: null, credential_id: null, reasoning_effort: null, service_tier: null };
-const fields = ["model", "credential_id", "reasoning_effort", "service_tier"] as const;
+const fieldLabels = {
+  model: "Model", credential_id: "Sign-in", reasoning_effort: "Reasoning effort", service_tier: "Speed",
+} satisfies Record<DraftField, string>;
+const fields = Object.keys(fieldLabels) as DraftField[];
 
 export function ModelPickerDialog(props: ModelPickerProps) {
   const account = useSessionStore((state) => state.accountGeneration);
@@ -39,18 +44,15 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
   const agent = useSessionStore((state) => state.agents.find((item) => item.id === session.agent_id));
   const credentials = useSessionStore((state) => state.credentials);
   const engines = useBackendCatalog();
-  const [initial] = useState(session);
+  const [initial, setInitial] = useState(session);
   const [backend, setBackend] = useState(initial.backend ?? "claude-code");
-  const [drafts, setDrafts] = useState<Partial<Record<BackendKind, Draft>>>(() => ({
-    [backend]: {
-      model: initial.model, reasoning_effort: initial.reasoning_effort,
-      service_tier: initial.service_tier, credential_id: initial.credential_id,
-    },
-  }));
+  const [edits, setEdits] = useState<EngineEdits>({});
+  const [clearChoices, setClearChoices] = useState<{ backend: BackendKind; fields: DraftField[] }>();
+  const [engineEdited, setEngineEdited] = useState(false);
+  const [conflict, setConflict] = useState<"reload" | "review" | null>(null);
   const [started, setStarted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
-  const [unconfirmedFields, setUnconfirmedFields] = useState<ReadonlySet<keyof Draft>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const write = useRef(false);
   const foreground = useRef(false);
@@ -68,9 +70,11 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
     return () => { foreground.current = false; unsubscribe(); };
   }, []);
 
-  const draft = drafts[backend] ?? blankDraft;
   const initialBackend = initial.backend ?? "claude-code";
   const switching = backend !== initialBackend;
+  const engineEdits = edits[backend] ?? {};
+  const draft: Draft = { ...(switching ? blankDraft : initial), ...engineEdits };
+  const unresolved = clearChoices?.backend === backend ? clearChoices.fields : [];
   const useAgentDefaults = switching ? agent?.backend === backend : initial.defaults_source !== "backend";
   const defaults = useAgentDefaults ? agent : undefined;
   const defaultsKnown = !useAgentDefaults || !session.agent_id || !!agent;
@@ -96,11 +100,11 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
   const signInProblem = Boolean(effectiveCredential && (effectiveSignIn?.needs_reconnect ||
     (!effectiveSignIn && (credentials.some((item) => item.id === effectiveCredential) || !!catalogError))));
   const [showSignIn, setShowSignIn] = useState(false);
-  const startNew = switching && (started || session.has_inputs || (session.message_count ?? 0) > 0 ||
+  const startNew = switching && (started || initial.has_inputs || session.has_inputs || (session.message_count ?? 0) > 0 ||
     Boolean(session.claude_session_id) || session.status === "running");
-  const fieldsToSave = fields.filter((field) => switching || unconfirmedFields.has(field) ||
-    (draft[field] ?? null) !== (initial[field] ?? null));
-  const changes = Object.fromEntries(fieldsToSave.map((field) => [field, draft[field] ?? null]));
+  const saveEngine = switching || engineEdited;
+  const fieldsToSave = fields.filter((field) => switching || field in engineEdits);
+  const hasChanges = fieldsToSave.length > 0 || saveEngine;
   const model = draft.model || defaults?.model;
   const selectedModel = modelOption(catalog, model);
   const efforts = selectedModel?.reasoning_efforts ?? catalog?.reasoning_efforts;
@@ -109,8 +113,12 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
   const defaultModelName = modelOption(readCatalog, defaultModel)?.name ?? defaultModel;
   const modelUnconfirmed = Boolean(draft.model && (switching || draft.model !== initial.model) &&
     !catalog?.models?.some((item) => item.id === draft.model));
+  const canApply = hasChanges && !modelUnconfirmed && unresolved.length === 0;
   const setDraft = <K extends keyof Draft>(field: K, value: Draft[K]) => {
-    setDrafts((current) => ({ ...current, [backend]: { ...draft, [field]: value } }));
+    setEdits((current) => ({ ...current, [backend]: { ...current[backend], [field]: value } }));
+    if (unresolved.includes(field)) {
+      setClearChoices({ backend, fields: unresolved.filter((pending) => pending !== field) });
+    }
     setError(null);
   };
   const inherited = (value?: string | null) => {
@@ -123,26 +131,63 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
   const knownEngines = engines.status === "ready" ? engines.catalog.available : [];
   const options = ([...new Set([initialBackend, ...knownEngines])] as BackendKind[]).sort();
 
+  const refreshConflict = async (observation: SessionObservation, deadline: ArchiveDeadline) => {
+    const current = await deadline.wait((async () => {
+      const reply = await accountFetch(`/api/sessions/${encodeURIComponent(session.id)}/info`, {
+        headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: deadline.signal,
+      });
+      if (!reply.ok) throw new Error(`Could not read current settings (HTTP ${reply.status}).`);
+      return await reply.json() as SessionInfo;
+    })());
+    if (!foreground.current || !sessionList.current(observation)) return;
+    if (current?.id !== session.id || current.archived || !current.backend ||
+      !Number.isSafeInteger(current.configuration_version) || current.configuration_version < initial.configuration_version) {
+      throw new Error("Could not read the current conversation settings.");
+    }
+    const savedBackend = current.backend;
+    const target = engineEdited ? backend : savedBackend;
+    if (target !== backend) {
+      // Only explicit clears transfer across engines. When an earlier value
+      // for the new engine competes with a clear, ask which edit to apply.
+      const carried: Partial<Draft> = {};
+      const competing: DraftField[] = [];
+      for (const field of fields) {
+        if (engineEdits[field] !== null) continue;
+        if (edits[target]?.[field] != null) competing.push(field);
+        else carried[field] = null;
+      }
+      setEdits((previous) => ({ ...previous, [target]: { ...previous[target], ...carried } }));
+      setClearChoices({ backend: target, fields: competing });
+    }
+    setInitial(current);
+    setBackend(target);
+    setConflict("review");
+  };
+
   const apply = async () => {
-    if (!foreground.current || write.current || unconfirmed || modelUnconfirmed || !fieldsToSave.length) return;
+    if (!foreground.current || write.current || unconfirmed || (conflict !== "reload" && !canApply)) return;
     const observation = sessionList.capture();
     const deadline = new ArchiveDeadline();
     write.current = true;
     setBusy(true);
     setError(null);
-    // A refresh may precede the PATCH commit. Record the submitted fields before
-    // observing the reply so returning to an opening value remains saveable.
-    if (!switching) setUnconfirmedFields(new Set(fieldsToSave));
+    let reloading = conflict === "reload";
     let created: SessionInfo | null = null;
     try {
+      if (reloading) {
+        await refreshConflict(observation, deadline);
+        return;
+      }
       const updated = await deadline.wait((async () => {
+        const changes = Object.fromEntries(fieldsToSave.map((field) => [field, draft[field] ?? null]));
         const url = startNew ? `/api/agents/${session.agent_id}/sessions` : `/api/sessions/${session.id}`;
         const res = await accountFetch(url, {
           method: startNew ? "POST" : "PATCH",
           signal: deadline.signal,
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
           body: JSON.stringify(startNew ? { ...changes, backend, working_dir: session.working_dir }
-            : { ...changes, ...(switching ? { backend } : {}), expected_backend: initialBackend }),
+            : { ...changes, ...(saveEngine ? { backend } : {}), expected_backend: initialBackend,
+              expected_configuration_version: initial.configuration_version }),
         });
         if (!res.ok) {
           const unknown = res.status >= 500 || res.status === 408;
@@ -151,10 +196,11 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
           return { ok: false as const, detail, status: res.status, unknown };
         }
         const row = await res.json() as SessionInfo;
-        if (!row?.id) throw new Error("Invalid conversation response.");
+        if (!row?.id || (!startNew && row.id !== session.id) || !Number.isSafeInteger(row.configuration_version)) {
+          throw new Error("Invalid conversation response.");
+        }
         return { ok: true as const, row };
       })());
-      deadline.finish();
       if (!updated) throw new Error("Saving conversation settings could not be confirmed.");
       if (!sessionList.accountCurrent(observation)) return;
       if (!updated.ok) {
@@ -162,15 +208,17 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
         const { detail } = updated;
         const message = typeof detail === "string" ? detail : detail?.message ?? `Could not save settings (HTTP ${updated.status}).`;
         if (updated.unknown) throw new Error(message);
-        if (!switching) setUnconfirmedFields(unconfirmedFields);
         if (detail?.code === "conversation_started") setStarted(true);
-        if (detail?.code === "engine_changed") {
-          setUnconfirmed(true);
-          void loadSessionSnapshots(session.id, { fresh: true }).catch(() => {});
+        if (updated.status === 409 && (detail?.code === "configuration_version_conflict" || detail?.code === "engine_changed")) {
+          reloading = true;
+          setConflict("reload");
+          await refreshConflict(observation, deadline);
+          return;
         }
         setError(message);
         return;
       }
+      deadline.finish();
       if (startNew) {
         created = updated.row;
         const confirmation = new ArchiveDeadline();
@@ -190,21 +238,17 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
         return;
       }
       const row = updated.row;
-      sessionList.patch(row.id, {
-        backend: row.backend, defaults_source: row.defaults_source, has_inputs: row.has_inputs,
-        model: row.model, reasoning_effort: row.reasoning_effort, service_tier: row.service_tier,
-        credential_id: row.credential_id, can_steer: row.can_steer, can_observe_context: row.can_observe_context,
-        can_compact: row.can_compact, compact_unavailable_reason: row.compact_unavailable_reason, can_fork: row.can_fork,
-      }, observation);
+      sessionList.settingsSaved(row, observation);
       if (!foreground.current || !sessionList.current(observation)) return;
-      if (!switching) setUnconfirmedFields(new Set());
       if (knowsModelDefault) onModelDefault?.({ backend, credential: effectiveCredential || null, name: runtimeDefaultName });
       onApplied?.(row);
       onOpenChange(false);
     } catch (cause) {
-      if (startNew && sessionList.accountCurrent(observation)) void sessionList.refresh();
+      if (!reloading && startNew && sessionList.accountCurrent(observation)) void sessionList.refresh();
       if (!foreground.current || !sessionList.accountCurrent(observation)) return;
-      if (startNew) {
+      if (reloading) {
+        if (sessionList.current(observation)) setError(cause instanceof Error ? cause.message : "Could not read current settings.");
+      } else if (startNew) {
         setUnconfirmed(true);
         setError(created ? "The new conversation was saved. Check the session list."
           : "Creation could not be confirmed. Check the session list before creating another conversation.");
@@ -219,7 +263,22 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
     }
   };
 
-  const canEdit = !busy && !unconfirmed;
+  const canEdit = !busy && !unconfirmed && conflict !== "reload";
+  const savedDefault = initial.defaults_source === "backend" ? "Engine default" : "Agent default";
+  const displayValue = (field: DraftField, value: Draft[DraftField], empty: string) => {
+    if (!value) return empty;
+    if (field === "service_tier") return value === "fast" ? "Fast" : "Normal";
+    if (field === "credential_id") return credentials.find((item) => item.id === value)?.label ?? "Selected sign-in";
+    return value;
+  };
+  const readyFields = fieldsToSave.filter((field) => !unresolved.includes(field));
+  const retainedDrafts = Object.entries(edits).flatMap(([engine, values]) => {
+    if (engine === backend) return [];
+    const pending = fields.filter((field) => (
+      field in values && (values[field] !== null || (engineEdits[field] !== null && !unresolved.includes(field)))
+    ));
+    return pending.length ? [{ engine, values, pending }] : [];
+  });
   return (
     <Dialog open={open} onOpenChange={(next) => {
       if (!next && write.current) return;
@@ -242,13 +301,63 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
         </DialogHeader>
         <form className="flex min-h-0 flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void apply(); }}>
           <fieldset disabled={!canEdit} className="min-h-0 space-y-4 overflow-y-auto p-1">
+            {conflict === "review" && <section className="space-y-1 rounded-lg border border-border p-3 text-sm">
+              <p className="font-medium">Current saved settings</p>
+              <dl className="grid grid-cols-[max-content_1fr] gap-x-3">
+                <dt>Engine</dt><dd>{backendLabel(initialBackend)}</dd>
+                <dt>Defaults</dt><dd>{savedDefault}</dd>
+                {fields.map((field) => <div className="contents" key={field}>
+                  <dt>{fieldLabels[field]}</dt><dd>{displayValue(field, initial[field], savedDefault)}</dd>
+                </div>)}
+              </dl>
+              <p role="status">Review your changes before applying them.</p>
+            </section>}
+            {conflict === "review" && (saveEngine || readyFields.length > 0) && (
+              <section aria-label="Changes to apply" className="space-y-1 rounded-lg border border-border p-3 text-sm">
+                <p className="font-medium">Changes to apply</p>
+                <dl className="grid grid-cols-[max-content_1fr] gap-x-3">
+                  {saveEngine && <><dt>Engine</dt><dd>{backendLabel(backend)}</dd></>}
+                  {readyFields.map((field) => <div className="contents" key={field}>
+                    <dt>{fieldLabels[field]}</dt><dd>{displayValue(field, draft[field], "Use default")}</dd>
+                  </div>)}
+                </dl>
+              </section>
+            )}
+            {conflict === "review" && retainedDrafts.map(({ engine, values, pending }) => {
+              const label = backendLabel(engine);
+              const title = `Unapplied edits for ${label}`;
+              const canSwitch = options.some((option) => option === engine) && (engine === initialBackend || !!agent);
+              return <section aria-label={title} className="space-y-1 rounded-lg border border-border p-3 text-sm" key={engine}>
+                <p className="font-medium">{title}</p>
+                <dl className="grid grid-cols-[max-content_1fr] gap-x-3">
+                  {pending.map((field) => <div className="contents" key={field}>
+                    <dt>{fieldLabels[field]}</dt><dd>{displayValue(field, values[field] ?? null, "Use default")}</dd>
+                  </div>)}
+                </dl>
+                <p>{canSwitch ? `Select ${label} to continue editing this draft.` : `${label} is currently unavailable for switching.`}
+                  {" Applying the current changes discards these edits."}</p>
+              </section>;
+            })}
+            {conflict === "review" && unresolved.map((field) => (
+              <fieldset className="space-y-2 rounded-lg border border-border p-3 text-sm" key={field}>
+                <legend className="font-medium">Choose a value for {fieldLabels[field].toLowerCase()}</legend>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" size="sm" variant="outline" onClick={() => setDraft(field, null)}>
+                    Clear {fieldLabels[field].toLowerCase()} override
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setDraft(field, draft[field])}>
+                    Use earlier {fieldLabels[field].toLowerCase()} choice ({displayValue(field, draft[field], "Use default")})
+                  </Button>
+                </div>
+              </fieldset>
+            ))}
             <fieldset className="space-y-2">
               <legend className="text-sm font-medium">Engine</legend>
               <div className="grid grid-cols-2 gap-2">
                 {options.map((item) => <label key={item} className="min-w-0">
                   <input type="radio" name="conversation-engine" value={item} checked={backend === item}
                     disabled={item !== initialBackend && !agent} className="peer sr-only"
-                    onChange={() => { setBackend(item); setError(null); }} />
+                    onChange={() => { setBackend(item); setEngineEdited(true); setError(null); }} />
                   <span className="block cursor-pointer rounded-lg border border-border px-3 py-2 text-center text-sm peer-checked:border-primary peer-checked:bg-accent peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-disabled:opacity-50">
                     {backendLabel(item)}
                   </span>
@@ -298,12 +407,15 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
             </details>
           </fieldset>
           {error && <p role="alert" className="model-error text-xs text-destructive">{error}</p>}
-          {busy && <p role="status" className="text-xs text-muted-foreground">{startNew ? "Creating conversation…" : "Saving settings…"}</p>}
+          {busy && <p role="status" className="text-xs text-muted-foreground">
+            {conflict === "reload" ? "Reading current settings…" : startNew ? "Creating conversation…" : "Saving settings…"}
+          </p>}
           <div className="flex shrink-0 justify-end gap-2 border-t border-border pt-3">
             <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button>
             <Button type="submit" className="btn-apply-model-settings"
-              disabled={!canEdit || modelUnconfirmed || !fieldsToSave.length}>
-              {startNew ? `New session with ${backendLabel(backend)}` : "Apply"}
+              disabled={conflict === "reload" ? busy : !canEdit || !canApply}>
+              {conflict === "reload" ? "Reload settings" : startNew ? `New session with ${backendLabel(backend)}`
+                : conflict === "review" ? "Apply changes" : "Apply"}
             </Button>
           </div>
         </form>

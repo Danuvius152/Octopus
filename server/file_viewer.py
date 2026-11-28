@@ -9,11 +9,14 @@ import stat
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import FileIO
 from pathlib import Path
 from time import monotonic
 from typing import Literal
+
+from .application_resources import ApplicationDataRecord, data_dir_for
+from .workspace import UserPaths
 
 # Hard cap. PDFs and screenshots are the realistic ceiling; 2 MiB
 # comfortably covers both without letting the model surface multi-MB
@@ -156,8 +159,8 @@ class FileChanged(FileViewerError):
     """The requested path binding or the checked byte count changed."""
 
 
-def _path_id(root: Path, path: Path, directory: os.stat_result) -> str:
-    identity = f"{directory.st_dev}:{directory.st_ino}".encode("ascii")
+def _path_id(root: Path, path: Path, source: os.stat_result, directory: os.stat_result) -> str:
+    identity = f"{source.st_dev}:{source.st_ino}:{directory.st_dev}:{directory.st_ino}".encode("ascii")
     return hashlib.sha256(b"\0".join((os.fsencode(root), os.fsencode(path), identity))).hexdigest()
 
 
@@ -170,8 +173,19 @@ class ResourceDirectory:
 @dataclass(frozen=True)
 class FileSources:
     cwd: Path | None
-    roots: tuple[Path, ...]
-    blocked_roots: tuple[Path, ...] = ()
+    directory_identities: dict[Path, os.stat_result | None]
+    blocked_roots: frozenset[Path] = frozenset()
+    application_aliases: dict[Path, Path] = field(default_factory=dict)
+
+    @property
+    def roots(self) -> tuple[Path, ...]:
+        return tuple(root for root, identity in self.directory_identities.items() if identity is not None)
+
+    def translate_application_alias(self, requested: Path) -> Path:
+        for alias, root in self.application_aliases.items():
+            if requested.is_relative_to(alias):
+                return root / requested.relative_to(alias)
+        return requested
 
     def select(self, requested: Path, source: str | None, *, bound_to_cwd: bool) -> Path:
         if source is not None:
@@ -193,6 +207,18 @@ class FileSources:
             raise PathRejected(_OUTSIDE_SOURCE)
         return selected
 
+    @contextmanager
+    def open_root(self, root: Path) -> Iterator[int]:
+        with ExitStack() as stack:
+            try:
+                fd = stack.enter_context(_open_available_directory(root))
+            except OSError as error:
+                raise PathRejected(_SOURCE_UNAVAILABLE) from error
+            expected = self.directory_identities[root]
+            if expected is None or not os.path.samestat(expected, os.fstat(fd)):
+                raise PathRejected(_SOURCE_UNAVAILABLE)
+            yield fd
+
 
 @dataclass(frozen=True)
 class ResolvedFile:
@@ -209,8 +235,8 @@ class ResolvedFile:
     kind: FileKind
     mime_type: str
     stat_result: os.stat_result
+    root_stat: os.stat_result
     parent_stat: os.stat_result
-    is_cwd_source: bool
 
     @property
     def size(self) -> int:
@@ -218,13 +244,13 @@ class ResolvedFile:
 
     @property
     def canonical_path_id(self) -> str:
-        return _path_id(self.source_root, self.abs_path, self.parent_stat)
+        return _path_id(self.source_root, self.abs_path, self.root_stat, self.parent_stat)
 
     @property
     def canonical_directory(self) -> ResourceDirectory:
         return ResourceDirectory(
             str(Path(self.relative_path).parent),
-            _path_id(self.source_root, self.abs_path.parent, self.parent_stat),
+            _path_id(self.source_root, self.abs_path.parent, self.root_stat, self.parent_stat),
         )
 
 
@@ -298,12 +324,12 @@ def _open_available_directory(path: Path) -> Iterator[int]:
         yield fd
 
 
-def _available_directory(path: Path) -> bool:
+def _directory_identity(path: Path) -> os.stat_result | None:
     try:
-        with _open_available_directory(path):
-            return True
+        with _open_available_directory(path) as fd:
+            return os.fstat(fd)
     except (OSError, ValueError):
-        return False
+        return None
 
 
 def _source_blocks_fallback(path: Path) -> bool:
@@ -317,6 +343,83 @@ def _source_blocks_fallback(path: Path) -> bool:
         return False
     except OSError:
         return True
+
+
+def _redirects_registered_source(link: Path, remaining: deque[str], sources: FileSources) -> bool:
+    # A link may have replaced a source's ancestor. Check the spelling that
+    # would disappear when the link's target replaces this part of the path.
+    descendants = {root for root in sources.directory_identities if link in root.parents}
+    if not descendants:
+        return False
+    prefix = link
+    for component in remaining:
+        prefix = prefix.parent if component == ".." else prefix / component
+        if prefix in descendants:
+            return True
+    return False
+
+
+@contextmanager
+def _lookup_path_entry(parent_fd: int | None, name: str) -> Iterator[int | None]:
+    try:
+        fd = None if parent_fd is None else os.open(name, os.O_PATH | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except (FileNotFoundError, NotADirectoryError):
+        fd = None
+    try:
+        yield fd
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _resolve_checked_path(path: Path, sources: FileSources) -> Path:
+    """Resolve checked hops with one held directory and transient lookup handles."""
+    anchor = Path(path.anchor)
+    pending = deque(path.parts[1:])
+    current = directory = anchor
+    followed = 0
+    try:
+        with _directory_fd(anchor) as directory_fd:
+            while pending:
+                part = pending.popleft()
+                parent_step = part == ".."
+                next_path = current.parent if parent_step else current / part
+                if parent_step and (current != directory or current == anchor):
+                    current = next_path
+                    continue
+                if next_path in sources.blocked_roots:
+                    raise PathRejected(_SOURCE_UNAVAILABLE)
+
+                # Keep the nearest opened directory while walking a missing or
+                # non-directory tail. A later '..' can return to that directory.
+                with _lookup_path_entry(directory_fd if current == directory else None, part) as entry_fd:
+                    identity = os.fstat(entry_fd) if entry_fd is not None else None
+                    expected = sources.directory_identities.get(next_path)
+                    if expected is not None and (identity is None or not os.path.samestat(expected, identity)):
+                        raise PathRejected(_SOURCE_UNAVAILABLE)
+                    if parent_step and (entry_fd is None or not _has_path(entry_fd, next_path)):
+                        raise PathRejected(_SOURCE_UNAVAILABLE)
+                    if entry_fd is None or identity is None or not stat.S_ISLNK(identity.st_mode):
+                        if entry_fd is not None and identity is not None and stat.S_ISDIR(identity.st_mode):
+                            os.dup2(entry_fd, directory_fd, inheritable=False)
+                            directory = next_path
+                        current = next_path
+                        continue
+
+                    if next_path in sources.directory_identities or _redirects_registered_source(next_path, pending, sources):
+                        raise PathRejected(_SOURCE_UNAVAILABLE)
+                    followed += 1
+                    if followed > 40:
+                        raise PathRejected("Invalid file path")
+                    target = Path(os.readlink("", dir_fd=entry_fd))
+                    if target.is_absolute():
+                        with _directory_fd(anchor) as anchor_fd:
+                            os.dup2(anchor_fd, directory_fd, inheritable=False)
+                        current = directory = anchor
+                    pending.extendleft(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+        return current
+    except (OSError, ValueError) as error:
+        raise PathRejected("Invalid file path") from error
 
 
 def _account_root(workspace: Path) -> Path:
@@ -344,32 +447,42 @@ def open_session_working_directory(
 
 
 def file_sources(
-    working_dir: str | Path, *, workspace: Path | None = None, extra_roots: Sequence[str] = (),
+    working_dir: str | Path, *, paths: UserPaths, extra_roots: Sequence[str] = (),
+    applications: Sequence[ApplicationDataRecord] = (),
 ) -> FileSources:
     """Identify the usable sources of this session under the current grants."""
     cwd = Path(working_dir)
-    if workspace is None:
-        # The pre-accounts installation supplied its own (possibly relative) cwd.
-        try:
-            cwd = cwd.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            return FileSources(None, ())
-        return FileSources(cwd, (cwd,)) if _available_directory(cwd) else FileSources(None, ())
-
     # The install's configured users directory is trusted. Its account and
     # workspace entries, and saved extra roots, must still be real directories.
-    account_root = _account_root(workspace)
-    workspace = account_root / workspace.name
-    availability = {root: _available_directory(root) for root in dict.fromkeys((workspace, *map(Path, extra_roots)))}
-    cwd_grants = (account_root, *(root for root, available in availability.items() if available))
+    account_root = _account_root(paths.workspace)
+    configured_roots = dict.fromkeys((account_root / paths.workspace.name, *map(Path, extra_roots)))
+    availability = {root: _directory_identity(root) for root in configured_roots}
+    cwd_grants = (account_root, *(root for root, identity in availability.items() if identity is not None))
     if any(cwd.is_relative_to(grant) for grant in cwd_grants) and cwd not in availability:
-        availability[cwd] = _available_directory(cwd)
+        availability[cwd] = _directory_identity(cwd)
+    configured = paths.applications
+    managed = account_root / configured.name
+    aliases = {}
+    readable_data: dict[Path, bool] = {}
+    for application in applications:
+        data = Path(data_dir_for(application.app_dir))
+        if data.is_relative_to(configured):
+            data = managed / data.relative_to(configured)
+        if managed not in data.parents or ".." in data.parts:
+            continue
+        if configured != managed:
+            aliases[configured / data.relative_to(managed)] = data
+        readable_data[data] = readable_data.get(data, False) or not application.deleting
+    for data, readable in readable_data.items():
+        # The registered code address may end in a link. Its data sibling
+        # and every directory below the trusted users root must be real.
+        if data not in availability:
+            availability[data] = _directory_identity(data) if readable else None
     # An implicit absolute open cannot turn an unavailable source into an
     # alias via an overlapping grant. A new path may name the actual target.
-    blocked = tuple(root for root, available in availability.items() if not available and _source_blocks_fallback(root))
-    usable_cwd = cwd if availability.get(cwd) else None
-    roots = tuple(root for root, available in availability.items() if available)
-    return FileSources(usable_cwd, roots, blocked)
+    blocked = frozenset(root for root, identity in availability.items() if identity is None and _source_blocks_fallback(root))
+    usable_cwd = cwd if availability.get(cwd) is not None else None
+    return FileSources(usable_cwd, availability, blocked, aliases)
 
 
 @dataclass(frozen=True)
@@ -435,7 +548,7 @@ def browse_files(
     entries = []
     skipped = False
     try:
-        with _directory_fd(root) as root_fd, _picker_directory(root, root_fd, relative, source_directory) as children:
+        with sources.open_root(root) as root_fd, _picker_directory(root, root_fd, relative, source_directory) as children:
             for child in children:
                 check_cancelled()
                 item = _picker_entry(relative, child)
@@ -462,7 +575,7 @@ def find_files(sources: FileSources, source: str, query: str, check_cancelled: C
     examined = 0
     skipped = truncated = False
     try:
-        with _directory_fd(root) as root_fd:
+        with sources.open_root(root) as root_fd:
             while pending and not truncated:
                 check_cancelled()
                 if monotonic() >= deadline:
@@ -515,7 +628,7 @@ def _document_directory(
     with ExitStack() as stack:
         try:
             fd = stack.enter_context(_directory_fd(directory, root_fd=root_fd))
-            if _path_id(root, resolved, os.fstat(fd)) != source_directory.path_id:
+            if _path_id(root, resolved, os.fstat(root_fd), os.fstat(fd)) != source_directory.path_id:
                 raise DocumentDirectoryChanged(_DOCUMENT_DIRECTORY_CHANGED)
         except OSError as error:
             raise DocumentDirectoryChanged(_DOCUMENT_DIRECTORY_CHANGED) from error
@@ -556,29 +669,35 @@ def load_safe_file(
     *,
     source: str | None = None,
     read_content: bool = False,
-    canonical: bool = False,
     canonical_path_id: str | None = None,
     source_directory: ResourceDirectory | None = None,
     expected_cwd: os.stat_result | None = None,
+    select_relative_source: bool = False,
 ) -> tuple[ResolvedFile, bytes]:
     """Inspect a file and optionally snapshot its bytes in one owned operation."""
     if not requested or not requested.strip():
         raise PathRejected("Empty path")
     if "\0" in requested:
         raise PathRejected("Invalid file path")
-    if not canonical and canonical_path_id is None and source_directory is None and requested.startswith("~"):
+    if canonical_path_id is None and source_directory is None and requested.startswith("~"):
         raise PathRejected("Tilde paths are not allowed; use a working-dir-relative path")
 
-    path = Path(requested)
+    path = sources.translate_application_alias(Path(requested))
     if expected_cwd is not None and not path.is_absolute() and sources.cwd is None:
         raise WorkingDirectoryUnavailable()
-    root = sources.select(path, source, bound_to_cwd=canonical_path_id is not None or source_directory is not None)
+    bound = canonical_path_id is not None or source_directory is not None
+    root = sources.select(path, source, bound_to_cwd=bound)
     if path.is_absolute() and (source_directory is not None or not path.is_relative_to(root)):
         raise PathRejected(_OUTSIDE_SOURCE)
+    resolved = None
+    if select_relative_source and source is None and not bound and not path.is_absolute():
+        resolved = _resolve_checked_path(root / path, sources)
+        root = sources.select(resolved, None, bound_to_cwd=False)
     with ExitStack() as stack:
         try:
-            root_fd = stack.enter_context(_directory_fd(root))
-            if expected_cwd is not None and root == sources.cwd and not os.path.samestat(os.fstat(root_fd), expected_cwd):
+            root_fd = stack.enter_context(sources.open_root(root))
+            root_stat = os.fstat(root_fd)
+            if expected_cwd is not None and root == sources.cwd and not os.path.samestat(root_stat, expected_cwd):
                 raise WorkingDirectoryUnavailable()
         except OSError as error:
             detail = _WORKING_DIR_UNAVAILABLE if root == sources.cwd and source is None else _SOURCE_UNAVAILABLE
@@ -587,44 +706,46 @@ def load_safe_file(
         document = None
         if source_directory is not None:
             document = stack.enter_context(_document_directory(root, root_fd, source_directory))
-        candidate = (document[0] if document else root) / path
-        try:
-            resolved = candidate.resolve()
-        except (OSError, RuntimeError, ValueError) as error:
-            raise PathRejected("Invalid file path") from error
-        if not resolved.is_relative_to(root):
-            raise PathRejected(_OUTSIDE_SOURCE)
-        if resolved == root:
-            raise FileNotFound("The target is not a regular file.")
 
-        relative = resolved.relative_to(root)
+        def check_bound_directories() -> None:
+            if not _has_path(root_fd, root):
+                raise PathRejected(_SOURCE_UNAVAILABLE)
+            if document and not _has_path(document[1], document[0]):
+                raise DocumentDirectoryChanged(_DOCUMENT_DIRECTORY_CHANGED)
+
         try:
+            if resolved is None:
+                # A confirmed target is already relative to the source root.
+                base = document[0] if document and canonical_path_id is None else root
+                resolved = _resolve_checked_path(base / path, sources)
+            if not resolved.is_relative_to(root):
+                raise PathRejected(_OUTSIDE_SOURCE)
+            if resolved == root:
+                raise FileNotFound("The target is not a regular file.")
+
+            relative = resolved.relative_to(root)
             with _open_regular_file(root_fd, relative) as (stream, info, parent_fd):
+                check_bound_directories()
                 opened_fd = stream.fileno()
                 if not _has_path(opened_fd, resolved) or not _has_path(parent_fd, resolved.parent):
                     raise FileChanged(_FILE_PATH_CHANGED)
-                if not _has_path(root_fd, root):
-                    raise PathRejected(_SOURCE_UNAVAILABLE)
-                if document and not _has_path(document[1], document[0]):
-                    raise DocumentDirectoryChanged(_DOCUMENT_DIRECTORY_CHANGED)
                 parent_stat = os.fstat(parent_fd)
                 if canonical_path_id is not None and (
-                    str(relative) != requested or _path_id(root, resolved, parent_stat) != canonical_path_id
+                    str(relative) != requested or _path_id(root, resolved, root_stat, parent_stat) != canonical_path_id
                 ):
                     raise FileChanged(_FILE_PATH_CHANGED)
                 if info.st_size > MAX_FILE_BYTES:
                     raise FileTooLarge(f"File is {info.st_size} bytes; viewer limit is {MAX_FILE_BYTES} bytes")
                 kind = _classify(resolved)
                 metadata = ResolvedFile(
-                    resolved, root, str(relative), kind, _mime_for(resolved, kind), info, parent_stat,
-                    is_cwd_source=root == sources.cwd,
+                    resolved, root, str(relative), kind, _mime_for(resolved, kind), info, root_stat, parent_stat,
                 )
                 if not read_content:
                     return metadata, b""
                 return metadata, _read_snapshot(stream, info.st_size)
-        except FileNotFound:
-            if not _has_path(root_fd, root):
-                raise PathRejected(_SOURCE_UNAVAILABLE)
+        except (FileNotFound, FileChanged, PathRejected):
+            # Replacing the source document's directory can also break the target.
+            check_bound_directories()
             raise
         except OSError as error:
             raise PathRejected("The file could not be read.") from error
@@ -639,16 +760,3 @@ def _read_snapshot(stream: FileIO, size: int) -> bytes:
             raise FileChanged("The file size changed. Reopen the file to read it.")
         remaining = remaining[count:]
     return bytes(buffer)
-
-
-def resolve_safe_path(
-    working_dir: str | Path,
-    requested: str,
-    *,
-    canonical: bool = False,
-    source_directory: ResourceDirectory | None = None,
-) -> ResolvedFile:
-    metadata, _ = load_safe_file(
-        file_sources(working_dir), requested, canonical=canonical, source_directory=source_directory,
-    )
-    return metadata

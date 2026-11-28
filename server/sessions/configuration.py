@@ -26,6 +26,14 @@ class SessionConfigurationError(ValueError):
         self.code = code
 
 
+class SessionConfigurationConflict(SessionConfigurationError):
+    def __init__(self) -> None:
+        super().__init__(
+            "The conversation settings changed. Review the current settings before saving.", 409,
+            code="configuration_version_conflict",
+        )
+
+
 async def validate_session_settings(db: Database, candidate: Session, agent: dict[str, Any] | None) -> None:
     effective = model_settings.effective_settings(candidate, agent)
     credential = effective["credential_id"]
@@ -119,11 +127,19 @@ class ConfigurationMixin(SessionManagerBase):
         if session is None:
             raise SessionConfigurationError("Session not found", 404)
         assert self.db is not None
-        expected = fields.get("expected_backend")
-        if expected is not None and expected != session.backend:
-            raise SessionConfigurationError(
-                "The conversation engine changed. Reload its settings.", 409, code="engine_changed",
-            )
+        precondition = None
+        if {"backend", *model_settings.SESSION_OVERRIDE_FIELDS} & fields.keys():
+            expected = fields.get("expected_backend")
+            version = fields.get("expected_configuration_version")
+            if expected is None or version is None:
+                raise SessionConfigurationError("Reload the conversation before changing its settings.", 428)
+            if version != session.configuration_version:
+                raise SessionConfigurationConflict()
+            if expected != session.backend:
+                raise SessionConfigurationError(
+                    "The conversation engine changed. Reload its settings.", 409, code="engine_changed",
+                )
+            precondition = expected, version
         backend = fields.get("backend") or session.backend
         switching = backend != session.backend
         updates: dict[str, Any] = {
@@ -165,11 +181,19 @@ class ConfigurationMixin(SessionManagerBase):
             updates["name"] = name
         if has_inputs is None:
             has_inputs = await self.db.session_has_inputs(session.id)
-        if updates:
+        if updates or precondition is not None:
             owner = self._require_session_writer(session)
             if state != session.context_state:
                 updates["context_state"] = state.model_dump_json() if state else None
-            await self.db.update_session_field(session_id, **updates)
+            if precondition is None:
+                await self.db.update_session_field(session_id, **updates)
+            else:
+                saved_version = await self.db.update_session_field(
+                    session_id, configuration_precondition=precondition, **updates,
+                )
+                if saved_version is None:
+                    raise SessionConfigurationConflict()
+                session.configuration_version = saved_version
             for key, value in updates.items():
                 if key != "context_state":
                     setattr(session, key, value)
@@ -201,17 +225,18 @@ class ConfigurationMixin(SessionManagerBase):
             assert self.db is not None
             async with self.configuration_lock:
                 try:
-                    row = await self.db.delete_owned_credential(credential_id, user_id)
+                    deleted = await self.db.delete_owned_credential(credential_id, user_id)
                 except CredentialOwnerUnavailable as error:
                     raise SessionConfigurationError(str(error), 403) from error
-                if row is None:
+                if deleted is None:
                     return None
-                for live in self.sessions.values():
-                    if live.credential_id == credential_id:
+                row, unbound = deleted
+                for session_id, version in unbound.items():
+                    live = self.sessions.get(session_id)
+                    if live is not None:
                         live.credential_id = None
-                return row
-
-        row = await complete_cleanup(remove())
-        if row is not None:
+                        live.configuration_version = version
             self.wake_contexts(None, user_id)
-        return row
+            return row
+
+        return await complete_cleanup(remove())

@@ -21,8 +21,8 @@ import { accountFetch as fetch } from "../lib/accountFetch";
  * filename + actions in the top-right.
  */
 
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, HTMLAttributes } from "react";
+import { memo, useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ClipboardEvent, Dispatch, DragEvent, KeyboardEvent, ReactNode, HTMLAttributes, SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import {
   IconCheck,
@@ -56,14 +56,14 @@ import type { FilePosition, FileResourceDirectory, FileViewerMetadata, ShowMeEdi
 import { useSessionStore, type FileViewerIntent, type FileViewerOptions } from "../stores/sessionStore";
 import { cn } from "../lib/utils";
 import { decodeFileReference, filePositionSuffix, parseFilePosition, splitFileLink } from "../lib/filePosition";
-import { documentLinkUrl, FileReferenceButton, readFileReference, type FileReference } from "./MarkdownFileLink";
-import { FileSourceView } from "./FileSourceView";
+import { documentLinkUrl, readFileReference, type FileReference } from "../lib/fileReference";
+import { FileReferenceButton } from "./MarkdownFileLink";
+import { FileSourceView, linePositionNote } from "./FileSourceView";
 import { FilePicker } from "./FilePicker";
 import { PdfReaderFrame } from "./PdfReaderFrame";
 import { applyReaderSize, type ReportFilePosition } from "./fileReaderScroll";
 import {
-  confirmedOpeningFile, displayedReaderTab, displayedRecovery, failedFileRead, openingDescription, pendingFileRetry,
-  readerTabName, retryFileRead, selectableReaderTab, useFileViewerTabs, usesFileResolver,
+  canRetryPendingFile, displayedReaderTab, failedFileRead, readerTabName, selectableReaderTab, useFileViewerTabs, usesFileResolver,
   type FileViewerRequest, type FileViewerTabActions, type OpenError, type Opening, type OpeningFailure, type ReaderAttempt, type ReaderTab,
 } from "./fileViewerTabs";
 
@@ -72,18 +72,20 @@ interface FileUrlOptions {
   source?: string;
   sourceDirectory?: FileResourceDirectory;
   canonicalPathId?: string;
+  reloadSource?: string;
 }
 
 function fileUrl(
   sessionId: string,
   path: string,
-  { metadata = false, source, sourceDirectory, canonicalPathId }: FileUrlOptions = {},
+  { metadata = false, source, sourceDirectory, canonicalPathId, reloadSource }: FileUrlOptions = {},
 ): string {
   const endpoint = metadata ? "files/meta" : "files";
   const query = new URLSearchParams({ path });
   // Use a fresh cache key for byte URLs issued before responses used no-store.
   if (!metadata) query.set("viewer", "1");
   if (source) query.set("source", source);
+  if (reloadSource) query.set("reload_source", reloadSource);
   if (canonicalPathId) query.set("canonical_path_id", canonicalPathId);
   if (sourceDirectory) {
     query.set("source_directory", sourceDirectory.path);
@@ -92,12 +94,16 @@ function fileUrl(
   return `${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/${endpoint}?${query}`;
 }
 
+function confirmedFileUrl({ sessionId, sourceDirectory }: FileViewerRequest, file: FileViewerMetadata) {
+  return fileUrl(sessionId, file.path, { source: file.source, sourceDirectory, canonicalPathId: file.canonical_path_id });
+}
+
 class FileReadFailure extends Error {
-  readonly recovery: "edit" | "retry";
+  readonly recovery: NonNullable<OpenError["recovery"]>;
   readonly denied: boolean;
   readonly originalPdf?: FileViewerMetadata;
 
-  constructor(message: string, recovery: "edit" | "retry", { denied = false, originalPdf }: {
+  constructor(message: string, recovery: NonNullable<OpenError["recovery"]>, { denied = false, originalPdf }: {
     denied?: boolean; originalPdf?: FileViewerMetadata;
   } = {}) {
     super(message);
@@ -111,7 +117,8 @@ const UNSUPPORTED_LINK: OpenError = {
   message: "This file link uses an unsupported path format. Enter a path on the server.", recovery: "edit",
 };
 
-function fileStatusError(status: number, detail?: string): FileReadFailure {
+function fileStatusError(status: number, failure?: ShowMeFileErrorResponse): FileReadFailure {
+  const detail = failure?.detail;
   switch (status) {
     case 0:
       return new FileReadFailure("Couldn't load the file. Check your connection and retry.", "retry");
@@ -121,27 +128,29 @@ function fileStatusError(status: number, detail?: string): FileReadFailure {
     case 404:
       return new FileReadFailure(detail || "File not found.", "edit");
     case 409:
-      return new FileReadFailure(detail || "The file path changed. Reopen the file to check its current location.", "retry");
+      if (failure?.code === "source_directory_changed") {
+        return new FileReadFailure("The document directory changed. Reopen the source document.", "reopen-source");
+      }
+      return !detail || failure?.code === "target_changed"
+        ? new FileReadFailure("The target file changed. Retry to check and read it again.", "reconfirm")
+        : new FileReadFailure(detail, "retry");
     case 413:
-      return new FileReadFailure(detail || "This file exceeds the preview limit.", "edit");
+      return new FileReadFailure("This file exceeds the 2 MiB limit for preview and download.", "edit");
     case 415:
       return new FileReadFailure("This file format can't be previewed.", "edit");
     default:
-      return detail
-        ? new FileReadFailure(detail, "edit")
-        : new FileReadFailure(`Couldn't read the file (HTTP ${status}).`, "retry");
+      return new FileReadFailure(detail || `Couldn't read the file (HTTP ${status}).`, status >= 500 || !detail ? "retry" : "edit");
   }
 }
 
 async function fileReadError(response: Response): Promise<FileReadFailure> {
   if (response.status === 401 || response.status === 403) return fileStatusError(response.status);
-  const body = await readFileErrorBody(response);
-  return fileStatusError(response.status, body?.detail);
+  return fileStatusError(response.status, await readFileErrorBody(response));
 }
 
 async function readFileMetadata(request: FileViewerRequest, init: RequestInit): Promise<FileViewerMetadata> {
-  const { sessionId, path, source, sourceDirectory } = request;
-  const response = await fetch(fileUrl(sessionId, path, { metadata: true, source, sourceDirectory }), init);
+  const { sessionId, path, source, sourceDirectory, reloadSource } = request;
+  const response = await fetch(fileUrl(sessionId, path, { metadata: true, source, sourceDirectory, reloadSource }), init);
   if (!response.ok) throw await fileReadError(response);
   return await response.json() as FileViewerMetadata;
 }
@@ -192,8 +201,11 @@ function unescapeEditedPath(draft: string): string {
 
 function fileEditDraft(path: string, position: FilePosition | null | undefined,
   binding: { failure?: OpeningFailure; openingRequest?: FileViewerRequest } = {}) {
-  return { initialPath: path, path: escapePathForEditing(path), position: filePositionSuffix(position ?? undefined), ...binding };
+  return { initialPath: path, path: escapePathForEditing(path), position: filePositionSuffix(position ?? undefined),
+    dropNotice: false, ...binding };
 }
+
+type PathDraft = ReturnType<typeof fileEditDraft>;
 
 function pathTokenSelection(draft: string, start: number, end: number) {
   const collapsed = start === end;
@@ -405,10 +417,20 @@ function FileViewerTabs({ viewer, token, onClose }: InnerProps) {
   const panelId = (id: number) => `file-viewer-${viewer.id}-panel-${id}`;
   const selectableTabs = tabs.filter((tab) => selectableReaderTab(tab) || tab.id === active);
   const tabButton = (id: number | undefined) => frame.current?.querySelector<HTMLElement>(`[data-file-tab="${id}"]`);
-  const labels = openingLabels([
+  const pendingTabs = tabs.filter((tab) => !selectableReaderTab(tab) && tab.id !== active);
+  const feedback = [
     ...state.reuseChecks,
-    ...(tabs.find((tab) => tab.id === active)?.failures ?? []),
+    ...tabs.flatMap((tab) => tab.id === active && tab.feedback?.failure ? [tab.feedback.failure] : []),
     ...(state.readerFailure ? [state.readerFailure] : []),
+  ];
+  const pendingNames = pendingTabs.map((tab) => accessibleTargetName(readerTabName(tab)));
+  const labels = openingLabels([
+    ...feedback.map((opening) => ({ opening, name: opening.request.path })),
+    ...pendingTabs.map((tab, index) => ({
+      opening: tab.opening,
+      name: pendingNames.some((name, other) => other !== index && name === pendingNames[index])
+        ? tab.request.path : readerTabName(tab),
+    })),
   ]);
 
   useLayoutEffect(() => {
@@ -457,21 +479,21 @@ function FileViewerTabs({ viewer, token, onClose }: InnerProps) {
     {!picker && <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
       {tabs.length > 0 && <div role="tablist" aria-label="Open files" className="flex min-w-0 items-center gap-1 overflow-x-auto p-1">
         {tabs.map((tab) => {
-          const recovery = displayedRecovery(tab, tabs);
-          const displayed = displayedReaderTab(recovery);
-          const name = readerTabName(recovery);
+          const displayed = displayedReaderTab(tab);
           const pending = !selectableReaderTab(tab) && tab.id !== active;
+          const title = readerTabName(tab);
+          const name = pending ? labels.get(tab.opening) ?? title : title;
           const retryLabel = tab.reload ? `Retry reloading ${name}` : `Retry opening ${name}`;
           return <div key={tab.id} role="presentation" data-file-slot={tab.id}
             className={cn("flex shrink-0 items-center rounded-md text-sm", tab.id === active && "bg-accent")}>
-            {pending ? <span role="status" className="max-w-44 truncate px-2 text-muted-foreground" title={tab.openings[0].request.path}>
+            {pending ? <span role="status" className="max-w-44 truncate px-2 text-muted-foreground" title={tab.request.path}>
               {tab.slow ? `${name} is taking longer to load` : `${name} loading…`}
             </span> : <button type="button" role="tab" id={`${panelId(tab.id)}-tab`} data-file-tab={tab.id}
               aria-controls={panelId(tab.id)} aria-selected={tab.id === active} tabIndex={tab.id === active || (active === undefined && tab.id === selectableTabs[0]?.id) ? 0 : -1}
-              title={displayed.meta?.absolute_path ?? (displayed.openings[0].readRequest ?? displayed.openings[0].request).path}
+              title={displayed.opening.confirmed?.absolute_path ?? displayed.request.path}
               className="max-w-44 truncate rounded-md px-2 py-1"
               onClick={() => actions.select(tab.request)} onKeyDown={(event) => onTabKey(event, tab)}>{name}</button>}
-            {(pending || tab.reload) && tab.slow && pendingFileRetry(tab, tabs) && <button type="button" className={`${fileToolClass} !size-6`}
+            {(pending || tab.reload) && tab.slow && canRetryPendingFile(tab) && <button type="button" className={`${fileToolClass} !size-6`}
               title={retryLabel} aria-label={retryLabel} onClick={() => actions.retryPending(tab.request)}>
               <IconRefresh size={14} aria-hidden="true" />
             </button>}
@@ -487,9 +509,9 @@ function FileViewerTabs({ viewer, token, onClose }: InnerProps) {
         <IconX size={18} aria-hidden="true" />
       </button>}
     </div>}
-    {state.reuseChecks.map((check) => <ConfirmFileReuse key={check.action} action={check.action}
-      request={check.readRequest ?? check.request}
-      label={labels.get(check) ?? (state.reuseChecks.length > 1 ? check.request.path : undefined)}
+    {state.reuseChecks.map((check) => <ConfirmFileReuse key={check.attempt} attempt={check.attempt}
+      request={check.confirmationRequest}
+      label={state.reuseChecks.length > 1 || labels.get(check) !== check.request.path ? labels.get(check) : undefined}
       token={token} settle={actions.settleReuse} retry={actions.retryReuse} hidden={!!picker} />)}
     {state.notice && <p role="status" className="px-4 py-2 text-sm text-muted-foreground">{state.notice}</p>}
     <div className="relative flex min-h-0 flex-1 flex-col">
@@ -497,39 +519,65 @@ function FileViewerTabs({ viewer, token, onClose }: InnerProps) {
         onCancel={() => actions.hidePicker(picker.action)} onSelect={(path, options) => actions.pick(picker.action, path, options)} />}
       {!picker && active === undefined && <DialogPrimitive.Title className="px-5 py-4 text-sm font-semibold">Open file</DialogPrimitive.Title>}
       {!picker && state.readerFailure && <div className="border-b border-destructive/30 px-5 py-2 text-sm text-destructive">
-        <OpeningFailureNotice failure={state.readerFailure} label={labels.get(state.readerFailure)} token={token} retry={actions.retryReaderFailure} />
+        <OpeningFailureNotice failure={state.readerFailure} label={labels.get(state.readerFailure)} token={token}
+          retry={actions.retryReaderFailure} edit={actions.editReaderFailure} />
       </div>}
-      {tabs.map((tab) => {
-        const visible = !picker && active === tab.id;
-        const displayed = displayedReaderTab(tab);
-        return <section key={tab.id} role="tabpanel" id={panelId(tab.id)} data-file-panel
-          aria-labelledby={selectableReaderTab(tab) || visible ? `${panelId(tab.id)}-tab` : undefined}
-          aria-hidden={!visible || undefined} inert={!visible}
-          className={cn("flex min-h-0 min-w-0 flex-1 flex-col", !visible && "invisible absolute inset-0 pointer-events-none")}>
-          {tab.retained && <p role="status" className="shrink-0 px-5 py-1 text-sm text-muted-foreground">Reloading file…</p>}
-          {(tab.retained ? [tab.retained, tab] : [tab]).map((attempt) => (
-            <div key={attempt.attempt} aria-hidden={attempt !== displayed || undefined} inert={attempt !== displayed}
-              className={cn("flex min-h-0 min-w-0 flex-1 flex-col",
-                attempt !== displayed && "invisible absolute inset-0 pointer-events-none")}>
-              <FileViewerInner tab={attempt === tab ? displayedRecovery(tab, tabs) : attempt}
-                failures={attempt === displayed ? tab.failures : undefined}
-                openingLabels={labels}
-                retained={attempt === tab.retained}
-                retryable={attempt.phase === "opening" && !!pendingFileRetry(attempt, tabs)}
-                reload={attempt === tab ? tab.reload : undefined}
-                panelId={`${panelId(tab.id)}-attempt-${attempt.attempt}`} active={visible && attempt === displayed}
-                actions={actions} token={token} onClose={onClose}
-                readerSize={readerSize} changeReaderSize={sizeKey ? changeReaderSize : undefined} />
-            </div>
-          ))}
-        </section>;
-      })}
+      {tabs.map((tab) => <FileViewerPanel key={tab.id} tab={tab} panelId={panelId(tab.id)} visible={!picker && active === tab.id}
+        openingLabels={labels} actions={actions} token={token} onClose={onClose}
+        readerSize={readerSize} changeReaderSize={sizeKey ? changeReaderSize : undefined} />)}
     </div>
   </div>;
 }
 
-function OriginalPdfLinks({ sessionId, meta, token }: { sessionId: string; meta: FileViewerMetadata; token: string }) {
-  const url = fileUrl(sessionId, meta.path, { source: meta.source, canonicalPathId: meta.canonical_path_id });
+function FileViewerPanel({ tab, panelId, visible, openingLabels, actions, token, onClose, readerSize, changeReaderSize }: {
+  tab: ReaderTab; panelId: string; visible: boolean; openingLabels: ReadonlyMap<Opening, string>;
+  actions: FileViewerTabActions; token: string; onClose: () => void;
+  readerSize: ReaderSize; changeReaderSize?: (value: string) => void;
+}) {
+  const [failureDraft, setFailureDraft] = useState<PathDraft | null>(null);
+  const displayed = displayedReaderTab(tab);
+  const failure = tab.feedback?.failure;
+  const positionNotice = tab.positionNotice;
+  return <section role="tabpanel" id={panelId} data-file-panel
+    aria-labelledby={selectableReaderTab(tab) || visible ? `${panelId}-tab` : undefined}
+    aria-hidden={!visible || undefined} inert={!visible}
+    className={cn("flex min-h-0 min-w-0 flex-1 flex-col", !visible && "invisible absolute inset-0 pointer-events-none")}>
+    {tab.retained && <p role="status" className="shrink-0 px-5 py-1 text-sm text-muted-foreground">
+      {tab.slow && !tab.opening.confirmed ? "Reloading is taking longer…" : "Reloading file…"}
+    </p>}
+    {visible && failure && (
+      <ReadingNotice key={failure.feedbackId} label="Dismiss file opening notice" className="border-destructive/30 text-destructive"
+        dismiss={() => actions.dismissFailure(displayed.request, failure)}>
+        <OpeningFailureNotice failure={failure} label={openingLabels.get(failure)} token={token}
+          retry={(target) => actions.retryFailure(displayed.request, target)}
+          edit={(target) => {
+            if (!actions.canEditFailure(displayed.request, target)) return;
+            const read = failedFileRead(target);
+            setFailureDraft(fileEditDraft(read.path, read.position, { failure: target }));
+          }} />
+      </ReadingNotice>
+    )}
+    {visible && positionNotice && (
+      <ReadingNotice key={positionNotice.id} label="Dismiss position notice"
+        dismiss={() => actions.dismissPosition(displayed.request, positionNotice.id)}>
+        <p role="note" className="text-muted-foreground">{positionNotice.message}</p>
+      </ReadingNotice>
+    )}
+    {(tab.retained ? [tab.retained, tab] : [tab]).map((attempt) => {
+      const shown = attempt === displayed;
+      return <div key={attempt.attempt} aria-hidden={!shown || undefined} inert={!shown}
+        className={cn("flex min-h-0 min-w-0 flex-1 flex-col", !shown && "invisible absolute inset-0 pointer-events-none")}>
+        <FileViewerInner tab={attempt} failureDraft={shown ? failureDraft : null} setFailureDraft={setFailureDraft}
+          retained={attempt === tab.retained} reload={attempt === tab ? tab.reload : undefined}
+          panelId={`${panelId}-attempt-${attempt.attempt}`} active={visible && shown}
+          actions={actions} token={token} onClose={onClose} readerSize={readerSize} changeReaderSize={changeReaderSize} />
+      </div>;
+    })}
+  </section>;
+}
+
+function OriginalPdfLinks({ request, meta, token }: { request: FileViewerRequest; meta: FileViewerMetadata; token: string }) {
+  const url = confirmedFileUrl(request, meta);
   const download = `${url}&token=${encodeURIComponent(token)}`;
   return <>
     <a className="underline" href={`${download}&preview=true`} target="_blank" rel="noreferrer">Open original PDF</a>
@@ -541,9 +589,9 @@ function openingLabel(opening: Opening, openings: readonly Opening[]) {
   const path = opening.request.path;
   const others = openings.filter((other) => other !== opening && other.request.path === path);
   if (!others.length) return undefined;
-  const file = confirmedOpeningFile(opening);
+  const file = opening.confirmed;
   if (!file) return `${path} (target unconfirmed)`;
-  return others.some((other) => confirmedOpeningFile(other)?.absolute_path === file.absolute_path)
+  return others.some((other) => other.confirmed?.absolute_path === file.absolute_path)
     ? `${file.absolute_path} (${file.source})` : file.absolute_path;
 }
 
@@ -551,15 +599,15 @@ function accessibleTargetName(target: string) {
   return target.trim().replace(/\s+/g, " ");
 }
 
-function openingLabels(openings: Opening[]) {
-  const candidates = openings.map((opening) => {
-    const label = openingLabel(opening, openings);
-    const target = label ?? opening.request.path;
-    return { opening, label, target, name: accessibleTargetName(target) };
+function openingLabels(entries: { opening: Opening; name: string }[]) {
+  const openings = entries.map(({ opening }) => opening);
+  const candidates = entries.map(({ opening, name }) => {
+    const target = openingLabel(opening, openings) ?? name;
+    return { opening, target, name: accessibleTargetName(target) };
   }).sort((a, b) => a.opening.action - b.opening.action);
   const reserved = new Set(candidates.map(({ name }) => name));
   const labels = new Map<Opening, string>();
-  for (const { opening, label, target, name } of candidates) {
+  for (const { opening, target, name } of candidates) {
     // Accessible names collapse whitespace. Number collisions without reusing a literal name.
     if (candidates.filter((candidate) => candidate.name === name).length > 1) {
       let attempt = 1;
@@ -570,8 +618,8 @@ function openingLabels(openings: Opening[]) {
       }
       reserved.add(accessibleTargetName(numbered));
       labels.set(opening, numbered);
-    } else if (label !== undefined) {
-      labels.set(opening, label);
+    } else {
+      labels.set(opening, target);
     }
   }
   return labels;
@@ -583,19 +631,50 @@ function OpeningFailureNotice({ failure, label = failure.request.path, token, re
   return <div>
     <p role="alert" className="whitespace-pre-wrap break-words">Couldn't open {label}. {failure.message}</p>
     <div className="flex flex-wrap gap-x-4">
-      <button type="button" className="break-all text-left underline" onClick={() => retry(failure)}>
+      {(failure.recovery === "retry" || failure.recovery === "reconfirm") && <button type="button" className="break-all text-left underline" onClick={() => retry(failure)}>
         Retry opening {label}
-      </button>
+      </button>}
       {failure.recovery === "edit" && edit && <button type="button" className="break-all text-left underline" onClick={() => edit(failure)}>
         Edit path for {label}
       </button>}
-      {failure.originalPdf && <OriginalPdfLinks sessionId={failure.request.sessionId} meta={failure.originalPdf} token={token} />}
+    {failure.originalPdf && <OriginalPdfLinks request={failure.request} meta={failure.originalPdf} token={token} />}
     </div>
   </div>;
 }
 
-function ConfirmFileReuse({ action, request, label, token, settle, retry, hidden }: {
-  action: number;
+const READING_NOTICE_MS = 8000;
+
+function ReadingNotice({ children, label, dismiss, className }: {
+  children: ReactNode; label: string; dismiss: () => void; className?: string;
+}) {
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const remaining = useRef(READING_NOTICE_MS);
+  const expire = useEffectEvent(dismiss);
+  const paused = hovered || focused;
+  useEffect(() => {
+    if (paused) return;
+    const started = Date.now();
+    const timer = window.setTimeout(() => expire(), remaining.current);
+    return () => {
+      window.clearTimeout(timer);
+      remaining.current = Math.max(0, remaining.current - Math.max(0, Date.now() - started));
+    };
+  }, [paused]);
+  return <div className={cn("flex max-h-28 shrink-0 items-start justify-between gap-3 overflow-y-auto border-b px-5 py-2 text-sm", className)}
+    onMouseEnter={() => setHovered(true)} onMouseLeave={() => setHovered(false)}
+    onFocus={() => setFocused(true)} onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+    }}>
+    <div className="min-w-0">{children}</div>
+    <button type="button" className={fileToolClass} aria-label={label} title={label} onClick={dismiss}>
+      <IconX size={16} />
+    </button>
+  </div>;
+}
+
+function ConfirmFileReuse({ attempt, request, label, token, settle, retry, hidden }: {
+  attempt: number;
   request: FileViewerRequest;
   label?: string;
   token: string;
@@ -614,23 +693,25 @@ function ConfirmFileReuse({ action, request, label, token, settle, retry, hidden
         const meta = await readFileMetadata(request, {
           headers: { Authorization: `Bearer ${token}` }, cache: "no-store", signal: abort.signal,
         });
-        if (!abort.signal.aborted) settle(action, { meta });
+        if (!abort.signal.aborted) settle(attempt, { meta });
       } catch (error) {
-        if (!abort.signal.aborted) settle(action, { error: readFailure(error) });
+        if (!abort.signal.aborted) settle(attempt, { error: readFailure(error) });
       }
     })();
     return () => {
       window.clearTimeout(timer);
       abort.abort();
     };
-  }, [action, request, settle, token]);
+  }, [attempt, request, settle, token]);
   if (hidden) return null;
   return <div className="flex shrink-0 items-center gap-2 px-4 py-1 text-sm">
-    <span role="status" className="min-w-0 truncate" title={label ?? request.path}>Confirming {label ?? request.path}…</span>
+    <span role="status" className="min-w-0 truncate" title={label ?? request.path}>
+      {slow ? `Still confirming ${label ?? request.path}…` : `Confirming ${label ?? request.path}…`}
+    </span>
     {slow && <button type="button" className="shrink-0 underline" aria-label={label ? `Retry confirmation for ${label}` : undefined}
-      onClick={() => retry(action)}>Retry confirmation</button>}
+      onClick={() => retry(attempt)}>Retry confirmation</button>}
     <button type="button" className="shrink-0 underline" aria-label={label ? `Cancel confirmation for ${label}` : undefined}
-      onClick={() => settle(action)}>Cancel confirmation</button>
+      onClick={() => settle(attempt)}>Cancel confirmation</button>
   </div>;
 }
 
@@ -688,59 +769,50 @@ function FileActions({ actions }: { actions: FileAction[] }) {
   );
 }
 
-function FileViewerInner({ tab, failures, openingLabels, reload, retained, retryable, panelId, active, actions: tabActions, token, onClose,
+function FileViewerInner({ tab, failureDraft, setFailureDraft, reload, retained, panelId, active, actions: tabActions, token, onClose,
   readerSize, changeReaderSize }: {
-  tab: ReaderAttempt; failures?: OpeningFailure[]; openingLabels: ReadonlyMap<Opening, string>;
-  reload?: ReaderTab["reload"]; retained: boolean; retryable: boolean;
+  tab: ReaderAttempt;
+  failureDraft: PathDraft | null; setFailureDraft: Dispatch<SetStateAction<PathDraft | null>>;
+  reload?: ReaderTab["reload"]; retained: boolean;
   panelId: string; active: boolean; actions: FileViewerTabActions; token: string; onClose: () => void;
   readerSize: ReaderSize; changeReaderSize?: (value: string) => void;
 }) {
   const viewer = tab.request;
-  const { sessionId, path, source, sourceDirectory, mode } = viewer;
+  const { sessionId, path, source, mode, reloadSource } = viewer;
   const isCurrent = useCallback(() => tabActions.owns(viewer), [tabActions, viewer]);
   const canInteract = useCallback(() => tabActions.canInteract(viewer), [tabActions, viewer]);
   const markSlow = useCallback(() => tabActions.markSlow(viewer), [tabActions, viewer]);
+  const retryPending = useCallback(() => tabActions.retryPending(viewer), [tabActions, viewer]);
   const startPositionAction = useCallback((position?: FilePosition | null) => tabActions.locate(viewer, position),
     [tabActions, viewer]);
   const unsupported = mode === "unsupported";
-  const readResolvesCommand = usesFileResolver(viewer);
-  const confirmedMeta = tab.meta ?? null;
-  const awaitingFileTarget = tab.phase === "opening" && !retryable;
-  const watchSlowRead = tab.phase === "opening" && (mode !== "description" || confirmedMeta !== null);
+  const resolvesCommand = usesFileResolver(viewer);
+  const { opening, phase } = tab;
+  const confirmedMeta = opening.confirmed ?? null;
   useEffect(() => {
-    if (!watchSlowRead) return;
+    if (phase !== "opening") return;
     const timer = window.setTimeout(markSlow, SLOW_FILE_READ_MS);
     return () => window.clearTimeout(timer);
-  }, [markSlow, watchSlowRead]);
-  const [confirmedOnStart] = useState(() => !!tab.meta);
+  }, [markSlow, phase]);
+  const [confirmedOnStart] = useState(() => !!confirmedMeta);
   const reportFailure = useCallback((failure: FileReadFailure) => tabActions.fail(viewer, failure), [tabActions, viewer]);
-  const markReady = useCallback(() => {
-    const conflict = tabActions.ready(viewer);
-    if (conflict) reportFailure(new FileReadFailure(conflict, "edit"));
-  }, [tabActions, viewer, reportFailure]);
+  const markReady = useCallback(() => tabActions.ready(viewer), [tabActions, viewer]);
   const [reportedTarget, setCommandTarget] = useState<ShowMeEditTarget | null>(null);
   const [reportedDescription, setDescription] = useState(() => mode === "description" ? path : viewer.description);
   const [canSearchDescription, setCanSearchDescription] = useState(false);
-  const latestOpening = tab.openings[0];
-  const outcome = tab.phase === "recovery" ? latestOpening.failure : undefined;
+  const outcome = tab.error;
   const clarification = outcome?.clarification ? outcome.message : undefined;
   const error = outcome?.clarification ? undefined : outcome ?? (unsupported ? UNSUPPORTED_LINK : undefined);
-  const latestRequest = latestOpening.request;
-  const latestRead = latestOpening.readRequest ?? latestRequest;
-  const recoveryRequest = tab.phase === "recovery" && latestRead !== viewer ? latestRead : undefined;
-  const shownRequest = recoveryRequest ?? viewer;
-  const resolvesCommand = usesFileResolver(shownRequest);
-  const commandTarget = recoveryRequest ? latestOpening.resolved?.target ?? null : reportedTarget;
-  const description = recoveryRequest ? openingDescription(latestOpening) : reportedDescription;
-  const requestedPosition = tab.position;
-  const position = requestedPosition === undefined && !recoveryRequest
-    ? commandTarget?.position ?? undefined : requestedPosition ?? undefined;
-  const [pathDraft, setDraft] = useState(() => mode === "edit" ? fileEditDraft(path, position) : null);
-  const draftRetired = (pathDraft?.openingRequest && pathDraft.openingRequest !== latestRequest) ||
-    (pathDraft?.failure && !failures?.includes(pathDraft.failure));
-  const draft = draftRetired ? null : pathDraft;
+  const commandTarget = opening.resolved?.target ?? reportedTarget;
+  const description = opening.resolved?.description ?? reportedDescription;
+  const position = tab.position ?? undefined;
+  const [pathDraft, setPathDraft] = useState(() => mode === "edit" ? fileEditDraft(path, position) : null);
+  const draftRetired = pathDraft?.openingRequest && pathDraft.openingRequest !== opening.request;
+  const draft = failureDraft ?? (draftRetired ? null : pathDraft);
+  const setDraft = failureDraft ? setFailureDraft : setPathDraft;
+  const setDropNotice = (notice: boolean) =>
+    setDraft((current) => current && current.dropNotice !== notice ? { ...current, dropNotice: notice } : current);
   const [copyStatus, setCopyStatus] = useState("");
-  const [dropNotice, setDropNotice] = useState(false);
   const [markdownView, setMarkdownView] = useState<{ requested: ReaderTab["position"]; mode: "reading" | "source" }>();
   const [pathExpanded, setPathExpanded] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
@@ -749,20 +821,21 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
   }, [readerSize, active]);
   const [positionResult, setPositionResult] = useState<{ position: FilePosition; note: string | null; footnoteId?: string }>();
   const positioned = useRef<FilePosition | undefined>(undefined);
+  const activePosition = active ? position : undefined;
   const reportPosition = useCallback<ReportFilePosition>((note, footnoteId) => {
-    if (!active || !position || positioned.current === position || !canInteract()) return false;
-    positioned.current = position;
-    setPositionResult({ position, note, footnoteId });
+    if (!activePosition || positioned.current === activePosition || !canInteract()) return false;
+    positioned.current = activePosition;
+    setPositionResult({ position: activePosition, note, footnoteId });
     return true;
-  }, [active, position, canInteract]);
-  const locate = useCallback<LocateInDocument>((target, anchor) => {
+  }, [activePosition, canInteract]);
+  const locate = useCallback<LocateInDocument>((target, anchor, invalidLocation) => {
     const nextPosition = target ? { ...target } : null;
-    if (!startPositionAction(nextPosition)) return;
+    if (!tabActions.locate(viewer, nextPosition, invalidLocation) || invalidLocation) return;
     // Each activation owns one scroll, even when its destination is the same.
     setMarkdownView(undefined);
     if (anchor) anchor.scrollIntoView?.({ block: "start" });
     else if (!target && scroller.current) scroller.current.scrollTop = 0;
-  }, [startPositionAction]);
+  }, [tabActions, viewer]);
   const open = useCallback((target: string, options?: FileViewerOptions) => {
     tabActions.open(viewer, target, options);
   }, [tabActions, viewer]);
@@ -785,11 +858,10 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
         // StrictMode can retire an effect before its replacement dispatches.
         await Promise.resolve();
         if (!current()) return;
-        let target = path;
-        let resolved: Pick<ShowMeResolveResponse, "target" | "description"> | undefined;
-        if (readResolvesCommand) {
+        if (resolvesCommand) {
           const url = new URL(`/api/sessions/${encodeURIComponent(sessionId)}/showme/resolve`, window.location.origin);
           if (source) url.searchParams.set("source", source);
+          if (reloadSource) url.searchParams.set("reload_source", reloadSource);
           const res = await fetch(url, {
             ...init, method: "POST",
             headers: { ...init.headers, "Content-Type": "application/json" },
@@ -805,84 +877,67 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
             if (failure?.code === "working_directory_unavailable") {
               throw new FileReadFailure(failure.detail, "edit", { denied: true });
             }
-            throw fileStatusError(res.status, failure?.detail);
+            throw fileStatusError(res.status, failure);
           }
           const result = (await res.json()) as ShowMeResolveResponse;
           if (!current()) return;
-          setCommandTarget(result.target ?? null);
           if (result.description) setDescription(result.description);
-          resolved = { target: result.target, description: result.description };
-          if (result.metadata) {
-            tabActions.confirm(viewer, result.metadata, resolved);
-            return;
+          if ("metadata" in result) {
+            setCommandTarget(result.target);
+            tabActions.confirm(viewer, result.metadata, { target: result.target, description: result.description });
+          } else {
+            setCommandTarget(null);
+            tabActions.fail(viewer, { message: result.message, clarification: true });
           }
-          if (!result.path) {
-            const message = result.message || "Couldn't resolve that file reference.";
-            if (result.description || mode === "description") {
-              tabActions.fail(viewer, { message, clarification: true });
-              return;
-            }
-            throw new FileReadFailure(message, "edit");
-          }
-          target = result.path;
+          return;
         }
-        const m = await readFileMetadata({ sessionId, path: target, source, sourceDirectory }, init);
-        if (current()) tabActions.confirm(viewer, m, resolved);
+        const metadata = await readFileMetadata(viewer, init);
+        if (current()) tabActions.confirm(viewer, metadata);
       } catch (e) {
         if (current()) reportFailure(readFailure(e));
       }
     })();
     return () => abort.abort();
-  }, [viewer, sessionId, path, source, sourceDirectory, mode, token, unsupported, readResolvesCommand, confirmedOnStart, isCurrent, reportFailure, tabActions]);
+  }, [viewer, sessionId, path, source, mode, reloadSource, token, unsupported, resolvesCommand, confirmedOnStart, isCurrent, reportFailure, tabActions]);
 
   const visibleMeta = error && (error.denied || reload) ? null : confirmedMeta;
+  const positionCheck = tab.positionCheck;
+  const finishPositionCheck = useCallback((note?: string) => {
+    if (positionCheck) tabActions.settlePosition(viewer, positionCheck, note);
+  }, [tabActions, viewer, positionCheck]);
+  const positionTypeNote = visibleMeta && positionNoteFor(positionCheck?.position, visibleMeta.kind);
+  useLayoutEffect(() => {
+    if (active && positionTypeNote) finishPositionCheck(positionTypeNote);
+  }, [active, finishPositionCheck, positionTypeNote]);
   const locatedPosition = positionResult?.position === position ? positionResult : undefined;
   const editablePosition = locatedPosition?.footnoteId ? { kind: "heading" as const, slug: locatedPosition.footnoteId } : position;
-  const positionNote = visibleMeta
-    ? positionNoteFor(position, visibleMeta.kind) ?? locatedPosition?.note
-    : undefined;
+  const resolvedPositionNote = visibleMeta ? positionNoteFor(position, visibleMeta.kind) ?? locatedPosition?.note : undefined;
+  const positionNote = visibleMeta ? tab.invalidLocation ?? resolvedPositionNote : undefined;
+  const positionReport = tab.positionReport;
+  useLayoutEffect(() => {
+    if (active && phase === "ready" && resolvedPositionNote && positionReport !== undefined) {
+      tabActions.reportPositionFailure(viewer, positionReport, resolvedPositionNote);
+    }
+  }, [active, phase, positionReport, resolvedPositionNote, tabActions, viewer]);
   const positionPending = !!position && positionNote === undefined;
   const showSource = markdownView && markdownView.requested === tab.position
     ? markdownView.mode === "source" : position?.kind === "lines";
-  const displayPath = visibleMeta?.absolute_path ?? commandTarget?.path ?? (resolvesCommand && description ? "" : shownRequest.path);
+  const displayPath = visibleMeta?.absolute_path ?? commandTarget?.path ?? (resolvesCommand && description ? "" : path);
   const filename = (error && reload?.name) || displayPath.split("/").pop() || displayPath ||
     (description ? "Find a file" : "Open file");
-  const canonicalUrl = visibleMeta && fileUrl(sessionId, visibleMeta.path, {
-    source: visibleMeta.source, canonicalPathId: visibleMeta.canonical_path_id,
-  });
+  const canonicalUrl = visibleMeta && confirmedFileUrl(viewer, visibleMeta);
   const bytesUrl = canonicalUrl && `${canonicalUrl}&token=${encodeURIComponent(token)}`;
   const previewUrl = bytesUrl && (visibleMeta?.kind === "pdf" ? `${bytesUrl}&preview=true` : bytesUrl);
   const search = (text: string) => open(text, { mode: "description" });
-  const recoveryRead = tab.phase === "recovery" ? retryFileRead(latestOpening) : undefined;
-  const retry = () => {
-    if (tab.phase === "opening") {
-      tabActions.retryPending(viewer);
-    } else if (tab.phase === "ready" && viewer.reloadCommand) {
-      tabActions.reload(viewer, viewer.reloadCommand, {
-        mode: "command", source: confirmedMeta?.source ?? source, position: requestedPosition,
-      });
-    } else if (recoveryRead) {
-      tabActions.reload(viewer, recoveryRead.path, { ...recoveryRead, position: requestedPosition });
-    } else if (confirmedMeta && !sourceDirectory && description) {
-      tabActions.reload(viewer, confirmedMeta.absolute_path, { source: confirmedMeta.source, position, description });
-    } else if (description && commandTarget) {
-      const candidate = commandTarget.path;
-      tabActions.reload(viewer, candidate.startsWith("~") ? `./${candidate}` : candidate, { description });
-    } else {
-      tabActions.reload(viewer, path, {
-        ...viewer, source: confirmedMeta?.source ?? source, position: requestedPosition, description,
-      });
-    }
-  };
+  const retry = () => tabActions.reload(viewer);
   const choose = () => tabActions.showPicker(viewer);
   const edit = () => {
     if (!tabActions.canEditPath(viewer)) return;
-    const target = recoveryRequest && !resolvesCommand ? recoveryRequest.path
-      : resolvesCommand && description && !confirmedMeta && !commandTarget ? ""
-      : editablePath(shownRequest, visibleMeta ?? (resolvesCommand && !commandTarget ? confirmedMeta : null), commandTarget);
-    const openingRequest = tab.phase === "ready" ? undefined : latestRequest;
-    setDraft(fileEditDraft(target, editablePosition, { openingRequest }));
-    setDropNotice(false);
+    const target = resolvesCommand && description && !confirmedMeta && !commandTarget ? ""
+      : editablePath(viewer, visibleMeta ?? (resolvesCommand && !commandTarget ? confirmedMeta : null), commandTarget);
+    const openingRequest = phase === "ready" ? undefined : opening.request;
+    const draftPosition = tab.position === undefined ? commandTarget?.position ?? undefined : editablePosition;
+    setPathDraft(fileEditDraft(target, draftPosition, { openingRequest }));
   };
   const updateDraft = (field: "path" | "position", value: string) => {
     setDraft((current) => current && current[field] !== value ? { ...current, [field]: value } : current);
@@ -967,8 +1022,10 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
       { label: "Copy /showme command", icon: <IconTerminal2 size={16} />, run: () => void copy(true), disabled: positionPending && !error },
     );
   }
-  if (mode !== "edit" && !unsupported && !awaitingFileTarget && (!resolvesCommand || !description || confirmedMeta || recoveryRead)) {
+  if (phase === "ready") {
     actions.push({ label: "Reload file", icon: <IconRefresh size={16} />, run: retry, disabled: draft !== null });
+  } else if (phase === "opening" && confirmedMeta) {
+    actions.push({ label: "Retry file", icon: <IconRefresh size={16} />, run: retryPending, disabled: draft !== null });
   }
   if (previewUrl && visibleMeta?.kind === "pdf") {
     actions.push({ label: "Open in new tab", icon: <IconExternalLink size={16} />, href: previewUrl, target: "_blank" });
@@ -1022,16 +1079,6 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
       </header>
 
       {copyStatus && <div role="status" className="px-5 py-1 text-sm text-muted-foreground">{copyStatus}</div>}
-      {!!failures?.length && <div className="max-h-28 shrink-0 space-y-2 overflow-y-auto border-b border-destructive/30 px-5 py-2 text-sm text-destructive">
-        {failures.map((failure) => <OpeningFailureNotice key={failure.action} failure={failure} label={openingLabels.get(failure)} token={token}
-          retry={(target) => tabActions.reopenFailure(viewer, target)}
-          edit={retained ? undefined : (target) => {
-            if (!tabActions.canEditPath(viewer)) return;
-            const read = failedFileRead(target);
-            setDraft(fileEditDraft(read.path, read.position, { failure: target }));
-            setDropNotice(false);
-          }} />)}
-      </div>}
       {visibleMeta?.kind === "markdown" && !error && (
         <div role="group" aria-label="Markdown view" className="flex gap-1 border-b border-border px-5 py-1.5 text-sm">
           <button type="button" aria-pressed={!showSource} disabled={positionPending}
@@ -1042,31 +1089,30 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
             onClick={() => setMarkdownView({ requested: tab.position, mode: "source" })}>Source</button>
         </div>
       )}
-      {positionNote && !error && <div role="note" className="px-5 py-2 text-sm text-muted-foreground">{positionNote}</div>}
-      {!retained && draft !== null && (
+      {(!retained || failureDraft) && draft !== null && (
         <form className="flex flex-wrap items-end gap-2 border-b border-border p-3" onSubmit={(event) => {
           event.preventDefault();
-          if (canSubmitDraft && tabActions.canEditPath(viewer)) {
-            const target = literalDraftPath.startsWith("~") ? `./${literalDraftPath}` : literalDraftPath;
+          if (canSubmitDraft && (draft.failure ? canInteract() : tabActions.canEditPath(viewer))) {
             const editedPosition = parseFilePosition(draft.position.trim()) ?? null;
             const samePath = literalDraftPath === draft.initialPath;
-            const absolute = target.startsWith("/");
-            // The intent can confirm a source while the draft is open. A
-            // later byte denial hides metadata but cannot change that source.
             const failure = draft.failure;
-            const failedRead = failure ? failedFileRead(failure) : undefined;
-            const editedRequest = failure?.request ?? shownRequest;
-            const currentFile = !failure && !recoveryRequest && tab.phase === "ready" ? confirmedMeta : null;
-            const boundSource = (failedRead ? failedRead.source
-              : confirmedMeta?.source ?? recoveryRead?.source ?? commandTarget?.source) ?? editedRequest.source;
-            const selectedSource = samePath ? boundSource : absolute ? sourceContainingPath(boundSource, filePathSegments(target))
-              : currentFile?.source ?? editedRequest.source;
-            const optionsRequest = samePath ? failedRead ?? recoveryRead ?? editedRequest : editedRequest;
+            const editedRequest = failure?.request ?? viewer;
+            const editedOpening = failure ?? opening;
+            const editedFile = editedOpening.confirmed ?? editedOpening.previousTarget;
+            // A command can resolve a relative alias in one source to a file
+            // in another. A position-only edit rechecks that confirmed file.
+            const confirmedTarget = samePath && usesFileResolver(editedOpening.request)
+              ? editedFile?.absolute_path : undefined;
+            const target = confirmedTarget ?? (literalDraftPath.startsWith("~") ? `./${literalDraftPath}` : literalDraftPath);
+            const absolute = target.startsWith("/");
+            const currentFile = !failure && phase === "ready" ? confirmedMeta : null;
+            const boundSource = editedFile?.source ?? (failure ? undefined : commandTarget?.source) ?? editedRequest.source;
+            const selectedSource = !samePath && absolute ? sourceContainingPath(boundSource, filePathSegments(target)) : boundSource;
+            const optionsRequest = samePath && failure ? failedFileRead(failure) : editedRequest;
             const options = { source: selectedSource,
               sourceDirectory: absolute ? undefined : currentFile?.canonical_directory ?? optionsRequest.sourceDirectory,
-              position: editedPosition, description: failure ? optionsRequest.description : description,
-              reloadCommand: samePath ? optionsRequest.reloadCommand : undefined };
-            if (failure) tabActions.reopenFailure(viewer, failure, { path: target, options, samePath });
+              position: editedPosition, description: failure ? optionsRequest.description : description };
+            if (failure) tabActions.editFailure(viewer, failure, target, options);
             else tabActions.edit(viewer, target, options, samePath);
             setDraft(null);
           }
@@ -1089,7 +1135,7 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
             {draft.path.includes("␛") && <span id={`${panelId}-path-escapes`} className="text-xs text-muted-foreground">
               ␛r represents a carriage return. Enter ␛␛ for a literal ␛.
             </span>}
-            {dropNotice && <span role="status" className="text-xs text-muted-foreground">
+            {draft.dropNotice && <span role="status" className="text-xs text-muted-foreground">
               Use copy or cut, then paste to place this text.
             </span>}
           </div>
@@ -1108,14 +1154,14 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
           <DescriptionForm description={description} clarification={clarification} search={search} choose={choose} />
         )}
         {error ? (
-          <FileError failure={error} compact={!!description} reload={!!reload}
+          <FileError failure={error} compact={!!description}
             originalPdf={error.originalPdf && reload ?
-              <OriginalPdfLinks sessionId={sessionId} meta={error.originalPdf} token={token} /> : undefined}
-            retry={!resolvesCommand || !description || confirmedMeta || recoveryRead || commandTarget ? retry : undefined}
+              <OriginalPdfLinks request={viewer} meta={error.originalPdf} token={token} /> : undefined}
+            retry={!resolvesCommand || !description || confirmedMeta ? retry : undefined}
             edit={!retained && draft === null ? edit : undefined} choose={choose}
             search={canSearchDescription ? () => search(path) : undefined} />
         ) : mode === "edit" || clarification ? null : !visibleMeta || !canonicalUrl || !previewUrl ? (
-          tab.slow ? <SlowFileLoading onRetry={awaitingFileTarget ? undefined : retry}>The file has not finished loading.</SlowFileLoading>
+          tab.slow ? <SlowFileLoading onRetry={canRetryPendingFile(tab) ? retryPending : undefined}>The file has not finished loading.</SlowFileLoading>
             : <FileLoading>{mode === "description" ? "Searching the conversation…"
             : mode === "command" ? "Loading file or searching the conversation…" : "Loading…"}</FileLoading>
         ) : (
@@ -1127,16 +1173,18 @@ function FileViewerInner({ tab, failures, openingLabels, reload, retained, retry
             panelId={panelId}
             isCurrent={isCurrent}
             canInteract={canInteract}
-            position={position}
+            position={phase === "ready" ? position : undefined}
+            positionCheck={active && !positionTypeNote ? positionCheck?.position : undefined}
+            finishPositionCheck={finishPositionCheck}
             onPosition={reportPosition}
             onLocate={locate}
             startPositionAction={startPositionAction}
-            showSource={showSource}
+            showSource={phase === "ready" && showSource}
             onOpen={open}
             onReady={markReady}
             onError={reportFailure}
             active={active}
-            onRetry={retry}
+            onRetry={retryPending}
             slow={tab.slow}
           />
         )}
@@ -1177,8 +1225,8 @@ function FileLoading({ children = "Loading…" }: { children?: string }) {
   );
 }
 
-function FileError({ failure, retry, edit, choose, search, compact, reload, originalPdf }: {
-  failure: OpenError; retry?: () => void; edit?: () => void; choose: () => void; search?: () => void; compact: boolean; reload?: boolean;
+function FileError({ failure, retry, edit, choose, search, compact, originalPdf }: {
+  failure: OpenError; retry?: () => void; edit?: () => void; choose: () => void; search?: () => void; compact: boolean;
   originalPdf?: ReactNode;
 }) {
   return (
@@ -1187,7 +1235,8 @@ function FileError({ failure, retry, edit, choose, search, compact, reload, orig
         <div className="font-semibold mb-1">Couldn't open file</div>
         <div role="alert" className="whitespace-pre-wrap break-words">{failure.message}</div>
         <div className="mt-2 flex flex-wrap gap-4">
-          {(reload || failure.recovery === "retry") && retry && <button type="button" onClick={retry} className="underline">Retry</button>}
+          {retry && (failure.recovery === "retry" || failure.recovery === "reconfirm") &&
+            <button type="button" onClick={retry} className="underline">Retry</button>}
           {failure.recovery === "edit" && edit && <button type="button" onClick={edit} className="underline">Edit path</button>}
           <button type="button" onClick={choose} className="underline">Choose a file</button>
           {search && <button type="button" onClick={search} className="underline">Search by description</button>}
@@ -1207,12 +1256,14 @@ interface BodyProps {
   onError: (error: FileReadFailure) => void;
 }
 
-type LocateInDocument = (position?: FilePosition, anchor?: HTMLElement) => void;
+type LocateInDocument = (position?: FilePosition, anchor?: HTMLElement, invalidLocation?: string) => void;
 
 interface TextBodyProps extends BodyProps {
   sessionId: string;
   panelId: string;
   position?: FilePosition;
+  positionCheck?: FilePosition;
+  finishPositionCheck: (note?: string) => void;
   canInteract: () => boolean;
   onOpen: (path: string, options?: FileViewerOptions) => void;
   onPosition: ReportFilePosition;
@@ -1319,25 +1370,8 @@ function ImageBody({ onRetry, slow, onReaderAction, ...props }: BodyProps & Medi
 
 type PdfBodyProps = BodyProps & MediaLoadingProps & { active: boolean; onReaderAction: () => boolean };
 
-function PdfBody(props: PdfBodyProps) {
-  const { onReady } = props;
-  const supported = navigator.pdfViewerEnabled !== false;
-  useEffect(() => {
-    if (!supported) onReady();
-  }, [supported, onReady]);
-  if (!supported) {
-    return (
-      <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
-        PDF preview is unavailable in this browser. Open in a new tab or download the file using the actions above.
-      </div>
-    );
-  }
-  return <PdfPreview {...props} contentUrl={`${props.contentUrl}&preview=true`} />;
-}
-
-function PdfPreview({ active, onReaderAction, onRetry, slow, ...props }: PdfBodyProps) {
+function PdfBody({ active, onReaderAction, onRetry, slow, ...props }: PdfBodyProps) {
   const { meta, onError, onReady, isCurrent } = props;
-  const bytes = useFileContent(props, readPdf);
   const [frameDocument, setFrameDocument] = useState<HTMLDocument>();
   const [loaded, setLoaded] = useState(false);
   const interactive = active && loaded;
@@ -1350,9 +1384,14 @@ function PdfPreview({ active, onReaderAction, onRetry, slow, ...props }: PdfBody
     setLoaded(true);
     onReady();
   }, [isCurrent, onReady]);
-  const fail = useCallback(() => {
-    if (isCurrent()) onError(new FileReadFailure("Couldn't load the preview.", "retry", { originalPdf: meta }));
+  const fail = useCallback((message: string) => {
+    if (isCurrent()) onError(new FileReadFailure(message, "retry", { originalPdf: meta }));
   }, [isCurrent, meta, onError]);
+  const failRead = useCallback((failure: FileReadFailure) => {
+    if (failure.recovery === "retry") fail(failure.message);
+    else onError(failure);
+  }, [fail, onError]);
+  const bytes = useFileContent({ ...props, onError: failRead, contentUrl: `${props.contentUrl}&preview=true` }, readPdf);
   return (
     <div className="relative h-full" aria-busy={!loaded}>
       {!loaded && <div className="absolute inset-0 z-10 bg-background">
@@ -1418,26 +1457,36 @@ function useFileContent<T>(
 }
 
 const TextBody = memo(function TextBody(props: TextBodyProps & MediaLoadingProps) {
-  const { meta, sessionId, panelId, token, position, canInteract, onReady, onOpen, onPosition, onLocate, startPositionAction, showSource, onRetry, slow } = props;
+  const { meta, sessionId, panelId, token, position, positionCheck, finishPositionCheck, canInteract,
+    onReady, onOpen, onPosition, onLocate, startPositionAction, showSource, onRetry, slow } = props;
   const text = useFileContent(props, readText);
   const [section, setSection] = useState<{ position?: FilePosition; start: number }>();
   useLayoutEffect(() => {
     // Commit the ready tab before its newly rendered links can receive input.
     if (text !== null) onReady();
   }, [text, onReady]);
+  useLayoutEffect(() => {
+    if (text !== null && positionCheck?.kind === "lines") {
+      finishPositionCheck(linePositionNote(text, positionCheck));
+    }
+  }, [text, positionCheck, finishPositionCheck]);
   if (text === null) return slow
     ? <SlowFileLoading onRetry={onRetry}>The file has not finished loading.</SlowFileLoading> : <FileLoading />;
-  if (meta.kind === "markdown" && !showSource) {
-    return <MarkdownBody text={text} meta={meta} sessionId={sessionId} panelId={panelId} token={token}
-      canInteract={canInteract} position={position} onPosition={onPosition} onOpen={onOpen} onLocate={onLocate} />;
-  }
+  const markdown = meta.kind === "markdown";
+  const headingCheck = positionCheck?.kind === "heading" ? positionCheck.slug : undefined;
+  const renderMarkdown = markdown && (!showSource || headingCheck !== undefined);
   const language = meta.kind === "markdown" ? "markdown" : meta.kind === "code" ? languageHint(meta.path) : null;
-  return <FileSourceView raw={text} highlight={meta.kind !== "text"} language={language}
-    position={position?.kind === "lines" ? position : undefined} onPosition={onPosition}
-    sectionStart={section?.position === position ? section?.start : undefined}
-    onSectionChange={(start) => {
-      if (startPositionAction()) setSection({ position, start });
-    }} />;
+  return <>
+    {renderMarkdown && <MarkdownBody text={text} meta={meta} sessionId={sessionId} panelId={panelId} token={token}
+      hidden={showSource} headingCheck={headingCheck} finishPositionCheck={finishPositionCheck}
+      canInteract={canInteract} position={showSource ? undefined : position} onPosition={onPosition} onOpen={onOpen} onLocate={onLocate} />}
+    {(!markdown || showSource) && <FileSourceView raw={text} highlight={meta.kind !== "text"} language={language}
+      position={position?.kind === "lines" ? position : undefined} onPosition={onPosition}
+      sectionStart={section?.position === position ? section?.start : undefined}
+      onSectionChange={(start) => {
+        if (startPositionAction()) setSection({ position, start });
+      }} />}
+  </>;
 });
 
 /**
@@ -1528,6 +1577,7 @@ function extractText(node: ReactNode): string {
 }
 
 const HEADING_PREFIX = "file-viewer-heading-";
+const MISSING_HEADING = "The requested heading wasn't found.";
 
 function relativeImageReference(url: string | undefined) {
   if (!url || url.startsWith("/") || /^[a-z][a-z\d+.-]*:/i.test(url)) return;
@@ -1551,12 +1601,19 @@ function documentPositionAnchor(article: HTMLElement | null, slug: string, prefi
   return decodedMatches.length === 1 ? decodedMatches[0] : undefined;
 }
 
+function headingPositionNote(article: HTMLElement | null, slug: string, prefix: string) {
+  return documentPositionAnchor(article, slug, prefix) ? undefined : MISSING_HEADING;
+}
+
 interface MarkdownBodyProps {
   text: string;
   meta: FileViewerMetadata;
   sessionId: string;
   panelId: string;
   token: string;
+  hidden: boolean;
+  headingCheck?: string;
+  finishPositionCheck: (note?: string) => void;
   canInteract: () => boolean;
   position?: FilePosition;
   onOpen: (path: string, options?: FileViewerOptions) => void;
@@ -1564,16 +1621,20 @@ interface MarkdownBodyProps {
   onLocate: LocateInDocument;
 }
 
-function MarkdownBody({ text, meta, sessionId, panelId, token, canInteract, position, onOpen, onPosition, onLocate }: MarkdownBodyProps) {
+function MarkdownBody({ text, meta, sessionId, panelId, token, hidden, headingCheck,
+  finishPositionCheck, canInteract, position, onOpen, onPosition, onLocate }: MarkdownBodyProps) {
   const article = useRef<HTMLElement>(null);
   const { source, canonical_directory: directory } = meta;
   const prefix = `${panelId}-`;
   const footnoteLabel = `${prefix}footnote-label`;
   useLayoutEffect(() => {
+    if (headingCheck !== undefined) finishPositionCheck(headingPositionNote(article.current, headingCheck, prefix));
+  }, [headingCheck, finishPositionCheck, prefix]);
+  useLayoutEffect(() => {
     if (position?.kind !== "heading") return;
     const anchor = documentPositionAnchor(article.current, position.slug, prefix);
     if (!anchor) {
-      onPosition("The requested heading wasn't found.");
+      onPosition(MISSING_HEADING);
       return;
     }
     const id = anchor.id.slice(prefix.length);
@@ -1582,6 +1643,12 @@ function MarkdownBody({ text, meta, sessionId, panelId, token, canInteract, posi
   }, [position, onPosition, prefix]);
 
   const components = useMemo<Components>(() => {
+    const locate = (position?: FilePosition) => {
+      const note = positionNoteFor(position, "markdown") ??
+        (position?.kind === "heading" ? headingPositionNote(article.current, position.slug, prefix)
+          : position?.kind === "lines" ? linePositionNote(text, position) : undefined);
+      onLocate(position, undefined, note);
+    };
     const openReference = ({ path, position, unsupported }: FileReference) => {
       if (!canInteract()) return;
       const absolute = path.startsWith("/");
@@ -1591,7 +1658,7 @@ function MarkdownBody({ text, meta, sessionId, panelId, token, canInteract, posi
       const targetPath = targetSegments.join("/");
       const sameFile = absolute ? `/${targetPath}` === meta.absolute_path : targetPath === meta.path.split("/").at(-1);
       if (!unsupported && sameFile) {
-        onLocate(position);
+        locate(position);
         return;
       }
       onOpen(path, {
@@ -1628,13 +1695,15 @@ function MarkdownBody({ text, meta, sessionId, panelId, token, canInteract, posi
             // GFM footnote IDs contain literal percent escapes for non-ASCII labels.
             const destination = documentAnchor(article.current, href.slice(1));
             if (destination) onLocate(undefined, destination);
+            else onLocate(undefined, undefined, "The requested footnote wasn't found.");
           } else {
-            onLocate(parseFilePosition(href, true));
+            locate(parseFilePosition(href, true));
           }
         }} />;
       },
       img: ({ node, src, alt, ...props }) => {
         void node;
+        if (hidden) return null;
         const reference = relativeImageReference(src);
         if (!reference) return <img {...props} src={src || undefined} alt={alt} />;
         const target = decodeFileReference(reference.path);
@@ -1644,7 +1713,7 @@ function MarkdownBody({ text, meta, sessionId, panelId, token, canInteract, posi
         return <img {...props} src={bytes + fragment} alt={alt} />;
       },
     };
-  }, [directory, meta.absolute_path, meta.path, source, sessionId, token, canInteract, footnoteLabel, onOpen, onLocate]);
+  }, [directory, meta.absolute_path, meta.path, source, sessionId, token, canInteract, hidden, footnoteLabel, onOpen, onLocate, prefix, text]);
 
   const content = useMemo(() => (
     <Markdown
@@ -1661,5 +1730,5 @@ function MarkdownBody({ text, meta, sessionId, panelId, token, canInteract, posi
       {text}
     </Markdown>
   ), [components, prefix, text]);
-  return <article ref={article} className="markdown md-github prose">{content}</article>;
+  return <article ref={article} hidden={hidden} className="markdown md-github prose">{content}</article>;
 }

@@ -54,7 +54,6 @@ afterEach(() => {
   useSessionStore.setState({ viewer: null });
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-  Reflect.deleteProperty(navigator, "pdfViewerEnabled");
 });
 
 describe("FileViewerDialog", () => {
@@ -81,6 +80,36 @@ describe("FileViewerDialog", () => {
     fireEvent.click(screen.getByRole("tab", { name: "a.md" }));
     expect(screen.getByRole("heading", { name: "Original document" })).toBeVisible();
     expect(read).toHaveBeenCalledTimes(4);
+  });
+
+  it("settles concurrent aliases independently when one read fails", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    const reads = [first, second];
+    let destinationReads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      const original = url.searchParams.get("path") === "original.md";
+      const path = original ? "original.md" : "destination.md";
+      if (url.pathname.endsWith("/meta")) return Response.json({
+        source: "/workspace", absolute_path: `/workspace/${path}`, path, canonical_path_id: path,
+        canonical_directory: { path: ".", path_id: "root-path" }, kind: "markdown", size: 80,
+      });
+      return original ? new Response("# Original\n\n[First alias](first.md)\n\n[Second alias](second.md#L3)")
+        : reads[destinationReads++].promise;
+    }));
+    render(<FileViewerDialog />);
+    act(() => useSessionStore.getState().openViewer("s1", "original.md"));
+    fireEvent.click(await screen.findByRole("button", { name: "Open file: First alias" }));
+    await waitFor(() => expect(destinationReads).toBe(1));
+    fireEvent.click(screen.getByRole("button", { name: /Second alias/ }));
+    await waitFor(() => expect(destinationReads).toBe(2));
+    await act(async () => first.resolve(new Response(null, { status: 503 })));
+    expect(screen.getByRole("heading", { name: "Original" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Cancel opening destination.md" })).toBeVisible();
+    await act(async () => second.resolve(new Response("# Destination\n\nSecond snapshot line")));
+    expect(await screen.findByText("Second snapshot line")).toHaveAttribute("data-located", "true");
+    expect(screen.getAllByRole("tab", { name: "destination.md" })).toHaveLength(1);
   });
 
   it("opens a positioned local file URI through the original session's file API", async () => {
@@ -157,7 +186,7 @@ describe("FileViewerDialog", () => {
   it("locates a Markdown source line and switches to reading the same response", async () => {
     const fetchFile = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input).endsWith("/showme/resolve")) return Response.json({
-        path: "plan.md", target: { path: "plan.md", position: { kind: "lines", start: 3 } },
+        target: { path: "plan.md", position: { kind: "lines", start: 3 } },
         metadata: {
           source: "/workspace", absolute_path: "/workspace/plan.md", path: "plan.md",
           canonical_path_id: "file-path", canonical_directory: { path: ".", path_id: "root-path" },
@@ -211,20 +240,21 @@ describe("FileViewerDialog", () => {
     }
   });
 
-  it.each(["Retry", "Reload file"])("keeps a plain link's confirmed source when %s restarts stalled bytes", async (action) => {
+  it.each(["Retry", "Retry file"])("keeps a plain link's confirmed source when %s restarts stalled bytes", async (action) => {
     const narrow = "/repo/docs";
     const path = `${narrow}/plan.md`;
     const stalled = deferred<Response>();
     const metadataReads: URLSearchParams[] = [];
-    let permitted = true;
+    const byteReads: URLSearchParams[] = [];
     const read = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
-      if (!url.pathname.endsWith("/meta")) return stalled.promise;
+      if (!url.pathname.endsWith("/meta")) {
+        byteReads.push(url.searchParams);
+        return byteReads.length === 1 ? stalled.promise : new Response(null, { status: 403 });
+      }
       metadataReads.push(url.searchParams);
-      if (!permitted && url.searchParams.get("source") === narrow) return new Response(null, { status: 403 });
-      const source = permitted ? narrow : "/repo";
-      return Response.json({ source, absolute_path: path, path: permitted ? "plan.md" : "docs/plan.md",
-        canonical_path_id: source, kind: "markdown", size: 16 });
+      return Response.json({ source: narrow, absolute_path: path, path: "plan.md",
+        canonical_path_id: "verified-plan", kind: "markdown", size: 16 });
     });
     vi.stubGlobal("fetch", read);
     render(<><MessageBubble sessionId="s1" message={{ role: "assistant", type: "text", content: `[Plan](${path})` }} />
@@ -233,11 +263,13 @@ describe("FileViewerDialog", () => {
     try {
       await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open file: Plan" })));
       expect(metadataReads[0].get("source")).toBeNull();
-      permitted = false;
       await act(async () => vi.advanceTimersByTime(5000));
       await act(async () => fireEvent.click(screen.getByRole("button", { name: action })));
-      expect(metadataReads[1].get("path")).toBe(path);
-      expect(metadataReads[1].get("source")).toBe(narrow);
+      expect(metadataReads).toHaveLength(1);
+      expect(byteReads).toHaveLength(2);
+      expect(byteReads[1].get("path")).toBe("plan.md");
+      expect(byteReads[1].get("source")).toBe(narrow);
+      expect(byteReads[1].get("canonical_path_id")).toBe("verified-plan");
       expect(screen.getByRole("alert")).toHaveTextContent("You don't have access to this file.");
       await act(async () => stalled.resolve(new Response("# Retired plan")));
       expect(screen.queryByText("Retired plan")).not.toBeInTheDocument();
@@ -246,32 +278,45 @@ describe("FileViewerDialog", () => {
     }
   });
 
-  it.each(["a local jump", "clearing the position"])("re-resolves the original command after a slow read retry and %s", async (change) => {
-    const clearPosition = change === "clearing the position";
+  it.each(["a local jump", "clearing the position during Reload", "clearing the position in Edit path"])("re-resolves the original command after a slow read retry and %s", async (change) => {
+    const clearPosition = change !== "a local jump";
+    const clearInEditor = change === "clearing the position in Edit path";
     const command = clearPosition ? "alias.md#L3" : "alias.md#start";
     let target = "original.md";
     let bodyReads = 0;
     const firstBody = deferred<Response>();
+    const reloadConfirmation = deferred<Response>();
+    const commandSources: Array<string | null> = [];
+    const originalReadIds: Array<string | null> = [];
     const metadata = (file: string) => ({
-      source: "/workspace", absolute_path: `/workspace/${file}`, path: file,
+      source: file === "original.md" ? "/workspace" : "/shared", absolute_path: `/workspace/${file}`, path: file,
       canonical_path_id: file, canonical_directory: { path: ".", path_id: "root-path" },
       kind: "markdown", size: 80,
     });
     const fetchFile = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (new URL(String(input)).pathname.endsWith("/showme/resolve")) {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/showme/resolve")) {
+        commandSources.push(url.searchParams.get("source"));
         expect(JSON.parse(String(init?.body))).toEqual({ text: command });
-        return Response.json({
+        const response = Response.json({
           target: { path: "alias.md", position: clearPosition ? { kind: "lines", start: 3 } : { kind: "heading", slug: "start" } },
           metadata: metadata(target),
         });
+        if (clearPosition && !clearInEditor && target === "replacement.md") {
+          return reloadConfirmation.promise.then(() => response);
+        }
+        return response;
       }
-      const path = new URL(String(input)).searchParams.get("path");
-      if (String(input).includes("/meta")) {
+      const path = url.searchParams.get("path");
+      if (url.pathname.endsWith("/files/meta")) {
         expect(path).toBe("/workspace/original.md");
-        return Response.json(metadata("original.md"));
+        expect(url.searchParams.get("source")).toBe("/workspace");
+        return Response.json({ ...metadata("original.md"), canonical_path_id: "reconfirmed-original" });
       }
+      expect(url.pathname.endsWith("/files")).toBe(true);
+      if (path === "original.md") originalReadIds.push(url.searchParams.get("canonical_path_id"));
       if (++bodyReads === 1) return firstBody.promise;
-      return new Response(`# Start\n\n[Jump](#L5)\n\nReading ${path}`);
+      return new Response(`# Start\n\n[Jump](#L5)\n\nReading ${path}\n\n[Clear location](./${path})`);
     });
     vi.stubGlobal("fetch", fetchFile);
     render(<FileViewerDialog />);
@@ -288,22 +333,59 @@ describe("FileViewerDialog", () => {
     } finally {
       vi.useRealTimers();
     }
-    if (clearPosition) {
+    if (clearInEditor) {
       fireEvent.click(screen.getByRole("button", { name: "Edit path" }));
       const position = screen.getByRole("textbox", { name: "Position (optional)" });
       expect(position).toHaveValue(":3");
       fireEvent.change(position, { target: { value: "" } });
       fireEvent.click(screen.getByRole("button", { name: "Open file" }));
       await screen.findByRole("button", { name: "Reading", pressed: true });
+      expect(originalReadIds).toEqual(["original.md", "original.md", "reconfirmed-original"]);
+    } else if (clearPosition) {
+      fireEvent.click(screen.getByRole("button", { name: "Reading" }));
     } else {
       fireEvent.click(await screen.findByRole("link", { name: "Jump" }));
       expect(screen.getByText("Reading original.md")).toHaveAttribute("data-located", "true");
     }
     target = "replacement.md";
     fireEvent.click(screen.getByRole("button", { name: "Reload file" }));
+    if (clearPosition && !clearInEditor) {
+      expect(screen.getByText("Reloading file…")).toBeVisible();
+      fireEvent.click(screen.getByRole("button", { name: "Open file: Clear location" }));
+      await act(async () => reloadConfirmation.resolve(new Response()));
+    }
     const replacement = await screen.findByText("Reading replacement.md");
+    expect(commandSources).toEqual([null, null]);
     if (clearPosition) expect(screen.getByRole("button", { name: "Reading", pressed: true })).toBeVisible();
     else expect(replacement).toHaveAttribute("data-located", "true");
+  });
+
+  it("keeps the confirmed line when retrying the selected recovery tab", async () => {
+    const firstRead = deferred<Response>();
+    const reads: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      reads.push(url.pathname);
+      if (url.pathname.endsWith("/showme/resolve")) {
+        return Response.json({
+          target: { path: "a.md", position: { kind: "lines", start: 3 } },
+          metadata: {
+            source: "/workspace", absolute_path: "/workspace/a.md", path: "a.md",
+            canonical_path_id: "a.md", kind: "markdown", size: 40,
+          },
+        });
+      }
+      expect(url.searchParams.get("canonical_path_id")).toBe("a.md");
+      return reads.length === 2 ? firstRead.promise : new Response("# Plan\n\nConfirmed line");
+    }));
+    render(<FileViewerDialog />);
+    act(() => useSessionStore.getState().openViewer("s1", "a.md:3", { mode: "command" }));
+    await waitFor(() => expect(reads).toHaveLength(2));
+    await act(async () => firstRead.reject(new TypeError("Network disconnected")));
+    fireEvent.click(screen.getByRole("tab", { name: "a.md" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Confirmed line")).toHaveAttribute("data-located", "true");
+    expect(reads).toEqual(["/api/sessions/s1/showme/resolve", "/api/sessions/s1/files", "/api/sessions/s1/files"]);
   });
 
   it("locates an explicitly linked footnote in the loaded document", async () => {
@@ -403,8 +485,8 @@ describe("FileViewerDialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Edit path" }));
     expect(screen.getByRole("textbox", { name: "File path" })).toHaveValue(displayedPath);
     fireEvent.click(screen.getByRole("button", { name: "Open file" }));
-    await screen.findByRole("heading", { name: "Corrected" });
-    expect(fileFetch.mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith("/meta"))).toHaveLength(2);
+    await waitFor(() => expect(fileFetch.mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith("/meta"))).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Corrected" })).toBeVisible());
   });
 
   it.each([200, 403])("retires bytes (HTTP %s) opened from another session when leaving and returning to the foreground", async (status) => {
@@ -664,17 +746,6 @@ describe("FileViewerDialog", () => {
     const download = screen.getByRole("link", { name: "Download file" });
     expect(new URL(download.getAttribute("href")!).searchParams.has("preview")).toBe(false);
     expect(download).toHaveAttribute("download", "doc.pdf");
-  });
-
-  it("keeps explicit open and download when PDF rendering is unavailable", async () => {
-    Object.defineProperty(navigator, "pdfViewerEnabled", { configurable: true, value: false });
-    vi.stubGlobal("fetch", mockFetch({ kind: "pdf", mime_type: "application/pdf", size: 8000 }, "ignored"));
-    render(<FileViewerDialog />);
-    act(() => useSessionStore.getState().openViewer("s1", "doc.pdf"));
-    await screen.findByText(/PDF preview is unavailable/);
-    expect(document.querySelector("iframe")).toBeNull();
-    expect(screen.getByRole("link", { name: "Open in new tab" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "Download file" })).toBeVisible();
   });
 
   it("renders <pre><code> for kind=code", async () => {

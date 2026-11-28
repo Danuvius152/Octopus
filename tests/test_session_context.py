@@ -76,7 +76,10 @@ async def test_context_commit_rejects_wrong_writer_before_changing_facts(native_
             elif operation == "resume":
                 await manager._remember_resume_id(session, "wrong-writer-native-id")
             else:
-                await manager._save_session_configuration(session.id, {"model": "wrong-writer-model"}, session.user_id)
+                await manager._save_session_configuration(session.id, {
+                    "model": "wrong-writer-model", "expected_backend": session.backend,
+                    "expected_configuration_version": session.configuration_version,
+                }, session.user_id)
         assert (session.context_state, session.claude_session_id, session.model) == before
         after = next(row for row in await database.load_sessions() if row["id"] == session.id)
         assert {field: after[field] for field in fields} == {field: stored[field] for field in fields}
@@ -88,7 +91,9 @@ async def test_context_commit_rejects_wrong_writer_before_changing_facts(native_
 async def test_configuration_alignment_without_owner_does_not_install_one(native_runtime, fields):
     manager, _, session, _, starts, _ = native_runtime
     assert not manager._session_owners
-    await manager._save_session_configuration(session.id, fields, session.user_id)
+    await manager._save_session_configuration(session.id, {
+        **fields, "expected_backend": session.backend, "expected_configuration_version": session.configuration_version,
+    }, session.user_id)
     detail = await get_session(manager, session.id, user_id=session.user_id)
     if "model" in fields:
         assert detail.context_state.validity == "stale" and detail.model == fields["model"]
@@ -170,7 +175,8 @@ async def test_archive_preserves_original_message_tail_context(native_runtime, t
     assert not refused["accepted"]
 
 
-def test_context_write_failure_keeps_storage_fail_stop(tmp_path):
+@pytest.mark.parametrize("failure", ["statement", "commit_ack"])
+def test_context_write_failure_keeps_storage_fail_stop(tmp_path, failure):
     program = """
 import asyncio
 import sqlite3
@@ -189,23 +195,41 @@ async def main():
     agent = await database.get_system_agent()
     session = await manager.create_session(agent["id"], "Original configuration", backend="codex")
     execute = database.conn.execute
+    commit = database.conn.commit
+    writing = False
     async def fail_context_write(sql, parameters=()):
+        nonlocal writing
         if sql.startswith("UPDATE sessions SET") and "context_state" in sql:
-            raise sqlite3.OperationalError("Original context write failed")
+            if sys.argv[3] == "statement":
+                raise sqlite3.OperationalError("Original context write failed")
+            writing = True
         return await execute(sql, parameters)
+    async def fail_commit_ack():
+        await commit()
+        if writing:
+            raise OSError("Commit acknowledgment lost")
     database.conn.execute = fail_context_write
-    await manager.update_session_configuration(session.id, {"model": "uncommitted-model"}, session.user_id)
+    database.conn.commit = fail_commit_ack
+    await manager.update_session_configuration(session.id, {
+        "model": "uncommitted-model", "expected_backend": session.backend,
+        "expected_configuration_version": session.configuration_version,
+    }, session.user_id)
     Path(sys.argv[2]).touch()
 
 asyncio.run(main())
 """
     path, marker = tmp_path / "failed-context.db", tmp_path / "success-published"
-    result = subprocess.run([sys.executable, "-c", program, str(path), str(marker)],
+    result = subprocess.run([sys.executable, "-c", program, str(path), str(marker), failure],
                             cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5)
     assert result.returncode == 70, result.stderr
     assert not marker.exists()
     with closing(sqlite3.connect(path)) as database:
-        assert database.execute("SELECT model, context_state FROM sessions").fetchall() == [(None, None)]
+        model, context, version = database.execute("SELECT model, context_state, configuration_version FROM sessions").fetchone()
+        if failure == "commit_ack":
+            assert (model, version) == ("uncommitted-model", 1)
+            assert json.loads(context)["validity"] == "stale"
+        else:
+            assert (model, context, version) == (None, None, 0)
 
 
 async def test_default_roundtrip_invalidates_and_late_attempt_cannot_restore(native_runtime, tmp_path):
@@ -356,8 +380,8 @@ async def test_live_changes_preserve_only_applicable_context(native_runtime, tmp
     inject(tmp_path, usage())
     before = await context_when(manager, session, lambda state: state.validity == "valid")
     if change == "session_roundtrip":
-        await manager.update_session_configuration(session.id, {"model": "another-model"}, session.user_id)
-        await manager.update_session_configuration(session.id, {"model": None}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "another-model"}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": None}, session.user_id)
     elif change == "rename":
         await AgentManager(database).update_agent(session.agent_id, session.user_id, name="Renamed agent")
         await manager.update_session_configuration(session.id, {"name": "Renamed session"}, session.user_id)
@@ -442,7 +466,7 @@ async def test_binding_is_captured_before_slow_preparation_and_not_rebound_later
     receipt = await manager.start_message(session.id, "Capture these defaults", source="human")
     try:
         await asyncio.wait_for(captured.wait(), 3)
-        await manager.update_session_configuration(session.id, {"model": "next-model"}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "next-model"}, session.user_id)
     finally:
         release.set()
     await until(lambda: session._run.backend is not None and session._run.backend.active_turn is not None)

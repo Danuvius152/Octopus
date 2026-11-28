@@ -1913,6 +1913,7 @@ function session(o: Partial<SessionInfo> = {}): SessionInfo {
     archived: false,
     backend: "codex",
     message_count: 0,
+    configuration_version: 0,
     transcript_integrity: "ok",
     can_steer: false,
     can_observe_context: false,

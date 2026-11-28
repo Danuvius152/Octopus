@@ -90,8 +90,9 @@ async def test_child_image_keeps_original_path_when_the_current_file_changes_or_
     from server.file_viewer import (
         MAX_FILE_BYTES,
         FileNotFound,
+        FileSources,
         FileTooLarge,
-        resolve_safe_path,
+        load_safe_file,
     )
     from tests.native_app_server import child_end, child_start
 
@@ -108,14 +109,17 @@ async def test_child_image_keeps_original_path_when_the_current_file_changes_or_
     assert result.outcome.status == "success" and result.fragments == ("Root answer",)
     row = next(row for row in await database.load_messages(session.id) if row["type"] == "tool_result")
     assert row["runtime_metadata"]["native"]["thread_id"] == "child"
-    assert resolve_safe_path(tmp_path, str(path)).size == len(b"initial image")
+    sources = FileSources(cwd=tmp_path, directory_identities={tmp_path: tmp_path.stat()})
+    metadata, _ = load_safe_file(sources, str(path))
+    assert metadata.size == len(b"initial image")
     path.write_bytes(b"current changed image")
-    assert resolve_safe_path(tmp_path, str(path)).abs_path.read_bytes() == b"current changed image"
+    _, content = load_safe_file(sources, str(path), read_content=True)
+    assert content == b"current changed image"
     path.write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     with pytest.raises(FileTooLarge):
-        resolve_safe_path(tmp_path, str(path))
+        load_safe_file(sources, str(path))
     path.unlink()
     with pytest.raises(FileNotFound):
-        resolve_safe_path(tmp_path, str(path))
+        load_safe_file(sources, str(path))
     assert not list(tmp_path.glob("*.png"))
     assert next(row for row in await database.load_messages(session.id) if row["type"] == "tool_result")["tool_input"] == row["tool_input"]

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sqlite3
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -11,9 +12,11 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from server import codex_login
 from server.agent_manager import AgentManager
 from server.codex_login import codex_home_for
 from server.database import Database
+from server.db.base import DatabaseBusy
 from server.deps import get_session_manager
 from server.harness import get_harness
 from server.harness.claude_code import ClaudeDriver
@@ -22,6 +25,7 @@ from server.harness.model_settings import ModelSettings, effective_settings
 from server.routers import agents, credentials, sessions
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.browser_restore import restore_session
 from tests.harness_profiles import process_profile
 
 
@@ -84,9 +88,270 @@ async def configuration_host(tmp_path, monkeypatch):
             await db.close()
 
 
+@pytest.mark.parametrize("newer_model", [None, "newer-model"])
+async def test_delayed_settings_save_cannot_overwrite_a_newer_explicit_save(
+    configuration_host, monkeypatch, newer_model,
+):
+    client, manager, session, _, _ = configuration_host
+    url = f"/api/sessions/{session.id}"
+    opened = (await client.get(f"{url}/info")).json()
+    expected = {
+        "expected_backend": opened["backend"],
+        "expected_configuration_version": opened["configuration_version"],
+    }
+    entered, release = asyncio.Event(), asyncio.Event()
+    update = manager.update_session_configuration
+
+    async def delay_before_owner(session_id, fields, user_id=None):
+        if fields.get("model") == "older-model":
+            entered.set()
+            await release.wait()
+        return await update(session_id, fields, user_id)
+
+    monkeypatch.setattr(manager, "update_session_configuration", delay_before_owner)
+    older = asyncio.create_task(client.patch(url, json=expected | {"model": "older-model", "name": "Obsolete name"}))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        newer = await client.patch(url, json=expected | {"model": newer_model})
+        assert newer.status_code == 200, newer.text
+        assert newer.json()["configuration_version"] == opened["configuration_version"] + 1
+    finally:
+        release.set()
+        rejected = await asyncio.wait_for(older, 2)
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"]["code"] == "configuration_version_conflict"
+    current = (await client.get(f"{url}/info")).json()
+    assert (current["model"], current["name"], current["configuration_version"]) == (
+        newer_model, opened["name"], newer.json()["configuration_version"],
+    )
+    assert manager.db is not None
+    stored, = [row for row in await manager.db.load_sessions() if row["id"] == session.id]
+    assert stored["model"] == current["model"]
+    assert stored["name"] == current["name"]
+    assert stored["configuration_version"] == current["configuration_version"]
+
+
+@pytest.mark.parametrize(("restore_kind", "busy_stage"), [
+    ("archive", None), ("worktree", None),
+    ("worktree", "settle"), ("released-rewind", "settle"),
+    ("worktree", "register"), ("released-rewind", "register"),
+])
+async def test_restore_registers_the_configuration_after_concurrent_credential_deletion(
+    configuration_host, monkeypatch, tmp_path, restore_kind, busy_stage,
+):
+    client, manager, session, credential_ids, _ = configuration_host
+    if restore_kind != "archive":
+        directory = tmp_path / "rewind-worktree"
+        subprocess.run(["git", "init", "-q", str(directory)], check=True)
+        parent = await manager.create_session(session.agent_id, "Bound parent", str(directory), backend="codex")
+        await manager.db.append_message(session_id=parent.id, seq=0, role="user", type="text", content="Rewind here")
+        session = await manager.fork_session(parent.id, 0)
+        assert json.loads(session.fork_metadata)["rewind_worktree_id"]
+    url = f"/api/sessions/{session.id}"
+    saved = await client.patch(url, json={
+        "expected_backend": "codex", "expected_configuration_version": session.configuration_version,
+        "credential_id": credential_ids[0],
+    })
+    assert saved.status_code == 200, saved.text
+    version = saved.json()["configuration_version"]
+    archived = await client.post(f"{url}/archive", params={"replace": False})
+    assert archived.status_code == 204, archived.text
+    entered, release = asyncio.Event(), asyncio.Event()
+    load = manager._load_archived_history
+
+    async def pause_after_archive_read(session_id, user_id):
+        snapshot = await load(session_id, user_id)
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return snapshot
+
+    if busy_stage:
+        settle = manager.db.settle_bound_archive_restore
+        load_for_restore = manager.db.load_session_for_restore
+        settled = False
+
+        def refuse_until_released():
+            if not release.is_set():
+                entered.set()
+                raise DatabaseBusy("Another writer holds the database")
+
+        async def settle_with_busy(session_id, *args, **kwargs):
+            nonlocal settled
+            if session_id == session.id and busy_stage == "settle":
+                refuse_until_released()
+            metadata = await settle(session_id, *args, **kwargs)
+            if session_id == session.id and metadata is not None:
+                settled = True
+            return metadata
+
+        async def load_with_busy(session_id, *args):
+            if session_id == session.id and settled and busy_stage == "register":
+                refuse_until_released()
+            return await load_for_restore(session_id, *args)
+
+        monkeypatch.setattr(manager.db, "settle_bound_archive_restore", settle_with_busy)
+        monkeypatch.setattr(manager.db, "load_session_for_restore", load_with_busy)
+    else:
+        monkeypatch.setattr(manager, "_load_archived_history", pause_after_archive_read)
+    if restore_kind == "released-rewind":
+        # The committed restore marker survived application cleanup and this
+        # session is still absent from the live map.
+        assert await manager.db.begin_bound_archive_restore(
+            session.id, session.fork_metadata, "restoring", require_current_directory=lambda: None,
+        )
+        restoring = asyncio.create_task(manager.release_application_writers([session.id], rewind_updates={}))
+    else:
+        restoring = asyncio.create_task(restore_session(client, session.id))
+    deleting = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        deleting = asyncio.create_task(client.delete(f"/api/credentials/{credential_ids[0]}"))
+        completed, _ = await asyncio.wait({deleting}, timeout=2)
+        assert deleting in completed, "Credential deletion was blocked by rewind restore retry"
+        assert deleting.result().status_code == 204, deleting.result().text
+    finally:
+        release.set()
+        restored = await asyncio.wait_for(restoring, 2)
+        if deleting is not None:
+            await deleting
+    if restore_kind != "released-rewind":
+        assert restored.json()["state"] == "finished", restored.text
+    live = (await client.get(f"{url}/info")).json()
+    assert live["credential_id"] is None
+    assert live["configuration_version"] == version + 1
+    stale = await client.patch(url, json={
+        "expected_backend": "codex", "expected_configuration_version": version, "model": "stale-model",
+    })
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "configuration_version_conflict"
+
+
+async def test_session_settings_rollback_preserves_the_version_and_rename_remains_independent(configuration_host):
+    client, manager, session, _, _ = configuration_host
+    url = f"/api/sessions/{session.id}"
+    opening = (await client.get(f"{url}/info")).json()
+    version = opening["configuration_version"]
+    patch = {
+        "expected_backend": opening["backend"], "expected_configuration_version": version,
+        "name": "New name", "model": "new-model",
+    }
+    async with manager.db.transaction() as tx:
+        await tx.execute(
+            "CREATE TRIGGER reject_configuration BEFORE UPDATE OF configuration_version ON sessions "
+            "BEGIN SELECT RAISE(ABORT, 'settings rolled back'); END"
+        )
+    refused = await client.patch(url, json=patch)
+    assert refused.status_code == 500 and refused.json()["detail"]["code"] == "configuration_not_saved"
+    read = (await client.get(f"{url}/info")).json()
+    assert (read["name"], read["model"], read["configuration_version"]) == (opening["name"], opening["model"], version)
+    renamed = await client.patch(url, json={"name": "Rename only"})
+    assert renamed.status_code == 200, renamed.text
+    assert (renamed.json()["name"], renamed.json()["configuration_version"]) == ("Rename only", version)
+    async with manager.db.transaction() as tx:
+        await tx.execute("DROP TRIGGER reject_configuration")
+    saved = await client.patch(url, json=patch)
+    assert saved.status_code == 200, saved.text
+    current = await client.get(f"{url}/info")
+    assert (current.json()["name"], current.json()["model"], current.json()["configuration_version"]) == (
+        "New name", "new-model", version + 1,
+    )
+
+
+@pytest.mark.parametrize("full_copy", [False, True], ids=["rewind", "copy"])
+@pytest.mark.parametrize("insert_first", [False, True], ids=["before-insert", "after-insert"])
+async def test_fork_registers_the_committed_credential_binding(
+    configuration_host, monkeypatch, tmp_path, full_copy, insert_first,
+):
+    client, manager, original, credential_ids, _ = configuration_host
+    directory = tmp_path / "copy-source"
+    directory.mkdir()
+    parent = await manager.create_session(original.agent_id, "Parent", str(directory), backend="codex")
+    credential_id = credential_ids[1]
+    saved = await client.patch(f"/api/sessions/{parent.id}", json={
+        "expected_backend": "codex", "expected_configuration_version": 0, "credential_id": credential_id,
+    })
+    assert saved.status_code == 200, saved.text
+    await manager.db.append_message(session_id=parent.id, seq=0, role="user", type="text", content="Fork here")
+    insert = manager.db.create_fork_session
+
+    async def delete_binding():
+        response = await client.delete(f"/api/credentials/{credential_id}")
+        assert response.status_code == 204, response.text
+
+    async def crossed_insert(**fields):
+        if not insert_first:
+            await delete_binding()
+        app_id = await insert(**fields)
+        if insert_first:
+            await delete_binding()
+        return app_id
+
+    monkeypatch.setattr(manager.db, "create_fork_session", crossed_insert)
+    fork = await manager.duplicate_session(parent.id) if full_copy else await manager.fork_session(parent.id, 0)
+    url = f"/api/sessions/{fork.id}"
+    first = (await client.get(f"{url}/info")).json()
+    stored, = await manager.db.load_sessions(session_id=fork.id)
+    for snapshot in (first, stored):
+        assert (snapshot["credential_id"], snapshot["configuration_version"]) == (None, int(insert_first))
+    if insert_first:
+        stale = await client.patch(url, json={
+            "expected_backend": "codex", "expected_configuration_version": 0, "credential_id": credential_id,
+        })
+        assert stale.status_code == 409 and stale.json()["detail"]["code"] == "configuration_version_conflict"
+
+
+async def test_settings_storage_busy_keeps_the_owner_and_version(configuration_host, monkeypatch):
+    client, manager, session, _, _ = configuration_host
+    url = f"/api/sessions/{session.id}"
+    owner = manager._session_owner(session)
+    patch = {"expected_backend": "codex", "expected_configuration_version": 0, "backend": "codex"}
+    target = manager.db.session_has_inputs
+
+    async def unavailable(session_id):
+        raise DatabaseBusy("The write lock was unavailable")
+
+    monkeypatch.setattr(manager.db, "session_has_inputs", unavailable)
+    refused = await client.patch(url, json=patch)
+    assert refused.status_code == 503
+    assert manager._session_owner(session) is owner and not owner.failed
+    monkeypatch.setattr(manager.db, "session_has_inputs", target)
+    saved = await client.patch(url, json=patch)
+    assert saved.status_code == 200 and saved.json()["configuration_version"] == 1
+
+
+async def test_codex_home_cleanup_failure_still_wakes_contexts_after_unbinding(configuration_host, monkeypatch):
+    client, manager, session, credential_ids, _ = configuration_host
+    credential_id = credential_ids[1]
+    url = f"/api/sessions/{session.id}"
+    saved = await client.patch(url, json={
+        "expected_backend": "codex", "expected_configuration_version": 0, "credential_id": credential_id,
+    })
+    assert saved.status_code == 200, saved.text
+    wake = manager.wake_contexts
+    observed = []
+
+    def observe(agent_id, user_id):
+        observed.append((manager.configuration_lock.locked(), session.credential_id, session.configuration_version))
+        wake(agent_id, user_id)
+
+    async def cleanup_failure(_home):
+        raise OSError("Home removal refused")
+
+    monkeypatch.setattr(manager, "wake_contexts", observe)
+    with monkeypatch.context() as failure:
+        failure.setattr(codex_login, "_remove_owned_home", cleanup_failure)
+        with pytest.raises(OSError, match="Home removal refused"):
+            await client.delete(f"/api/credentials/{credential_id}")
+    # Finish the original cleanup for the fixture even if the assertion fails.
+    wakes_before_retry = observed.copy()
+    assert (await client.delete(f"/api/credentials/{credential_id}")).status_code == 204
+    assert wakes_before_retry == observed == [(False, None, 2)]
+
+
 async def test_request_captures_session_and_agent_after_coordinated_updates(configuration_host, monkeypatch):
     client, manager, session, credential_ids, effects = configuration_host
-    response = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "model": "session-old"})
+    response = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, "model": "session-old"})
     assert response.status_code == 200, response.text
     input_recorded = asyncio.Event()
 
@@ -106,7 +371,7 @@ async def test_request_captures_session_and_agent_after_coordinated_updates(conf
     # awaiting the Owner. Configuration writes now use that same Owner.
     async with manager.configuration_lock:
         monkeypatch.setattr(manager.configuration_lock, "acquire", observe_acquire)
-        session_update = asyncio.create_task(client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "model": "session-new"}))
+        session_update = asyncio.create_task(client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, "model": "session-new"}))
         await asyncio.wait_for(waiting.get(), 1)
         agent_update = asyncio.create_task(client.patch(f"/api/agents/{session.agent_id}", json={
             "reasoning_effort": "high", "service_tier": "fast", "credential_id": credential_ids[1],
@@ -267,7 +532,7 @@ async def test_default_updates_after_capture_apply_to_the_queued_request(configu
     try:
         await asyncio.wait_for(captured.wait(), 3)
         second = await manager.start_message(session.id, "Use the new defaults")
-        updated = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "model": "session-new"})
+        updated = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, "model": "session-new"})
         assert updated.status_code == 200, updated.text
         updated = await client.patch(f"/api/agents/{session.agent_id}", json={
             "model": "agent-new", "reasoning_effort": "high", "service_tier": "fast", "credential_id": credential_ids[1],
@@ -367,7 +632,7 @@ async def test_credential_deleted_after_spawn_cannot_receive_initial_input(confi
 
 async def test_failed_credential_delete_does_not_unbind_session_defaults(configuration_host):
     client, manager, session, credential_ids, _effects = configuration_host
-    patched = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "credential_id": credential_ids[0]})
+    patched = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, "credential_id": credential_ids[0]})
     assert patched.status_code == 200, patched.text
     async with manager.db.transaction(write=True) as tx:
         await tx.execute("CREATE TRIGGER reject_delete BEFORE DELETE ON backend_credentials "
@@ -376,8 +641,12 @@ async def test_failed_credential_delete_does_not_unbind_session_defaults(configu
         await client.delete(f"/api/credentials/{credential_ids[0]}")
     detail = await client.get(f"/api/sessions/{session.id}")
     assert detail.json()["credential_id"] == credential_ids[0]
+    assert detail.json()["configuration_version"] == patched.json()["configuration_version"]
     assert (await manager.db.get_credential(credential_ids[0])) is not None
-    assert next(row for row in await manager.db.load_sessions() if row["id"] == session.id)["credential_id"] == credential_ids[0]
+    stored, = await manager.db.load_sessions(session_id=session.id)
+    assert (stored["credential_id"], stored["configuration_version"]) == (
+        credential_ids[0], patched.json()["configuration_version"],
+    )
 
 
 async def test_backend_default_update_keeps_current_session_backend_and_changes_new_sessions(configuration_host, monkeypatch):
@@ -439,7 +708,7 @@ async def test_backend_default_change_preserves_old_session_and_explains_its_inh
     assert ('credential_id' if setting == 'credential' else 'tool_deny') in failed.outcome.message
     assert 'Agent settings' in failed.outcome.message
     if setting == 'credential':
-        repaired = await client.patch(f'/api/sessions/{session.id}', json={"expected_backend": "codex", 'credential_id': credential_ids[0]})
+        repaired = await client.patch(f'/api/sessions/{session.id}', json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, 'credential_id': credential_ids[0]})
     else:
         repaired = await client.patch(agent_path, json={'tool_deny': ''})
     assert repaired.status_code == 200, repaired.text
@@ -467,16 +736,16 @@ async def test_old_session_repairs_inherited_credential_and_effort_as_one_atomic
     assert saved.status_code == 200, saved.text
     path = f'/api/sessions/{session.id}'
     before = (await client.get(path)).json()
-    rejected = await client.patch(path, json={"expected_backend": "codex", 'credential_id': credential_ids[0]})
+    rejected = await client.patch(path, json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, 'credential_id': credential_ids[0]})
     assert rejected.status_code == 400 and 'reasoning_effort' in rejected.json()['detail']
-    rejected = await client.patch(path, json={"expected_backend": "codex", 'reasoning_effort': 'low'})
+    rejected = await client.patch(path, json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, 'reasoning_effort': 'low'})
     assert rejected.status_code == 400 and 'Credential backend' in rejected.json()['detail']
-    rejected = await client.patch(path, json={"expected_backend": "codex", 'credential_id': credential_ids[0], 'reasoning_effort': 'max'})
+    rejected = await client.patch(path, json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, 'credential_id': credential_ids[0], 'reasoning_effort': 'max'})
     assert rejected.status_code == 400 and 'reasoning_effort' in rejected.json()['detail']
     unchanged = (await client.get(path)).json()
     for field in ('credential_id', 'reasoning_effort', 'model', 'backend', 'claude_session_id', 'messages'):
         assert unchanged[field] == before[field]
-    corrected = await client.patch(path, json={"expected_backend": "codex", 'credential_id': credential_ids[0], 'reasoning_effort': 'low'})
+    corrected = await client.patch(path, json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, 'credential_id': credential_ids[0], 'reasoning_effort': 'low'})
     assert corrected.status_code == 200, corrected.text
     receipt = await manager.start_message(session.id, 'Continue the same history after the combined correction')
     completion = await asyncio.wait_for(receipt.wait(), 5)
@@ -490,10 +759,11 @@ async def test_old_session_repairs_inherited_credential_and_effort_as_one_atomic
 async def test_empty_session_switches_engine_atomically_and_refuses_an_old_settings_dialog(configuration_host):
     client, _manager, session, credential_ids, _effects = configuration_host
     path = f"/api/sessions/{session.id}"
-    incomplete = await client.patch(path, json={"expected_backend": "codex", "backend": "claude-code"})
+    version = session.configuration_version
+    incomplete = await client.patch(path, json={"expected_backend": "codex", "expected_configuration_version": version, "backend": "claude-code"})
     assert incomplete.status_code == 400, incomplete.text
     rejected = await client.patch(path, json={
-        "expected_backend": "codex", "backend": "claude-code", "credential_id": credential_ids[0],
+        "expected_backend": "codex", "expected_configuration_version": version, "backend": "claude-code", "credential_id": credential_ids[0],
         "model": None, "reasoning_effort": None, "service_tier": None,
     })
     assert rejected.status_code == 400, rejected.text
@@ -501,7 +771,7 @@ async def test_empty_session_switches_engine_atomically_and_refuses_an_old_setti
     assert unchanged.json()["backend"] == "codex"
 
     switched = await client.patch(path, json={
-        "expected_backend": "codex", "backend": "claude-code",
+        "expected_backend": "codex", "expected_configuration_version": version, "backend": "claude-code",
         "credential_id": None, "model": "sonnet", "reasoning_effort": "low", "service_tier": None,
     })
     assert switched.status_code == 200, switched.text
@@ -511,9 +781,14 @@ async def test_empty_session_switches_engine_atomically_and_refuses_an_old_setti
 
     missing = await client.patch(path, json={"model": "gpt-6.2-sol"})
     assert missing.status_code == 428, missing.text
-    stale = await client.patch(path, json={"expected_backend": "codex", "model": "gpt-6.2-sol"})
+    legacy = await client.patch(path, json={"expected_backend": "claude-code", "model": "legacy"})
+    assert legacy.status_code == 428, legacy.text
+    stale = await client.patch(path, json={"expected_backend": "codex", "expected_configuration_version": version, "model": "gpt-6.2-sol"})
     assert stale.status_code == 409, stale.text
-    assert (await client.get(path)).json()["model"] == "sonnet"
+    assert stale.json()["detail"]["code"] == "configuration_version_conflict"
+    current = (await client.get(path)).json()
+    assert current["model"] == "sonnet"
+    assert current["configuration_version"] == version + 1
 
 
 async def test_browser_submission_admits_only_the_observed_engine_and_repeats_existing_receipts(configuration_host):
@@ -524,7 +799,8 @@ async def test_browser_submission_admits_only_the_observed_engine_and_repeats_ex
     assert created.status_code == 201, created.text
     path = f"/api/sessions/{created.json()['id']}"
     cleared = dict.fromkeys(("model", "reasoning_effort", "service_tier", "credential_id"))
-    changed = await client.patch(path, json={"expected_backend": "claude-code", "backend": "codex", **cleared})
+    changed = await client.patch(path, json={"expected_backend": "claude-code",
+        "expected_configuration_version": created.json()["configuration_version"], "backend": "codex", **cleared})
     assert changed.status_code == 200, changed.text
     body = {"client_request_id": "first-input", "content": "Run once on the engine shown"}
     for fields in ({}, {"expected_backend": "claude-code"}):
@@ -536,7 +812,8 @@ async def test_browser_submission_admits_only_the_observed_engine_and_repeats_ex
     for fields in ({}, {"expected_backend": "claude-code"}):
         repeated = await client.post(f"{path}/submissions", json={**body, **fields})
         assert repeated.json()["request_id"] == admitted.json()["request_id"]
-    rejected = await client.patch(path, json={"expected_backend": "codex", "backend": "claude-code", **cleared})
+    rejected = await client.patch(path, json={"expected_backend": "codex",
+        "expected_configuration_version": changed.json()["configuration_version"], "backend": "claude-code", **cleared})
     assert rejected.status_code == 409 and rejected.json()["detail"]["code"] == "conversation_started"
     assert (await client.get(path)).json()["has_inputs"] is True
     await manager.drain_turns()
@@ -549,7 +826,7 @@ async def test_settings_response_retains_admitted_input_before_any_messages(conf
         payload={"content": "Queued input", "attachment_ids": [], "attachments": [], "wiki_mode": None},
         receipt={"accepted": True, "disposition": "accepted"},
     )
-    settings = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "reasoning_effort": "high"})
+    settings = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, "reasoning_effort": "high"})
     assert settings.status_code == 200, settings.text
     assert settings.json()["has_inputs"] is True and settings.json()["message_count"] == 0
     detail = await client.get(f"/api/sessions/{session.id}")
@@ -600,12 +877,12 @@ async def test_each_switch_returns_its_own_committed_settings(configuration_host
     path = f"/api/sessions/{session.id}"
     controls = {"reasoning_effort": None, "service_tier": None, "credential_id": None}
     first = asyncio.create_task(client.patch(path, json={
-        **controls, "expected_backend": "codex", "backend": "claude-code", "model": "sonnet",
+        **controls, "expected_backend": "codex", "expected_configuration_version": session.configuration_version, "backend": "claude-code", "model": "sonnet",
     }))
     try:
         await asyncio.wait_for(first_committed.wait(), 2)
         second = await client.patch(path, json={
-            **controls, "expected_backend": "claude-code", "backend": "codex", "model": "model-two",
+            **controls, "expected_backend": "claude-code", "expected_configuration_version": session.configuration_version, "backend": "codex", "model": "model-two",
         })
     finally:
         send_first.set()
@@ -624,7 +901,8 @@ async def test_cross_engine_settings_keep_unenforceable_agent_policy_from_saving
     assert created.status_code == 201, created.text
     path = f"/api/sessions/{created.json()['id']}"
     target = {"backend": "codex", "model": None, "reasoning_effort": None, "service_tier": None, "credential_id": None}
-    patch = await client.patch(path, json={"expected_backend": "claude-code", **target})
+    patch = await client.patch(path, json={"expected_backend": "claude-code",
+        "expected_configuration_version": created.json()["configuration_version"], **target})
     assert patch.status_code == 400 and "tool_deny" in patch.json()["detail"]
     assert (await client.get(path)).json()["backend"] == "claude-code"
     posted = await client.post(create_path, json={"working_dir": original.working_dir, **target})
@@ -881,7 +1159,7 @@ async def test_next_request_uses_the_new_credential_instead_of_a_held_process(co
     before = json.loads(effects.read_text())
     expected = credential_ids if credential_style == "home_dir" else ["test-only", "test-only"]
     assert before["credential"] == expected[0] and Path(f"/proc/{before['pid']}").exists()
-    patched = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "credential_id": credential_ids[1]})
+    patched = await client.patch(f"/api/sessions/{session.id}", json={"expected_backend": "codex", "expected_configuration_version": session.configuration_version, "credential_id": credential_ids[1]})
     assert patched.status_code == 200, patched.text
     if delete_previous:
         deleted = await client.delete(f"/api/credentials/{credential_ids[0]}")

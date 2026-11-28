@@ -29,6 +29,14 @@ the runtime default otherwise. For the `backend` source, an empty override
 uses the runtime default. Codex resolves an empty speed under either source
 to Normal when no applicable Agent speed is set.
 
+`configuration_version` travels with the saved engine, default source, model,
+effort, speed and credential override. New sessions, imports and copies start at
+version zero. Archive restore registers the original version and current settings
+from the same protected read. Explicit settings saves advance the stored version
+even when the values compare equal. Credential removal clears affected overrides
+and advances their versions in one transaction before publishing to live sessions.
+Pure renames and Agent default changes leave existing session versions intact.
+
 Changing the Agent's defaults keeps each existing conversation's engine and
 source. Restore, archive replacement, rewind and full-copy forks preserve the
 source with the saved overrides. Archive replacement inserts the entire
@@ -67,13 +75,23 @@ opening, engine changes and effective sign-in changes. A failed save keeps the
 draft and displays the reason in the original dialog. A rejected Agent model
 control opens Model defaults and points to the field that needs repair.
 
-For a same-engine settings PATCH, the dialog includes edited fields and any
-fields it previously submitted with an unknown result. A timeout, network
-failure, HTTP 408 or 5xx leaves those submitted fields eligible for another
-explicit save, including an explicit `null` when the user restores a default.
-A refreshed snapshot updates observed settings while retaining the draft and
-unconfirmed fields. A definite rejection restores the field set from before
-that submission. Cross-engine updates still send the complete target settings.
+Settings PATCH requires `expected_backend` and `expected_configuration_version`
+from the same snapshot. Missing preconditions return `428`, so an old browser
+page must refresh. An outdated version returns `409 configuration_version_conflict`.
+The original SessionOwner compares the persisted version in the same transaction
+that saves the fields, any included name change and the next version. Confirmed
+rollback leaves the original values and version intact. Unknown commit outcomes
+follow the storage fail-stop rules.
+
+For a same-engine PATCH, the dialog includes edited fields and previously
+submitted fields with an unknown outcome. A timeout, network failure, HTTP 408 or
+5xx lets the user explicitly resubmit those fields, including a value restored to
+the original setting or a `null` that restores inheritance. A background refresh
+keeps the dialog's edit baseline. On conflict, the dialog reads the full current
+snapshot, preserves the user's edits and unconfirmed fields, and requires explicit
+confirmation before saving against the new version. Cross-engine updates send the
+complete target settings. Draft conflicts between engines must be resolved before
+submission.
 
 An empty conversation can switch engines in place. The Owner checks admitted
 input, history and the native binding before committing a complete target
@@ -83,8 +101,7 @@ The request includes all four overrides, using explicit nulls to select their
 defaults. A busy lifecycle operation is a separate conflict. For a
 conversation with history or admitted input, the dialog offers to start a
 new conversation for the same Agent and working directory. The original
-conversation keeps its history and engine. Settings PATCH requests include
-`expected_backend`, the engine observed by the client.
+conversation keeps its history and engine.
 
 | Boundary | Validation and timing |
 | --- | --- |

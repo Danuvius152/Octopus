@@ -49,7 +49,13 @@ The rows remain the persistent authority; there is no second resource registry.
 * the path is resolved and checked to be inside `app_dir` (`..`, absolute
   paths and symlinks that escape are 404s, not 403s — we don't confirm what
   exists outside);
-* a directory (or the bare app root) resolves to `entrypoint`;
+* a real directory resolves to `entrypoint`. Once access and the entrypoint
+  are confirmed, a directory URL missing the trailing slash redirects with
+  `307`, preserving the encoded path, deployment prefix and query so relative
+  resources resolve from that directory. The bare application entrypoint alias
+  uses the application root as its relative base. Within the app, bare `api`
+  and `wiki` can still serve static aliases. With a trailing slash they enter
+  their dedicated routes. Direct files retain their own handling;
 * `Cache-Control: no-store`, so a rebuild is visible on reload;
 * auth accepts a bearer header, `?token=`, **or** the `octopus_app_token`
   cookie. The cookie exists because an `<iframe>` cannot send an

@@ -631,14 +631,19 @@ async def test_login_rechecks_password_proof_when_committing_token(client, monke
 async def test_logout_revokes_only_this_device(client, source):
     c, users, _db = client
     user = await users.create_user(username="archer", password="password1")
-    here = await users.issue_token(user["id"])
-    elsewhere = await users.issue_token(user["id"])
+    credentials = {"username": "archer", "password": "password1"}
+    here_login = await c.post("/api/auth/login", json=credentials)
+    elsewhere_login = await c.post("/api/auth/login", json=credentials)
+    assert here_login.status_code == elsewhere_login.status_code == 200
+    here = here_login.json()["token"]
+    elsewhere = elsewhere_login.json()["token"]
+    assert here != elsewhere
 
     assert (await c.post("/api/auth/logout", **_credential(source, here))).status_code == 204
     assert (await c.get("/api/auth/identity", headers=_bearer(here))).status_code == 401
-    assert (
-        await c.get("/api/auth/identity", headers=_bearer(elsewhere))
-    ).status_code == 200
+    identity = await c.get("/api/auth/identity", headers=_bearer(elsewhere))
+    assert identity.status_code == 200
+    assert identity.json()["user_id"] == user["id"]
 
 
 @pytest.mark.parametrize("source", ["header", "query", "cookie"])

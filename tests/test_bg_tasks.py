@@ -9,10 +9,8 @@ Covers:
     prompt flows through `start_message` and broadcasts a user_message
   * `ClaudeCodeBackend.build_args` registers the bg MCP server
 
-The MCP tool unit tests (bg_run/cancel/list) live inline below; they
-invoke the FastMCP-wrapped function directly (no real stdio loop)
-with httpx mocked so we don't need a live FastAPI to verify the tool's
-request shape.
+The MCP tests include a streamable HTTP list call and direct tool calls
+for request construction and error handling.
 """
 
 from __future__ import annotations
@@ -1640,6 +1638,113 @@ async def test_deliver_bg_result_refuses_missing_binding_without_admitting_input
 # ---------------------------------------------------------------------------
 # MCP tool surface
 # ---------------------------------------------------------------------------
+
+
+async def test_served_bg_list_uses_bounded_session_summaries(api_client, monkeypatch):
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.types import TextContent
+
+    from server.config import settings
+    from server.mcp_identity import mint
+    from server.routers.bg_tasks import router
+    from tests.callback_api import start_callback_api
+
+    _, wd = api_client
+    db = session_manager.db
+    owner, owner_bearer = await create_account(db, username="bg-list-owner")
+    other, other_bearer = await create_account(db, username="bg-list-other")
+    session_id, empty_session_id, other_session_id = "busy-bg", "empty-bg", "private-bg"
+    for sid, user in ((session_id, owner), (empty_session_id, owner), (other_session_id, other)):
+        await db.save_session(sid, sid, str(wd), "2026-01-01", user_id=user["id"])
+    await db.create_bg_task("private-task", other_session_id, "echo private", None, str(wd), "2026-01-02")
+
+    command = "echo " + "c" * 2_000
+    description = "build " + "界" * 2_000
+    stdout = "界" * 60_000 + "stdout tail"
+    stderr = "e" * 180_000 + "stderr tail"
+    delivery_error = "Original ACK lost: " + "d" * 2_000
+    for index in range(30):
+        task_id = f"task-{index:02}"
+        await db.create_bg_task(
+            task_id, session_id, command, description, str(wd), f"2026-01-{30 - index:02}", 0, 90,
+        )
+        await db.update_bg_task(
+            task_id, status="completed", exit_code=0, stdout=stdout, stderr=stderr, truncated=True,
+        )
+    await db.update_bg_task(
+        "task-00", status="failed", exit_code=124, stop_reason="total_timeout",
+        delivery_disposition="unknown", delivery_error=delivery_error,
+    )
+
+    callbacks = []
+    get = httpx.get
+
+    def observe_callback(url, **kwargs):
+        response = get(url, **kwargs)
+        callbacks.append(response)
+        return response
+
+    monkeypatch.setattr(httpx, "get", observe_callback)
+    monkeypatch.delenv("OCTOPUS_API_BASE", raising=False)
+    monkeypatch.delenv("OCTOPUS_SESSION_ID", raising=False)
+    api = await start_callback_api(router, readiness_token=mint(session_id, user_id=owner["id"]))
+    monkeypatch.setattr(settings, "port", api.port)
+    base = f"http://127.0.0.1:{api.port}"
+
+    async def list_for(sid: str, user_id: str) -> str:
+        headers = {"Authorization": f"Bearer {mint(sid, user_id=user_id)}"}
+        async with httpx.AsyncClient(headers=headers, timeout=15) as client, streamable_http_client(
+            f"{base}/mcp/bg/mcp", http_client=client,
+        ) as (read, write, _), ClientSession(read, write) as mcp:
+            await mcp.initialize()
+            result = await mcp.call_tool("list", {})
+            assert not result.isError
+            content, = result.content
+            assert isinstance(content, TextContent)
+            return content.text
+
+    try:
+        answer = await list_for(session_id, owner["id"])
+        callback, = callbacks
+        print(f"Uncompressed MCP list callback: {len(callback.content):,} B at {callback.request.url.path}")
+        assert callback.request.url.path == f"/api/sessions/{session_id}/bg-task-summaries"
+        assert callback.status_code == 200 and len(callback.content) < 64_000
+        rows = callback.json()
+        assert rows[0]["output_preview"].endswith("stdout tail")
+        assert rows[0]["delivery_error"] == delivery_error[:160]
+        for row in rows:
+            assert row["session_id"] == session_id
+            assert row["has_output"] and row["preview_truncated"] and row["truncated"]
+            assert len(row["command"]) == len(row["description"]) == len(row["output_preview"]) == 120
+            assert not {"stdout", "stderr", "working_dir", "work_id"} & row.keys()
+
+        header, *lines = answer.splitlines()
+        assert header == "25 bg task(s) — most recent first:"
+        assert [line.split()[1] for line in lines] == [f"task-{index:02}" for index in range(25)]
+        assert f"[failed] — {description[:120]}  (exit=124)" in lines[0]
+        assert "idle timeout: disabled; total timeout: 90s" in lines[0]
+        assert lines[0].endswith(f"reason=total_timeout  return=unknown ({delivery_error[:160]})")
+        assert "[completed]" in lines[1] and "(exit=0)" in lines[1]
+        assert "stdout tail" not in answer and "stderr tail" not in answer
+        assert await list_for(empty_session_id, owner["id"]) == "No background tasks in this session yet."
+        assert await list_for(session_id, other["id"]) == 'Error listing bg tasks (404): {"detail":"Session not found"}'
+
+        detail = f"/api/sessions/{session_id}/bg-tasks/task-00"
+        async with httpx.AsyncClient(base_url=base, timeout=10) as client:
+            response = await client.get(detail, headers={"Authorization": f"Bearer {owner_bearer}"})
+            assert response.status_code == 200
+            full = response.json()
+            assert (full["stdout"], full["stderr"], full["delivery_error"]) == (stdout, stderr, delivery_error)
+            wrong_session = await client.get(
+                f"/api/sessions/{empty_session_id}/bg-tasks/task-00",
+                headers={"Authorization": f"Bearer {owner_bearer}"},
+            )
+            wrong_owner = await client.get(detail, headers={"Authorization": f"Bearer {other_bearer}"})
+            assert wrong_session.status_code == wrong_owner.status_code == 404
+    finally:
+        await api.stop()
 
 
 def _call(name: str, **kwargs):

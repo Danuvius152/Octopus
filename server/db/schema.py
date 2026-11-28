@@ -9,11 +9,14 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 15
+CURRENT_VERSION = 16
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 AGENT_DELETION_COLUMN = """deletion_pending INTEGER NOT NULL DEFAULT 0 CHECK (
     deletion_pending = 0 OR
     (deletion_pending = 1 AND archived IS 1 AND is_system IS 0 AND user_id IS NOT NULL)
+)"""
+SESSION_CONFIGURATION_VERSION_COLUMN = """configuration_version INTEGER NOT NULL DEFAULT 0 CHECK (
+    typeof(configuration_version) = 'integer' AND configuration_version BETWEEN 0 AND 9007199254740991
 )"""
 
 
@@ -435,7 +438,8 @@ CREATE TABLE sessions (
                                            -- crash-recovery marker; NULL on
                                            -- non-fork rows
 , credential_id TEXT, reasoning_effort TEXT, service_tier TEXT, context_state TEXT,
-  defaults_source TEXT NOT NULL DEFAULT 'agent' CHECK (defaults_source IN ('agent', 'backend')));
+  defaults_source TEXT NOT NULL DEFAULT 'agent' CHECK (defaults_source IN ('agent', 'backend')),
+  """ + SESSION_CONFIGURATION_VERSION_COLUMN + """);
 
 CREATE TABLE users (
     id TEXT PRIMARY KEY,

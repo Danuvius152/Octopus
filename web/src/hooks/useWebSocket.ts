@@ -432,7 +432,7 @@ function applyWsEvent(data: WsEvent, source?: ListEventSource) {
 
     case "session_archived": {
       const successorId = data.new_session_id === undefined ? data.archive_result?.new_session_id : data.new_session_id;
-      sessionList.archive(data.old_session_id, undefined, successorId, data.archive_result, data);
+      sessionList.archive(data.old_session_id, undefined, successorId, data.archive_result, data.name);
       break;
     }
     case "session_forked": {

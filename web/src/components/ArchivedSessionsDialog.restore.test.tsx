@@ -11,7 +11,7 @@ import { handleWsMessage } from "../hooks/useWebSocket";
 type Identity = components["schemas"]["SessionRestoreRequest"];
 type Proof = components["schemas"]["SessionRestoreStatus"];
 const archived = (id: string): SessionInfo => ({ id, name: `Conversation ${id}`, agent_id: "agent", archived: true,
-  working_dir: "/work", status: "idle", created_at: "now", message_count: 1, transcript_integrity: "ok",
+  working_dir: "/work", status: "idle", created_at: "now", message_count: 1, transcript_integrity: "ok", configuration_version: 0,
   origin: "user", backend: "codex", can_steer: true, can_fork: true, fork_is_full_copy: false,
   can_observe_context: true, can_compact: false });
 let rows: SessionInfo[], user: string;

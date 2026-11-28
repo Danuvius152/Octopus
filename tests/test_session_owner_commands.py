@@ -58,7 +58,7 @@ async def test_cancelled_notice_waiter_detaches_while_the_original_sql_is_pendin
 async def test_owner_failure_wakes_original_question_poll_and_refuses_new_commands(notices, monkeypatch, with_context):
     manager, session, client = notices
     if with_context:
-        await manager.update_session_configuration(session.id, {"model": "context-fixture"}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "context-fixture"}, session.user_id)
         assert session.context_state is not None and session.context_state.validity == "stale"
     qid = await manager.create_pending_question(session.id, [{"question": "Original question"}])
     assert qid is not None
@@ -127,7 +127,7 @@ async def test_delete_joins_the_original_notice_command_before_removing_its_row(
 async def test_command_capacity_refuses_before_acceptance_and_keeps_owned_commands(notices, monkeypatch, with_context):
     manager, session, client = notices
     if with_context:
-        await manager.update_session_configuration(session.id, {"model": "context-fixture"}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "context-fixture"}, session.user_id)
         assert session.context_state is not None and session.context_state.validity == "stale"
     entered, release = asyncio.Event(), asyncio.Event()
     has_notice = manager.db.has_delivery_notice

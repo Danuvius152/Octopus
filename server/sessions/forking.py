@@ -255,7 +255,7 @@ class ForkingMixin(SessionManagerBase):
 
         while True:
             try:
-                async with self._agent_lifecycle_lock if interrupted else nullcontext():
+                async with self._agent_lifecycle_lock if interrupted else nullcontext(), db.configuration_lock:
                     admit = not interrupted or (
                         not self._admission_closed and fork.agent_id not in self._closed_agents
                     )
@@ -275,7 +275,7 @@ class ForkingMixin(SessionManagerBase):
                         raise
                     if disposition is None:
                         raise RuntimeError(f"Fork {fork.id} no longer has its original reverting state")
-                    archived, application_deleting = disposition
+                    archived, application_deleting, fork.credential_id, fork.configuration_version = disposition
                     fork.fork_revert_record = result
                     fork.fork_metadata = details
                     fork.fork_status = "ready"
@@ -558,16 +558,16 @@ class ForkingMixin(SessionManagerBase):
                     try:
                         if await worktree_blocked(db, worktree):
                             raise self._retirement_pending()
-                        await db.update_session_field(
-                            fork_id, fork_status="ready", require_current_directory=require_directory,
-                        )
-                        require_directory()
+                        async with db.configuration_lock:
+                            binding = await db.finish_rewind_fork(fork_id, require_current_directory=require_directory)
+                            require_directory()
+                            fork.credential_id, fork.configuration_version = binding
+                            fork.fork_status = "ready"
+                            self.sessions[fork_id] = fork
+                            self._session_owner(fork)
                     except (WorktreeChanged, ForkError):
                         await db.delete_session(fork_id)
                         raise
-                    fork.fork_status = "ready"
-                    self.sessions[fork_id] = fork
-                    self._session_owner(fork)
 
                 await complete_cleanup(admit_rewind())
 
@@ -807,17 +807,23 @@ class ForkingMixin(SessionManagerBase):
                     new_resume_id=resume_id_hint,
                     hooks=self._fork_hooks(owner, fork, fork_meta_dict, owned),
                 )
-                finishing = True
-                await self.db.finish_full_copy_fork(
-                    fork_id, artifact.resume_id, artifact.needs_replay, owned.require_current,
-                )
-                try:
-                    # The bound cwd must still name this copy after SQLite
-                    # acknowledges the write, at admission to the live map.
-                    owned.require_current()
-                except ForkDirectoryError:
-                    await self.db.update_session_field(fork_id, fork_status="initializing")
-                    raise
+                async with self.db.configuration_lock:
+                    finishing = True
+                    binding = await self.db.finish_full_copy_fork(
+                        fork_id, artifact.resume_id, artifact.needs_replay, owned.require_current,
+                    )
+                    try:
+                        # The bound cwd must still name this copy at admission.
+                        owned.require_current()
+                    except ForkDirectoryError:
+                        await self.db.update_session_field(fork_id, fork_status="initializing")
+                        raise
+                    fork.credential_id, fork.configuration_version = binding
+                    fork.claude_session_id = artifact.resume_id
+                    fork.fork_needs_replay = artifact.needs_replay
+                    fork.fork_status = "ready"
+                    self.sessions[fork_id] = fork
+                    self._session_owner(fork)
             except BaseException as failure:
                 if finishing and not isinstance(failure, ForkDirectoryError):
                     # A failed or cancelled storage wait does not prove rollback.
@@ -847,15 +853,6 @@ class ForkingMixin(SessionManagerBase):
                 if isinstance(failure, ForkDirectoryError):
                     raise ForkError(str(failure), reason="invalid_copy_destination", status_code=409) from failure
                 raise
-
-            # 4. Apply resume state + finalize. fork_after_seq stays = last_seq
-            #    (replay cutoff, see above); the `full_copy` flag tells the UI to
-            #    render "full copy of the working dir" instead of "@msg N".
-            fork.claude_session_id = artifact.resume_id
-            fork.fork_needs_replay = artifact.needs_replay
-            fork.fork_status = "ready"
-            self.sessions[fork_id] = fork
-            self._session_owner(fork)
 
             # 5. Parent is left untouched (NOT archived). Announce the new fork
             #    so other tabs add it.

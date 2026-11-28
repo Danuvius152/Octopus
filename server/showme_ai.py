@@ -110,6 +110,8 @@ def explicit_showme_target(text: str) -> ShowMeTarget | None:
             raise ValueError("Put the file position after the closing quote.")
         return ShowMeTarget(path, _file_position(suffix) if suffix else None, quoted=True, source=source)
 
+    if target.startswith("\\") and not target.startswith("\\\\"):
+        target = target.replace("\\", "/")
     line_fragment = _HASH_LINES.search(target)
     if line_fragment and _path_like(path := target[:line_fragment.start()]):
         return _bare_target(path, _file_position(line_fragment[0]))

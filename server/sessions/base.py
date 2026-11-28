@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from contextlib import AbstractAsyncContextManager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -160,6 +161,7 @@ def _session_from_row(row: dict[str, Any]) -> Session:
         origin=row.get("origin") or "user",
         backend=row.get("backend") or "claude-code",
         defaults_source=row.get("defaults_source", "agent"),
+        configuration_version=row["configuration_version"],
         model=row.get("model") or None,
         reasoning_effort=row.get("reasoning_effort") or None,
         service_tier=row.get("service_tier") or None,
@@ -402,6 +404,7 @@ class Session:
     # Which AI backend drives this session ('claude-code' | 'codex').
     backend: str = "claude-code"
     defaults_source: SessionDefaultsSource = "agent"
+    configuration_version: int = 0
     # Each missing override follows the saved default source.
     model: str | None = None
     reasoning_effort: str | None = None
@@ -883,34 +886,29 @@ class SessionManagerBase:
     def set_schedule_runner(self, runner: Any) -> None:
         self._schedule_runner = runner
 
-    async def _settle_rewind_restore(self, db: Database, session: Session, marker: str | bool) -> None:
+    async def _settle_rewind_restore(self, db: Database, session: Session, marker: str | bool) -> str:
         """Settle the original operation before projecting a restored session."""
 
         def require_directory() -> None:
             require_rewind_worktree(session.working_dir, session.fork_metadata)
 
-        async def retry_write[T](write: Callable[[], Awaitable[T]]) -> T:
-            while True:
-                try:
-                    return await write()
-                except DatabaseBusy:
-                    await asyncio.sleep(0.05)
-
         try:
-            metadata = await retry_write(lambda: db.settle_bound_archive_restore(
+            metadata = await self._retry_rewind_restore(lambda: db.settle_bound_archive_restore(
                 session.id, marker, archived=False, require_current_directory=require_directory,
             ))
         except (WorktreeChanged, ApplicationDeleting):
-            await retry_write(lambda: db.settle_bound_archive_restore(session.id, marker, archived=True))
+            await self._retry_rewind_restore(lambda: db.settle_bound_archive_restore(session.id, marker, archived=True))
             raise
         if metadata is None:
             raise SessionAdmissionClosed("The original archive restore was superseded")
-        try:
-            require_rewind_worktree(session.working_dir, metadata)
-        except WorktreeChanged:
-            await retry_write(lambda: db.rearchive_confirmed_bound_restore(session.id, metadata))
-            raise
-        session.fork_metadata = metadata
+        return metadata
+
+    async def _retry_rewind_restore[T](self, operation: Callable[[], Awaitable[T]]) -> T:
+        while True:
+            try:
+                return await operation()
+            except DatabaseBusy:
+                await asyncio.sleep(0.05)
 
     async def initialize(self, db: Database, *, previous_writers_retired: bool = False,
                          git_writer_scope: GitWriterScope | None = None,
@@ -1036,7 +1034,15 @@ class SessionManagerBase:
                             self.sessions.pop(session.id, None)
                             continue
                         else:
-                            await self._settle_rewind_restore(db, session, marker)
+                            settled = await self._settle_rewind_restore(db, session, marker)
+                            try:
+                                require_rewind_worktree(session.working_dir, settled)
+                            except WorktreeChanged:
+                                await self._retry_rewind_restore(
+                                    partial(db.rearchive_confirmed_bound_restore, session.id, settled),
+                                )
+                                raise
+                            session.fork_metadata = settled
                     except (WorktreeChanged, ApplicationDeleting, SessionAdmissionClosed):
                         self.sessions.pop(session.id, None)
                         if marker is None:

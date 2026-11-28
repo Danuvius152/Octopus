@@ -4,7 +4,7 @@ import { SessionList } from "./sessionList";
 import { ArchiveDeadline } from "./sessionArchive";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
-const row = (id = "old", status = "running") => ({ id, name: id, status, archived: false } as SessionInfo);
+const row = (id = "old", status = "running") => ({ id, name: id, status, archived: false, configuration_version: 0 } as SessionInfo);
 const absentPresence = () => Response.json({ archived: null, deletion_pending: false });
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 let list: SessionList;
@@ -55,7 +55,7 @@ it("keeps a sparse successor relationship through a read failure and lets a newe
   expect(useSessionStore.getState().sessionRead.error).toBe("offline");
   expect(useSessionStore.getState().sessionSuccessors).toEqual({ old: "new" });
 
-  list.archive("old", undefined, undefined, undefined, { model: null });
+  list.archive("old");
   expect(calls).toHaveLength(2);
   const retry = list.refresh(true);
   list.remove("new");
@@ -453,12 +453,13 @@ it("preserves rows and exposes errors until a successful explicit refresh", asyn
   expect(useSessionStore.getState().sessionRead).toMatchObject({ loaded: true, stale: false, error: null });
 });
 
-it.each(["created", "patch", "archive", "remove"] as const)("confirms a late %s write through the current connection", async (kind) => {
+it.each(["created", "settingsSaved", "archive", "remove"] as const)("confirms a late %s write through the current connection", async (kind) => {
   const original = list.capture();
   list.connect({ socket: {}, accountGeneration: useSessionStore.getState().accountGeneration }); await flush();
   calls[0].resolve(Response.json([row("old", "idle")])); await flush();
   const applied = kind === "created" ? await list.created(row("late"), original) :
-    kind === "patch" ? list.patch("old", { status: "running" }, original) : list[kind]("old", original);
+    kind === "settingsSaved" ? list.settingsSaved({ ...row(), model: "late", configuration_version: 1 }, original)
+      : list[kind]("old", original);
   expect(applied).toBe(false); await flush();
   expect(useSessionStore.getState().sessions).toEqual([row("old", "idle")]);
   expect(calls).toHaveLength(2);
@@ -472,8 +473,16 @@ it.each(["account", "token", "dispose"])("does not confirm an obsolete write aft
   if (kind === "token") useSessionStore.getState().setToken("other-token");
   if (kind === "dispose") list.dispose();
   expect(await list.created(row("late"), original)).toBe(false);
-  expect(list.patch("old", { status: "idle" }, original)).toBe(false);
+  expect(list.settingsSaved({ ...row(), model: "late", configuration_version: 1 }, original)).toBe(false);
   await flush(); expect(calls).toHaveLength(0);
+});
+
+it("preserves a newer configuration when an earlier save reply arrives", () => {
+  const original = list.capture();
+  const newer = { ...row(), model: "newer", configuration_version: 2 };
+  list.row(newer);
+  list.settingsSaved({ ...row(), model: "older", configuration_version: 1 }, original);
+  expect(useSessionStore.getState().sessions).toEqual([newer]);
 });
 
 it("a creation receipt can follow an already observed live identity without replacing newer fields", async () => {

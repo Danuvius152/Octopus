@@ -413,6 +413,14 @@ app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)
 app.add_middleware(_HTTPCompression, minimum_size=1024, compresslevel=5)
 
 
+@app.exception_handler(files.FileReadHTTPError)
+async def _file_read_error(_request: Request, exc: files.FileReadHTTPError) -> JSONResponse:
+    body = {"detail": exc.detail}
+    if exc.code is not None:
+        body["code"] = exc.code
+    return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
+
+
 @app.exception_handler(SessionOwnerUnavailable)
 async def _session_owner_unavailable(_request: Request, exc: SessionOwnerUnavailable) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})

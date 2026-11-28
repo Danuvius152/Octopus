@@ -11,7 +11,7 @@ import { deferred } from "../test-support/deferred";
 
 const a = { id: "a", name: "A", agent_id: "agent", status: "idle", backend: "codex",
   created_at: "2026-11-12", working_dir: "/tmp", archived: false,
-  message_count: 0, transcript_integrity: "ok", origin: "user", can_fork: true,
+  message_count: 0, transcript_integrity: "ok", origin: "user", can_fork: true, configuration_version: 0,
   can_steer: true, can_compact: false, can_observe_context: true, fork_is_full_copy: false } as SessionInfo;
 const b = { ...a, id: "b", name: "B" };
 const child = { ...a, id: "child", name: "Result", forked_from_session_id: a.id,

@@ -150,7 +150,8 @@ def prepare_imported_message_rows(session_id: str, history: list[MessageContent]
 _SESSION_COLUMNS = (
     "id name working_dir created_at claude_session_id credential_id archived agent_id origin backend "
     "parent_session_id delegation_request forked_from_session_id fork_after_seq fork_needs_replay fork_metadata "
-    "fork_revert_record fork_status app_id model user_id reasoning_effort service_tier context_state defaults_source"
+    "fork_revert_record fork_status app_id model user_id reasoning_effort service_tier context_state defaults_source "
+    "configuration_version"
 ).split()
 
 _SESSION_PROJECTION = ",".join(f"s.{column}" for column in _SESSION_COLUMNS) + (
@@ -625,6 +626,12 @@ class SessionsMixin(DatabaseBase):
                     raise ValueError("Application session ownership cannot cross accounts")
             snapshot = message_snapshot or await _fork_message_snapshot(tx, parent_id, fork_after_seq)
             await require_agent_not_deleting(tx, agent_id)
+            if credential_id is not None:
+                binding = await tx.fetch_one(
+                    "SELECT id FROM backend_credentials WHERE id=? AND user_id IS ? AND backend=?",
+                    (credential_id, user_id, backend),
+                )
+                credential_id = binding[0] if binding else None
             await tx.execute(
                 "INSERT INTO sessions "
                 "(id, name, working_dir, created_at, claude_session_id, "
@@ -674,6 +681,18 @@ class SessionsMixin(DatabaseBase):
             cursor = await tx.execute(query, params)
             rows = await cursor.fetchall()
             return [_decode_session(row) for row in rows]
+
+    async def load_session_for_restore(self, session_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        """Read the session and its application admission from one snapshot."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                f"SELECT {_SESSION_PROJECTION} FROM sessions s WHERE id=? AND (? IS NULL OR user_id=?)",
+                (session_id, user_id, user_id),
+            )
+            if row is None:
+                return None
+            await require_application_writable(tx, session_id)
+            return _decode_session(row)
 
     async def load_archived_sessions(
         self, *, user_id: str | None = None, session_id: str | None = None,
@@ -1220,8 +1239,9 @@ class SessionsMixin(DatabaseBase):
         return row is not None
 
     async def update_session_field(
-        self, session_id: str, *, require_current_directory: Callable[[], None] | None = None, **fields: Any,
-    ) -> None:
+        self, session_id: str, *, require_current_directory: Callable[[], None] | None = None,
+        configuration_precondition: tuple[str, int] | None = None, **fields: Any,
+    ) -> int | None:
         async with self.transaction(write=True) as tx:
             allowed = {
                 "name",
@@ -1263,19 +1283,28 @@ class SessionsMixin(DatabaseBase):
                 if v is None and k not in nullable:
                     continue
                 updates[k] = int(bool(v)) if k in bool_fields else v
-            if not updates:
-                return
+            if not updates and configuration_precondition is None:
+                return None
             await require_agent_not_deleting(tx, updates.get("agent_id"))
-            set_clause = ", ".join(f"{k} = ?" for k in updates)
-            values = list(updates.values()) + [session_id]
+            assignments = [f"{k} = ?" for k in updates]
+            values = [*updates.values(), session_id]
             if require_current_directory is not None:
                 require_current_directory()
-            await tx.execute(
-                f"UPDATE sessions SET {set_clause} WHERE id = ?",
-                values,
-            )
+            version = None
+            if configuration_precondition is None:
+                await tx.execute(f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?", values)
+            else:
+                assignments.append("configuration_version = configuration_version + 1")
+                row = await tx.fetch_one(
+                    f"UPDATE sessions SET {', '.join(assignments)} "
+                    "WHERE id = ? AND backend = ? AND configuration_version = ? RETURNING configuration_version",
+                    [*values, *configuration_precondition],
+                )
+                if row is not None:
+                    version = int(row[0])
             if require_current_directory is not None:
                 require_current_directory()
+        return version
 
     async def begin_bound_archive_restore(
         self, session_id: str, metadata: str, marker: str, *, was_archived: bool = True,
@@ -1312,35 +1341,53 @@ class SessionsMixin(DatabaseBase):
                 require_current_directory()
             return row[0] if row else None
 
-    async def rearchive_confirmed_bound_restore(self, session_id: str, confirmed_metadata: str) -> None:
+    async def rearchive_confirmed_bound_restore(self, session_id: str, confirmed_metadata: str) -> bool:
         """Compensate a commit acknowledged before the live session was installed."""
         async with self.transaction(write=True) as tx:
-            await tx.execute(
+            cursor = await tx.execute(
                 "UPDATE sessions SET archived=1 WHERE id=? AND archived=0 AND fork_metadata=?",
                 (session_id, confirmed_metadata),
             )
+            return cursor.rowcount == 1
 
     async def finish_fork_revert(
         self, session_id: str, record: str, metadata: str, *, require_current_directory: Callable[[], None],
-    ) -> tuple[bool, bool] | None:
-        """Commit the result and capture archive and application admission in the same transaction."""
+    ) -> tuple[bool, bool, str | None, int] | None:
+        """Commit the result and capture admission and the credential binding."""
         async with self.transaction(write=True) as tx:
             require_current_directory()
             row = await tx.fetch_one(
                 "UPDATE sessions SET fork_revert_record=?, fork_metadata=?, fork_status='ready' "
-                "WHERE id=? AND origin='fork' AND fork_status='reverting' RETURNING archived",
+                "WHERE id=? AND origin='fork' AND fork_status='reverting' "
+                "RETURNING archived, credential_id, configuration_version",
                 (record, metadata, session_id),
             )
             if row is None:
                 return None
             application_deleting = await application_deletion_blocks_session(tx, session_id)
             require_current_directory()
-            return bool(row[0]), application_deleting
+            return bool(row[0]), application_deleting, row[1], row[2]
+
+    async def finish_rewind_fork(
+        self, session_id: str, *, require_current_directory: Callable[[], None],
+    ) -> tuple[str | None, int]:
+        """Promote a rewind without file revert and capture its credential binding."""
+        async with self.transaction() as tx:
+            require_current_directory()
+            row = await tx.fetch_one(
+                "UPDATE sessions SET fork_status='ready' "
+                "WHERE id=? AND origin='fork' AND fork_status='initializing' "
+                "RETURNING credential_id, configuration_version", (session_id,),
+            )
+            if row is None:
+                raise RuntimeError("Rewind lost its initializing row")
+            require_current_directory()
+            return row[0], row[1]
 
     async def finish_full_copy_fork(
         self, session_id: str, resume_id: str | None, needs_replay: bool,
         require_current_directory: Callable[[], None],
-    ) -> None:
+    ) -> tuple[str | None, int]:
         """Commit prepared artifacts; a pending delivery still needs admission."""
         async with self.transaction() as tx:
             require_current_directory()
@@ -1351,6 +1398,11 @@ class SessionsMixin(DatabaseBase):
             )
             if updated.rowcount != 1:
                 raise RuntimeError("Full-copy fork lost its initializing row")
+            row = await tx.fetch_one(
+                "SELECT credential_id, configuration_version FROM sessions WHERE id=?", (session_id,),
+            )
+            assert row is not None
+            return row[0], row[1]
 
     async def acknowledge_full_copy_delivery(self, session_id: str) -> str | None:
         """Retire the publication check without replacing input-owned metadata."""

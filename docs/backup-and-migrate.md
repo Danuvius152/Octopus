@@ -74,7 +74,7 @@ original process. Restoring committed installation records preserves saved
 relationships and grants. Provider access and new writes are established on
 the target through the [Connector lifecycle](implemented/connectors.md#oauth-and-lifecycle).
 
-Current archives contain complete main format 15 and Wiki format 17. GitHub
+Current archives contain complete main format 16 and Wiki format 17. GitHub
 installations preserve their canonical numeric identity, display label, original
 installation ID, encrypted grant and Agent links through export/import. The
 importer rejects an older main marker before creating the target; it does not

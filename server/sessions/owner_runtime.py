@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 import uuid
 from collections import deque
@@ -543,8 +544,19 @@ class OwnerRuntime:
         if isinstance(command, ReadContext):
             return await manager._read_context_owned(session)
         if isinstance(command, UpdateConfiguration):
-            async with manager._configuration_boundary(session):
-                return await manager._save_session_configuration(session.id, command.fields, command.user_id)
+            from .configuration import SessionConfigurationError
+
+            try:
+                async with manager._configuration_boundary(session):
+                    return await manager._save_session_configuration(session.id, command.fields, command.user_id)
+            except DatabaseBusy as error:
+                manager.input_database().health.require_healthy()
+                raise SessionConfigurationError("Storage is busy. Try saving again shortly.", 503) from error
+            except sqlite3.IntegrityError as error:
+                manager.input_database().health.require_healthy()
+                raise SessionConfigurationError(
+                    "The conversation settings were not saved.", 500, code="configuration_not_saved",
+                ) from error
         if isinstance(command, Submit):
             try:
                 return await self._submit(command)

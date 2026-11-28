@@ -6,7 +6,7 @@ import { sessions } from "./sessionList";
 
 const created: SessionInfo = {
   id: "created", agent_id: "agent", name: "Created", archived: false, status: "idle",
-  working_dir: "/tmp", created_at: "2026-01-01T00:00:00Z", message_count: 0, transcript_integrity: "ok",
+  working_dir: "/tmp", created_at: "2026-01-01T00:00:00Z", message_count: 0, transcript_integrity: "ok", configuration_version: 0,
   origin: "user", backend: "codex", can_steer: false, can_observe_context: false, can_compact: false,
   can_fork: false, fork_is_full_copy: false,
 };

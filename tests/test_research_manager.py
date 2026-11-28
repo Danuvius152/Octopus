@@ -1585,7 +1585,7 @@ async def test_queued_research_keeps_admitted_choices_and_rechecks_authority(
     agents = AgentManager(db)
     await agents.update_agent(session.agent_id, model="agent-original", credential_id="original")
     if override:
-        await mgr.update_session_configuration(session.id, {"model": "session-original"}, session.user_id)
+        await mgr.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "session-original"}, session.user_id)
     launched = []
 
     async def pipeline(question, *, credential, model, authorize_spawn, **kwargs):
@@ -1603,7 +1603,7 @@ async def test_queued_research_keeps_admitted_choices_and_rechecks_authority(
     first = await rm.start(session.id, "old job")
     await agents.update_agent(session.agent_id, model="agent-replacement", credential_id="replacement")
     if override:
-        await mgr.update_session_configuration(session.id, {"model": "session-replacement"}, session.user_id)
+        await mgr.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "session-replacement"}, session.user_id)
     if revoke:
         await mgr.delete_credential_binding("original", session.user_id)
     second = await rm.start(session.id, "new job")
@@ -1672,6 +1672,7 @@ async def test_queued_research_passes_original_choices_to_every_leaf(
                               service_tier="fast" if backend == "codex" else None, credential_id="agent-original")
     if override:
         await mgr.update_session_configuration(session.id, {
+            "expected_backend": session.backend, "expected_configuration_version": session.configuration_version,
             "model": "session-original", "reasoning_effort": "medium", "credential_id": "session-original",
             "service_tier": "default" if backend == "codex" else None,
         }, session.user_id)
@@ -1715,6 +1716,7 @@ async def test_queued_research_passes_original_choices_to_every_leaf(
                               service_tier="default" if backend == "codex" else None, credential_id="agent-replacement")
     if override:
         await mgr.update_session_configuration(session.id, {
+            "expected_backend": session.backend, "expected_configuration_version": session.configuration_version,
             "model": "session-replacement", "reasoning_effort": "high", "credential_id": "session-replacement",
             "service_tier": "fast" if backend == "codex" else None,
         }, session.user_id)

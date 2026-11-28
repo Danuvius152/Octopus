@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Locator } from "@playwright/test";
+import type { FrameLocator, Locator } from "@playwright/test";
 
 import type { ImportSessionRequest } from "../src/api";
 import { editExtraRoots } from "./account-resources";
@@ -15,6 +15,21 @@ const filename = "指南 %.pdf";
 
 test.use({ channel: "chromium" });
 
+const withoutNativePdf = test.extend({
+  context: async ({ playwright }, provideContext) => {
+    const profile = mkdtempSync(path.join(os.tmpdir(), "octopus-pdf-disabled-"));
+    mkdirSync(path.join(profile, "Default"));
+    writeFileSync(path.join(profile, "Default", "Preferences"), JSON.stringify({ plugins: { always_open_pdf_externally: true } }));
+    const context = await playwright.chromium.launchPersistentContext(profile, { channel: "chromium", headless: true, serviceWorkers: "block" });
+    try {
+      await provideContext(context);
+    } finally {
+      await context.close();
+      rmSync(profile, { recursive: true, force: true });
+    }
+  },
+});
+
 function pdfWithPages(...labels: string[]) {
   return pdfWithRotation(labels, 0);
 }
@@ -26,7 +41,7 @@ function pdfWithRotation(labels: string[], rotation: number) {
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
   ];
   for (const [index, label] of labels.entries()) {
-    const stream = `BT /F1 22 Tf 45 180 Td (${label}) Tj ET\n`;
+    const stream = label ? `BT /F1 22 Tf 45 180 Td (${label}) Tj ET\n` : "";
     objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 240] /Rotate ${rotation} /Resources << /Font << /F1 3 0 R >> >> /Contents ${5 + index * 2} 0 R >>`);
     objects.push(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream`);
   }
@@ -44,67 +59,35 @@ function pdfFromObjects(objects: string[]) {
     `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${Buffer.byteLength(pdf)}\n%%EOF\n`);
 }
 
-const scanDimensions = {
-  "JPEG data": "/Width 300 /Height 300",
-  "missing width": "/Height 1",
-  "invalid width": "/Width /Invalid /Height 1",
-  "image exceeds preview limit": "/Width 7000 /Height 7000",
-};
-type ScanDamage = keyof typeof scanDimensions;
-
 const drawScan = "q 320 0 0 240 0 0 cm /Scan Do Q\n";
 
-function scanImage(damage?: ScanDamage) {
-  const dimensions = damage ? scanDimensions[damage] : "/Width 1 /Height 1";
-  const image = damage === "JPEG data" ? "/Filter /DCTDecode /Length 12 >>\nstream\ninvalid JPEG"
+function scanImage(damaged = false) {
+  const image = damaged ? "/Filter /DCTDecode /Length 12 >>\nstream\ninvalid JPEG"
     : "/Filter /ASCIIHexDecode /Length 7 >>\nstream\n00FF00>";
+  const dimensions = damaged ? "/Width 300 /Height 300" : "/Width 1 /Height 1";
   return `<< /Type /XObject /Subtype /Image /ColorSpace /DeviceRGB /BitsPerComponent 8 ${dimensions} ${image}\nendstream`;
 }
 
-function pdfWithScan(damage?: ScanDamage) {
+function pdfWithScan({ damaged = false } = {}) {
+  const content = drawScan + "0 0 1 rg 24 24 32 32 re f\nBT /F1 22 Tf 45 180 Td (Visible page text) Tj ET\n";
   return pdfFromObjects([
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 240] /Resources << /XObject << /Scan 5 0 R >> >> /Contents 4 0 R >>",
-    `<< /Length ${drawScan.length} >>\nstream\n${drawScan}endstream`,
-    scanImage(damage),
-  ]);
-}
-
-function pdfWithScanOnSecondPage(image: string) {
-  const title = "BT /F1 22 Tf 45 180 Td (First PDF page) Tj ET\n";
-  return pdfFromObjects([
-    "<< /Type /Catalog /Pages 2 0 R >>",
-    "<< /Type /Pages /Count 2 /Kids [3 0 R 5 0 R] >>",
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 240] /Resources << /Font << /F1 8 0 R >> >> /Contents 4 0 R >>",
-    `<< /Length ${title.length} >>\nstream\n${title}endstream`,
-    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 240] /Resources << /XObject << /Scan 7 0 R >> >> /Contents 6 0 R >>",
-    `<< /Length ${drawScan.length} >>\nstream\n${drawScan}endstream`,
-    image,
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 240] /Resources << /XObject << /Scan 5 0 R >> /Font << /F1 6 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${content.length} >>\nstream\n${content}endstream`,
+    scanImage(damaged),
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
   ]);
 }
 
-function pdfWithStamp(damage?: ScanDamage, { appearanceGeneration = 0, flags = 4, layer, pattern }: {
-  appearanceGeneration?: number; flags?: number; layer?: "ON" | "OFF"; pattern?: "fill" | "text";
-} = {}) {
-  const optionalContent = layer ? `/OCProperties << /OCGs [7 0 R] /D << /BaseState /${layer} /Order [7 0 R] >> >>` : "";
-  const text = "BT /F1 22 Tf 45 180 Td (Visible page text) Tj ET\n";
-  const content = layer ? "/Resources << /Font << /F1 8 0 R >> >> /Contents 9 0 R" : "/Resources << >>";
-  const appearance = pattern === "fill" ? "/Pattern cs /Tiles scn 0 0 320 240 re f\n"
-    : pattern === "text" ? "/Pattern cs /Tiles scn BT /F1 38 Tf 45 180 Td (Pattern text) Tj ET\n" : drawScan;
-  const resources = pattern ? "/Pattern << /Tiles 10 0 R >> /Font << /F1 8 0 R >>" : "/XObject << /Scan 6 0 R >>";
-  const tile = "q 32 0 0 24 0 0 cm /Scan Do Q\n";
+function pdfWithStamp() {
   return pdfFromObjects([
-    `<< /Type /Catalog /Pages 2 0 R ${optionalContent} >>`,
+    "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Count 1 /Kids [3 0 R] >>",
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 240] ${content} /Annots [4 0 R] >>`,
-    `<< /Type /Annot /Subtype /Stamp /Rect [0 0 320 240] /F ${flags} /AP << /N 5 ${appearanceGeneration} R >> ${layer ? "/OC 7 0 R" : ""} >>`,
-    `<< /Type /XObject /Subtype /Form /BBox [0 0 320 240] /Resources << ${resources} >> /Length ${appearance.length} >>\nstream\n${appearance}endstream`,
-    scanImage(damage),
-    ...(layer ? ["<< /Type /OCG /Name (Stamp layer) >>", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-      `<< /Length ${text.length} >>\nstream\n${text}endstream`] : []),
-    ...(pattern ? [`<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 32 24] /XStep 32 /YStep 24 /Resources << /XObject << /Scan 6 0 R >> >> /Length ${tile.length} >>\nstream\n${tile}endstream`] : []),
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 320 240] /Resources << >> /Annots [4 0 R] >>",
+    "<< /Type /Annot /Subtype /Stamp /Rect [0 0 320 240] /F 4 /AP << /N 5 0 R >> >>",
+    `<< /Type /XObject /Subtype /Form /BBox [0 0 320 240] /Resources << /XObject << /Scan 6 0 R >> >> /Length ${drawScan.length} >>\nstream\n${drawScan}endstream`,
+    scanImage(),
   ]);
 }
 
@@ -116,6 +99,18 @@ async function expectPdf(dialog: Locator, text = "PDF preview ready") {
   await expect(reader.getByText(text, { exact: true })).toBeVisible();
   await expect(reader.locator("canvas")).toBeVisible();
   return reader;
+}
+
+function failPdfCanvasDraw(frame: FrameLocator, pageNumber: number) {
+  return frame.locator("body").evaluate((_, failedPage) => {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+      value(this: HTMLCanvasElement, ...args: unknown[]) {
+        if (this.closest(`[aria-label="PDF page ${failedPage}"]`)) throw new Error("Canvas drawing unavailable");
+        return Reflect.apply(getContext, this, args);
+      },
+    });
+  }, pageNumber);
 }
 
 test("one workspace chat opens tool deliveries from its workspace and an authorized repository", async ({ page, request, account }) => {
@@ -402,9 +397,9 @@ async function withPdf(page: Page, request: APIRequestContext, inspect: (pdfPath
   }
 }
 
-test("an unreadable PDF opened from Markdown leaves the original text active", async ({ page, request }) => {
+withoutNativePdf("an unreadable PDF opened from Markdown leaves the original text active", async ({ page, request }) => {
   const damaged = Buffer.from("%PDF-1.7\nIncomplete PDF.\n");
-  await withPdf(page, request, async () => {
+  await withPdf(page, request, async (pdfPath) => {
     const reader = page.getByRole("dialog");
     await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
     await expect(reader.getByRole("alert")).toHaveText(/Couldn't load the preview/);
@@ -413,29 +408,131 @@ test("an unreadable PDF opened from Markdown leaves the original text active", a
     await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
     const open = reader.getByRole("link", { name: "Open original PDF" });
     await expect(open).toHaveAttribute("target", "_blank");
-    const inline = await request.get((await open.getAttribute("href"))!);
+    const openUrl = new URL((await open.getAttribute("href"))!);
+    expect(openUrl.searchParams.get("preview")).toBe("true");
+    const inline = await request.get(openUrl.href);
+    expect(inline.status()).toBe(200);
     expect(inline.headers()["content-disposition"]).toMatch(/^inline;/);
     expect(await inline.body()).toEqual(damaged);
     const download = page.waitForEvent("download");
-    await reader.getByRole("link", { name: "Download original PDF" }).click();
+    const downloadLink = reader.getByRole("link", { name: "Download original PDF" });
+    await downloadLink.click();
     const saved = await download;
     expect(saved.suggestedFilename()).toBe(filename);
     expect(readFileSync((await saved.path())!)).toEqual(damaged);
+    const downloadUrl = new URL((await downloadLink.getAttribute("href"))!);
+    expect(downloadUrl.searchParams.has("preview")).toBe(false);
+    writeFileSync(pdfPath, Buffer.alloc(2 * 1024 * 1024 + 1));
+    for (const url of [openUrl, downloadUrl]) {
+      expect((await request.get(url.href)).status()).toBe(413);
+      url.searchParams.delete("token");
+      expect((await request.get(url.href)).status()).toBe(401);
+    }
   }, { fromMarkdown: true, bytes: damaged });
 });
 
-for (const damage of Object.keys(scanDimensions) as ScanDamage[]) {
-  test(`a PDF with a damaged scan keeps the original text active (${damage})`, async ({ page, request }) => {
-    await withPdf(page, request, async () => {
-      const reader = page.getByRole("dialog");
+withoutNativePdf("a first-page drawing failure leaves Markdown readable", async ({ page, request }) => {
+  await withPdf(page, request, async () => {
+    const reader = page.getByRole("dialog");
+    let release!: () => void;
+    const paused = new Promise<void>((resolve) => { release = resolve; });
+    await page.route(isPdfPreviewRead, async (route) => {
+      await paused;
+      await route.continue();
+    }, { times: 1 });
+    try {
       await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
-      await expect(reader.getByRole("alert")).toHaveText(/Couldn't load the preview/);
+      const frame = reader.getByTitle("PDF preview");
+      await expect(frame).toHaveAttribute("inert", "");
+      await failPdfCanvasDraw(frame.contentFrame(), 1);
       await expect(reader.getByRole("heading", { name: "Original guide" })).toBeVisible();
-      await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
-      await expect(reader.getByRole("link", { name: "Download original PDF" })).toBeVisible();
-    }, { fromMarkdown: true, bytes: pdfWithScan(damage) });
+    } finally {
+      release();
+    }
+    await expect(reader.getByRole("alert")).toContainText("Couldn't draw the first PDF page.");
+    await expect(reader.getByRole("tab", { name: "guide.md" })).toHaveAttribute("aria-selected", "true");
+    await expect(reader.getByRole("heading", { name: "Original guide" })).toBeVisible();
+    await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
+    await expect(reader.getByRole("link", { name: "Open original PDF" })).toBeVisible();
+    await expect(reader.getByRole("link", { name: "Download original PDF" })).toBeVisible();
+  }, { fromMarkdown: true });
+});
+
+test("a transient linked PDF read failure keeps the original file actions available", async ({ page, request }) => {
+  await withPdf(page, request, async () => {
+    const reader = page.getByRole("dialog");
+    await page.route(isPdfPreviewRead, (route) => route.fulfill({
+      status: 503, json: { detail: "PDF bytes temporarily unavailable." },
+    }), { times: 1 });
+    await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
+    await expect(reader.getByRole("alert")).toContainText("PDF bytes temporarily unavailable.");
+    await expect(reader.getByRole("heading", { name: "Original guide" })).toBeVisible();
+    await expect(reader.getByRole("link", { name: "Open original PDF" })).toBeVisible();
+    await expect(reader.getByRole("link", { name: "Download original PDF" })).toBeVisible();
+  }, { fromMarkdown: true });
+});
+
+test("a PDF canvas stays readable when its selectable text stream fails", async ({ page, request }) => {
+  await page.addInitScript(() => {
+    const postMessage = Worker.prototype.postMessage;
+    Object.defineProperty(Worker.prototype, "postMessage", {
+      value(this: Worker, message: { action?: string }, ...rest: unknown[]) {
+        if (message.action === "GetTextContent") {
+          window.document.documentElement.dataset.pdfTextStreamBlocked = "true";
+          throw new Error("PDF text stream unavailable");
+        }
+        return Reflect.apply(postMessage, this, [message, ...rest]);
+      },
+    });
   });
-}
+  await withPdf(page, request, async () => {
+    const reader = page.getByRole("dialog");
+    await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-pdf-text-stream-blocked", "true");
+    await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
+    const canvas = reader.getByTitle("PDF preview").contentFrame().locator("canvas");
+    await expect(canvas).toBeVisible();
+    const pixel = await canvas.evaluate((node: HTMLCanvasElement) =>
+      [...node.getContext("2d")!.getImageData(node.width / 2, node.height * .6, 1, 1).data]);
+    expect(pixel).toEqual([0, 153, 0, 255]);
+  }, { fromMarkdown: true });
+});
+
+test("a later PDF page that cannot draw keeps the other page readable", async ({ page, request }) => {
+  await withPdf(page, request, async () => {
+    const reader = page.getByRole("dialog");
+    const pdf = await expectPdf(reader, "First PDF page");
+    await failPdfCanvasDraw(pdf, 2);
+    const next = pdf.getByRole("button", { name: "Next page" });
+    const failure = pdf.getByRole("alert");
+    await next.click();
+    await expect(failure).toContainText("Couldn't draw this page.");
+    await expect(pdf.locator("canvas")).toBeHidden();
+    await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
+    await pdf.getByRole("button", { name: "Zoom in" }).click();
+    await expect(pdf.getByText("125%", { exact: true })).toBeVisible();
+    await expect(failure).toContainText("Couldn't draw this page.");
+    await pdf.getByRole("button", { name: "Previous page" }).click();
+    await expectPdf(reader, "First PDF page");
+    await next.click();
+    await expect(failure).toContainText("Couldn't draw this page.");
+  }, { bytes: pdfWithPages("First PDF page", "Second PDF page") });
+});
+
+withoutNativePdf("PDF.js displays the readable part of a page with a damaged image", async ({ page, request }) => {
+  await withPdf(page, request, async () => {
+    const reader = page.getByRole("dialog");
+    await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
+    await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
+    const pdf = await expectPdf(reader, "Visible page text");
+    const pixels = await pdf.locator("canvas").evaluate((node: HTMLCanvasElement) => {
+      const context = node.getContext("2d")!;
+      return [[0.125, 5 / 6], [0.5, 0.5]].map(([x, y]) =>
+        [...context.getImageData(node.width * x, node.height * y, 1, 1).data]);
+    });
+    expect(pixels).toEqual([[0, 0, 255, 255], [255, 255, 255, 255]]);
+  }, { fromMarkdown: true, bytes: pdfWithScan({ damaged: true }) });
+});
 
 test("a valid scanned PDF page activates after its image is decoded", async ({ page, request }) => {
   await withPdf(page, request, async () => {
@@ -448,102 +545,6 @@ test("a valid scanned PDF page activates after its image is decoded", async ({ p
     expect(pixel).toEqual([0, 255, 0, 255]);
   }, { fromMarkdown: true, bytes: pdfWithScan() });
 });
-
-for (const [description, image] of [
-  ["drawing error", scanImage("image exceeds preview limit")],
-  ["worker operator stream error", scanImage().replace("/Subtype /Image", "/Subtype /Unsupported")],
-]) {
-  test(`a PDF page with a ${description} keeps the failure on zoom and on return`, async ({ page, request }) => {
-    await withPdf(page, request, async () => {
-      const pdf = await expectPdf(page.getByRole("dialog"), "First PDF page");
-      const next = pdf.getByRole("button", { name: "Next page" });
-      const failed = pdf.getByRole("alert");
-      await next.click();
-      await expect(failed).toHaveText(/Couldn't draw this page/);
-      await pdf.getByRole("button", { name: "Zoom in" }).click();
-      await expect(pdf.getByText("125%", { exact: true })).toBeVisible();
-      await expect(failed).toHaveText(/Couldn't draw this page/);
-      await pdf.getByRole("button", { name: "Previous page" }).click();
-      await expect(pdf.getByText("First PDF page")).toBeVisible();
-      await next.click();
-      await expect(pdf.getByText("Page 2 of 2", { exact: true })).toBeVisible();
-      await expect(failed).toHaveText(/Couldn't draw this page/);
-      await expect(pdf.locator("canvas")).toBeHidden();
-    }, { bytes: pdfWithScanOnSecondPage(image) });
-  });
-}
-
-test("an invalid image in a PDF stamp keeps the original text active", async ({ page, request }) => {
-  await withPdf(page, request, async () => {
-    const reader = page.getByRole("dialog");
-    await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
-    await expect(reader.getByRole("alert")).toHaveText(/Couldn't load the preview/);
-    await expect(reader.getByRole("heading", { name: "Original guide" })).toBeVisible();
-    await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
-  }, { fromMarkdown: true, bytes: pdfWithStamp("missing width") });
-});
-
-test("a PDF stamp with a broken appearance reference keeps the original text active", async ({ page, request }) => {
-  await withPdf(page, request, async () => {
-    const reader = page.getByRole("dialog");
-    await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
-    await expect(reader.getByRole("alert")).toHaveText(/Couldn't load the preview/);
-    await expect(reader.getByRole("heading", { name: "Original guide" })).toBeVisible();
-    await expect(reader.getByRole("tab", { name: "guide.md" })).toHaveAttribute("aria-selected", "true");
-    await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
-  }, { fromMarkdown: true, bytes: pdfWithStamp(undefined, { appearanceGeneration: 1 }) });
-});
-
-test("a hidden PDF stamp with a broken appearance reference does not block the page", async ({ page, request }) => {
-  await withPdf(page, request, async () => {
-    const reader = page.getByRole("dialog");
-    await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
-    await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
-    await expect(reader.getByTitle("PDF preview").contentFrame().locator("canvas")).toBeVisible();
-  }, { fromMarkdown: true, bytes: pdfWithStamp(undefined, { appearanceGeneration: 1, flags: 6 }) });
-});
-
-for (const [description, damage, appearanceGeneration] of [
-  ["broken appearance reference", undefined, 1],
-  ["broken scan image", "JPEG data", 0],
-  ["invalid image dimensions", "missing width", 0],
-] as const) {
-  for (const layer of ["OFF", "ON"] as const) {
-    test(`a PDF stamp with ${description} respects layer ${layer}`, async ({ page, request }) => {
-      await withPdf(page, request, async () => {
-        const reader = page.getByRole("dialog");
-        await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
-        if (layer === "OFF") {
-          await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
-          await expectPdf(reader, "Visible page text");
-        } else {
-          await expect(reader.getByRole("alert")).toHaveText(/Couldn't load the preview/);
-          await expect(reader.getByRole("tab", { name: "guide.md" })).toHaveAttribute("aria-selected", "true");
-          await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
-        }
-      }, { fromMarkdown: true, bytes: pdfWithStamp(damage, { appearanceGeneration, layer }) });
-    });
-  }
-}
-
-for (const pattern of ["fill", "text"] as const) {
-  for (const layer of ["OFF", "ON"] as const) {
-    test(`a PDF stamp with a broken tiling pattern for ${pattern} respects layer ${layer}`, async ({ page, request }) => {
-      await withPdf(page, request, async () => {
-        const reader = page.getByRole("dialog");
-        await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
-        if (layer === "OFF") {
-          await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
-          await expectPdf(reader, "Visible page text");
-        } else {
-          await expect(reader.getByRole("alert")).toHaveText(/Couldn't load the preview/);
-          await expect(reader.getByRole("tab", { name: "guide.md" })).toHaveAttribute("aria-selected", "true");
-          await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
-        }
-      }, { fromMarkdown: true, bytes: pdfWithStamp("missing width", { layer, pattern }) });
-    });
-  }
-}
 
 test("a valid PDF stamp is rendered before its page activates", async ({ page, request }) => {
   await withPdf(page, request, async () => {
@@ -571,12 +572,16 @@ test("PDF rendering remains available if the browser cannot start its worker", a
   });
 });
 
-test("a valid blank PDF page activates after rendering", async ({ page, request }) => {
+withoutNativePdf("a valid blank PDF page activates after rendering", async ({ page, request }) => {
   await withPdf(page, request, async () => {
     const reader = page.getByRole("dialog");
     await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
     await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
-    await expect(reader.getByTitle("PDF preview").contentFrame().locator("canvas")).toBeVisible();
+    const canvas = reader.getByTitle("PDF preview").contentFrame().locator("canvas");
+    await expect(canvas).toBeVisible();
+    const pixel = await canvas.evaluate((node: HTMLCanvasElement) =>
+      [...node.getContext("2d")!.getImageData(node.width / 2, node.height / 2, 1, 1).data]);
+    expect(pixel).toEqual([255, 255, 255, 255]);
   }, { fromMarkdown: true, bytes: pdfWithPages("") });
 });
 
@@ -704,9 +709,13 @@ test("retrying stalled PDF metadata keeps reading available until the new previe
       await firstRead;
       await page.clock.fastForward(5_001);
       await expect(reader.getByRole("heading", { name: "Original guide" })).toBeVisible();
+      await expect(reader.getByText(`${filename} is taking longer to load`)).toBeVisible();
+      await expect(reader.getByRole("button", { name: `Cancel opening ${filename}` })).toBeVisible();
       await expect(reader.getByTitle("PDF preview")).toHaveCount(0);
+      const retry = reader.getByRole("button", { name: `Retry opening ${filename}` });
+      await expect(retry).toBeVisible();
       const replacementRead = page.waitForRequest((read) => isPdfPreviewRead(new URL(read.url())));
-      await reader.getByRole("button", { name: `Retry opening ${filename}` }).click();
+      await retry.click();
       await replacementRead;
       await expect(reader.getByTitle("PDF preview")).toHaveAttribute("inert", "");
       await expect(reader.getByRole("heading", { name: "Original guide" })).toBeVisible();
@@ -766,7 +775,8 @@ test("cancelling a linked PDF retires its frame and ignores the late response", 
   }, { fromMarkdown: true });
 });
 
-test("a prepared PDF keeps its iframe, page and zoom across tab switches", async ({ page, request }) => {
+withoutNativePdf("a prepared PDF keeps its page, zoom and scroll across tab switches", async ({ page, request }) => {
+  await page.setViewportSize({ width: 900, height: 470 });
   await withPdf(page, request, async () => {
     const reader = page.getByRole("dialog");
     const guide = reader.getByRole("tab", { name: "guide.md" });
@@ -800,6 +810,12 @@ test("a prepared PDF keeps its iframe, page and zoom across tab switches", async
     const canvas = pdf.locator("canvas");
     await expect(canvas).toBeVisible();
     const pageCanvas = (await canvas.elementHandle())!;
+    const pageRegion = pdf.getByRole("region", { name: "PDF page 2" });
+    const scrollTop = await pageRegion.evaluate((element) => {
+      element.scrollTop = 60;
+      return element.scrollTop;
+    });
+    expect(scrollTop).toBeGreaterThan(0);
     await guide.click();
     await expect(guide).toBeFocused();
     await expect(iframe).toHaveAttribute("aria-hidden", "true");
@@ -816,6 +832,13 @@ test("a prepared PDF keeps its iframe, page and zoom across tab switches", async
     expect(await canvas.evaluate((node, retained) => node === retained, pageCanvas)).toBe(true);
     await expect(pdf.getByText("Page 2 of 2", { exact: true })).toBeVisible();
     await expect(pdf.getByText("125%", { exact: true })).toBeVisible();
+    await expect(pageRegion).toHaveJSProperty("scrollTop", scrollTop);
+    await pdf.getByRole("button", { name: "Zoom in" }).focus();
+    for (let index = 0; index < 3; index++) await page.keyboard.press("Shift+Tab");
+    await expect(reader.getByRole("button", { name: "Full file path" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(reader).toBeHidden();
+    await expect(page.locator(".chat-input-bar textarea")).toBeFocused();
   }, { fromMarkdown: true, bytes: pdfWithPages("First PDF page", "Second PDF page") });
 });
 
@@ -910,31 +933,18 @@ test("PDF renders inline in Chromium and explicit Download saves the original na
   });
 });
 
-const withoutPdf = test.extend({
-  context: async ({ playwright }, provideContext) => {
-    const profile = mkdtempSync(path.join(os.tmpdir(), "octopus-pdf-disabled-"));
-    mkdirSync(path.join(profile, "Default"));
-    writeFileSync(path.join(profile, "Default", "Preferences"), JSON.stringify({ plugins: { always_open_pdf_externally: true } }));
-    const context = await playwright.chromium.launchPersistentContext(profile, { channel: "chromium", headless: true, serviceWorkers: "block" });
-    try {
-      await provideContext(context);
-    } finally {
-      await context.close();
-      rmSync(profile, { recursive: true, force: true });
-    }
-  },
-});
-
-withoutPdf("disabled native PDF handling retains an explicit open and download", async ({ page, request }) => {
+withoutNativePdf("disabled native PDF handling still renders PDF.js and retains the original file actions", async ({ page, request }) => {
   await withPdf(page, request, async () => {
     expect(await page.evaluate(() => navigator.pdfViewerEnabled)).toBe(false);
-    await page.getByRole("button", { name: "Open file: Read the PDF" }).click();
-    await expect(page.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByText(/PDF preview is unavailable/)).toBeVisible();
-    await expect(page.getByTitle("PDF preview")).toHaveCount(0);
-    await expect(page.getByRole("link", { name: "Open in new tab" })).toBeVisible();
+    const reader = page.getByRole("dialog");
+    await reader.getByRole("button", { name: "Open file: Read the PDF" }).click();
+    const pdf = await expectPdf(reader);
+    const pixel = await pdf.locator("canvas").evaluate((node: HTMLCanvasElement) =>
+      [...node.getContext("2d")!.getImageData(node.width / 2, node.height * .6, 1, 1).data]);
+    expect(pixel).toEqual([0, 153, 0, 255]);
+    await expect(reader.getByRole("tab", { name: filename })).toHaveAttribute("aria-selected", "true");
     const opened = page.waitForEvent("download");
-    await page.getByRole("link", { name: "Open in new tab" }).click();
+    await reader.getByRole("link", { name: "Open in new tab" }).click();
     const file = await opened;
     expect(file.suggestedFilename()).toBe(filename);
     expect(readFileSync((await file.path())!)).toEqual(document);

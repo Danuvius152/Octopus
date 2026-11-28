@@ -497,12 +497,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /**
-         * Serve Application Root
-         * @description Redirect the bare app URL to a trailing slash so the document's own
-         *     relative URLs (`./app.js`, `style.css`) resolve inside the app instead of
-         *     against `/apps/`.
-         */
+        /** Serve Application Root */
         get: operations["serve_application_root_apps__app_id__get"];
         put?: never;
         post?: never;
@@ -564,7 +559,7 @@ export interface paths {
         head?: never;
         /**
          * Update Session
-         * @description Save settings under the engine the client observed.
+         * @description Save settings under the engine and configuration the client observed.
          */
         patch: operations["update_session_api_sessions__session_id__patch"];
         trace?: never;
@@ -4028,6 +4023,8 @@ export interface components {
             backend: components["schemas"]["BackendKind"];
             /** Defaults Source */
             defaults_source?: ("agent" | "backend") | null;
+            /** Configuration Version */
+            configuration_version: number;
             /** Has Inputs */
             has_inputs?: boolean | null;
             /** Model */
@@ -6372,6 +6369,8 @@ export interface components {
             backend: components["schemas"]["BackendKind"];
             /** Defaults Source */
             defaults_source?: ("agent" | "backend") | null;
+            /** Configuration Version */
+            configuration_version: number;
             /** Has Inputs */
             has_inputs?: boolean | null;
             /** Model */
@@ -6503,6 +6502,8 @@ export interface components {
             backend: components["schemas"]["BackendKind"];
             /** Defaults Source */
             defaults_source?: ("agent" | "backend") | null;
+            /** Configuration Version */
+            configuration_version: number;
             /** Has Inputs */
             has_inputs?: boolean | null;
             /** Model */
@@ -6594,10 +6595,12 @@ export interface components {
         SessionStatus: "idle" | "running";
         /**
          * SessionUpdate
-         * @description Change conversation settings under the observed engine.
+         * @description Change conversation settings under the observed engine and configuration.
          */
         SessionUpdate: {
             expected_backend?: components["schemas"]["BackendKind"] | null;
+            /** Expected Configuration Version */
+            expected_configuration_version?: number | null;
             backend?: components["schemas"]["BackendKind"] | null;
             /** Credential Id */
             credential_id?: string | null;
@@ -6632,6 +6635,13 @@ export interface components {
             /** Password */
             password: string;
         };
+        /** ShowMeClarificationResponse */
+        ShowMeClarificationResponse: {
+            /** Message */
+            message: string;
+            /** Description */
+            description: string;
+        };
         /** ShowMeEditTarget */
         ShowMeEditTarget: {
             /** Path */
@@ -6651,7 +6661,14 @@ export interface components {
             /** Can Search Description */
             can_search_description?: true | null;
             /** Code */
-            code?: "working_directory_unavailable" | null;
+            code?: ("working_directory_unavailable" | "target_changed" | "source_directory_changed") | null;
+        };
+        /** ShowMeFileResponse */
+        ShowMeFileResponse: {
+            metadata: components["schemas"]["FileViewerMetadata"];
+            target: components["schemas"]["ShowMeEditTarget"];
+            /** Description */
+            description?: string | null;
         };
         /** ShowMeResolveRequest */
         ShowMeResolveRequest: {
@@ -6659,17 +6676,6 @@ export interface components {
             text: string;
             /** Mode */
             mode?: ("command" | "description") | null;
-        };
-        /** ShowMeResolveResponse */
-        ShowMeResolveResponse: {
-            /** Path */
-            path?: string | null;
-            /** Message */
-            message?: string | null;
-            metadata?: components["schemas"]["FileViewerMetadata"] | null;
-            target?: components["schemas"]["ShowMeEditTarget"] | null;
-            /** Description */
-            description?: string | null;
         };
         /** SnapshotRestore */
         SnapshotRestore: {
@@ -9506,6 +9512,7 @@ export interface operations {
         parameters: {
             query?: {
                 source?: string | null;
+                reload_source?: string | null;
                 token?: string | null;
             };
             header?: never;
@@ -9526,7 +9533,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ShowMeResolveResponse"];
+                    "application/json": components["schemas"]["ShowMeFileResponse"] | components["schemas"]["ShowMeClarificationResponse"];
                 };
             };
             /** @description Unauthorized */
@@ -9608,6 +9615,7 @@ export interface operations {
             query: {
                 path: string;
                 source?: string | null;
+                reload_source?: string | null;
                 source_directory?: string | null;
                 source_directory_id?: string | null;
                 token?: string | null;
@@ -9629,6 +9637,15 @@ export interface operations {
                     "application/json": components["schemas"]["FileViewerMetadata"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -9647,7 +9664,6 @@ export interface operations {
                 source?: string | null;
                 canonical_path_id?: string | null;
                 preview?: boolean;
-                frame?: boolean;
                 source_directory?: string | null;
                 source_directory_id?: string | null;
                 token?: string | null;
@@ -9667,6 +9683,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ShowMeFileErrorResponse"];
                 };
             };
             /** @description Validation Error */

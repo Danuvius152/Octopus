@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare stopped format-14 storage for the release that introduces format 15."""
+"""Prepare stopped format-15 storage for the release that introduces format 16."""
 
 import argparse
 import hashlib
@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.account_baseline import persistent_database_file
 from server.config import Settings, settings
-from server.db.schema import AGENT_DELETION_COLUMN, CURRENT_VERSION
+from server.db.schema import CURRENT_VERSION, SESSION_CONFIGURATION_VERSION_COLUMN
 from server.portability import software_version
 from server.service_installation import InstallationOwner
 from server.storage_verification import _reader, verify_main
@@ -31,7 +31,7 @@ def _retained_facts(db: sqlite3.Connection) -> dict[str, str]:
     digests = {}
     for (table,) in db.execute("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name"):
         columns = [row[1] for row in db.execute(f"PRAGMA table_info({_quoted(table)})")
-                   if table != "agents" or row[1] != "deletion_pending"]
+                   if table != "sessions" or row[1] != "configuration_version"]
         names = ",".join(map(_quoted, columns))
         digest = hashlib.sha256()
         digest.update(repr(columns).encode("utf-8", "backslashreplace"))
@@ -69,22 +69,22 @@ import sys
 from pathlib import Path
 from server.storage_verification import _reader, verify_main
 with _reader(Path(sys.argv[1])) as database:
-    if verify_main(database) != 14:
-        raise RuntimeError('The pinned source must verify main format 14')
+    if verify_main(database) != 15:
+        raise RuntimeError('The pinned source must verify main format 15')
 """, str(path)], cwd=source, check=True)
 
 
 def _verify_converted(db: sqlite3.Connection, baseline: dict) -> None:
-    if verify_main(db) != 15 or db.execute("SELECT 1 FROM agents WHERE deletion_pending IS NOT 0 LIMIT 1").fetchone():
-        raise RuntimeError("Converted storage has unexpected Agent deletion state")
+    if verify_main(db) != 16 or db.execute("SELECT 1 FROM sessions WHERE configuration_version IS NOT 0 LIMIT 1").fetchone():
+        raise RuntimeError("Converted storage has noninitial session configuration versions")
     if _retained_facts(db) != baseline["facts"]:
-        raise RuntimeError("Converted storage differs from the frozen format-14 facts")
+        raise RuntimeError("Converted storage differs from the frozen format-15 facts")
 
 
 def upgrade_owned(owner: InstallationOwner, source: Path, proof: Path) -> None:
     """Convert under the publisher's existing offline lock."""
-    if CURRENT_VERSION != 15:
-        raise RuntimeError("This conversion belongs to the format-15 release")
+    if CURRENT_VERSION != 16:
+        raise RuntimeError("This conversion belongs to the format-16 release")
     config = owner.config
     path = owner.offline_database()
     if persistent_database_file(config.db_path) != path:
@@ -103,14 +103,14 @@ def upgrade_owned(owner: InstallationOwner, source: Path, proof: Path) -> None:
         raise RuntimeError("The upgrade baseline belongs to a different input")
     with _reader(path) as reader:
         version = reader.execute("PRAGMA user_version").fetchone()[0]
-        if version == 15:
+        if version == 16:
             if baseline is None:
                 raise RuntimeError("Reentry requires the original upgrade baseline")
             _sync_baseline(proof)
             _verify_converted(reader, baseline)
             return
-        if version != 14:
-            raise RuntimeError("Only main format 14 can be converted")
+        if version != 15:
+            raise RuntimeError("Only main format 15 can be converted")
 
     with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)) as writer, writer:
         writer.execute("PRAGMA foreign_keys=ON")
@@ -124,8 +124,8 @@ def upgrade_owned(owner: InstallationOwner, source: Path, proof: Path) -> None:
         elif observed != baseline:
             raise RuntimeError("The source changed after the upgrade baseline was captured")
         _sync_baseline(proof)
-        writer.execute("ALTER TABLE agents ADD COLUMN " + AGENT_DELETION_COLUMN)
-        writer.execute("PRAGMA user_version=15")
+        writer.execute("ALTER TABLE sessions ADD COLUMN " + SESSION_CONFIGURATION_VERSION_COLUMN)
+        writer.execute("PRAGMA user_version=16")
         _verify_converted(writer, baseline)
     with _reader(path) as reader:
         _verify_converted(reader, baseline)
@@ -142,13 +142,13 @@ def upgrade(config: Settings, source: Path, proof: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, required=True, help="Pinned format-14 source checkout")
+    parser.add_argument("--source", type=Path, required=True, help="Pinned format-15 source checkout")
     parser.add_argument("--proof", type=Path, required=True, help="Private, persistent upgrade baseline path")
     parser.add_argument("--config", type=Path, help="Frozen installation settings in JSON")
     args = parser.parse_args()
     config = Settings(_env_file=None, **json.loads(args.config.read_text())) if args.config else settings
     upgrade(config, args.source, args.proof)
-    print("Main format 15 verified against the original retained facts")
+    print("Main format 16 verified against the original retained facts")
 
 
 if __name__ == "__main__":

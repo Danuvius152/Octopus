@@ -26,7 +26,6 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import (
     FileResponse,
-    RedirectResponse,
     Response,
     StreamingResponse,
 )
@@ -325,7 +324,36 @@ async def _application_for_request(request: Request, app_id: str) -> dict:
     return row
 
 
-async def _serve(request: Request, app_id: str, path: str) -> FileResponse:
+def _directory_redirect(request: Request) -> Response | None:
+    scope = request.scope
+    decoded_path = scope["path"]
+    raw_path = scope.get("raw_path")
+    safe_path_chars = "/:@!$&'()*+,;="
+    path = quote(decoded_path, safe=safe_path_chars) if raw_path is None else raw_path.decode("latin-1")
+    if path.endswith("/"):
+        return None
+
+    root_path = scope.get("root_path", "")
+    if root_path and not decoded_path.startswith(f"{root_path}/"):
+        path = quote(root_path.rstrip("/"), safe=safe_path_chars) + path
+    elif server_root := scope.get("app_root_path", root_path):
+        # Starlette adds child mounts to root_path. Uvicorn only prepends the
+        # original server root; child mounts remain part of the request bytes.
+        if raw_path is None:
+            path = quote(server_root.rstrip("/") + decoded_path[len(server_root):], safe=safe_path_chars)
+        else:
+            literal_root = server_root.encode("utf-8")
+            if raw_path.startswith(literal_root + b"/"):
+                path = quote(server_root.rstrip("/"), safe=safe_path_chars) + path[len(literal_root):]
+    query = scope["query_string"].decode("latin-1")
+    location = f"{path}/?{query}" if query else f"{path}/"
+    return Response(
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+        headers={"Location": location, "Cache-Control": "no-store"},
+    )
+
+
+async def _serve(request: Request, app_id: str, path: str) -> Response:
     row = await _application_for_request(request, app_id)
 
     target = resolve_within(row["app_dir"], path or "")
@@ -333,12 +361,18 @@ async def _serve(request: Request, app_id: str, path: str) -> FileResponse:
     # confirm what exists outside the application directory.
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
-    if os.path.isdir(target):
+    is_directory = os.path.isdir(target)
+    if is_directory:
         target = resolve_within(target, row["entrypoint"])
         if target is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
     if not os.path.isfile(target):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not found")
+    # A slash after either static alias enters a dedicated API route.
+    if is_directory and path not in {"api", "wiki"}:
+        redirect = _directory_redirect(request)
+        if redirect is not None:
+            return redirect
 
     media_type = mimetypes.guess_type(target)[0] or "application/octet-stream"
     # App content is `no-store`: the whole point is that a rebuild shows up on
@@ -675,11 +709,7 @@ async def app_agent_chat(
 
 @static_router.get("/apps/{app_id}")
 async def serve_application_root(request: Request, app_id: str):
-    """Redirect the bare app URL to a trailing slash so the document's own
-    relative URLs (`./app.js`, `style.css`) resolve inside the app instead of
-    against `/apps/`."""
-    query = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(f"/apps/{app_id}/{query}")
+    return await _serve(request, app_id, "")
 
 
 @static_router.get("/apps/{app_id}/{path:path}")

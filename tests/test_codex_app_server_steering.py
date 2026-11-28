@@ -130,7 +130,7 @@ async def test_ineligible_inputs_preserve_ordinary_queue_and_order(native_runtim
     if change == "wiki":
         wiki = "read"
     if change == "model":
-        await manager.update_session_configuration(session.id, {"model": "other-model"}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "other-model"}, session.user_id)
     if change == "background":
         receipt = await manager.start_message(session.id, "Background input", source="bg", steerable=True)
         assert receipt.disposition == "accepted"

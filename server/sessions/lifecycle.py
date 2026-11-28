@@ -14,7 +14,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import TypeAdapter
 
@@ -67,6 +67,9 @@ from .presentation import session_info
 from .restoration import RestoreOperation, RestoreRefused
 from .runtime_types import SessionAdmissionBusy, SessionAdmissionClosed
 from .submission import ReturnRefused
+
+if TYPE_CHECKING:
+    from ..database import Database
 
 # The window an archived open returns, matching the live one in
 # `routers/sessions.MESSAGE_WINDOW`. Declared here rather than imported to keep
@@ -206,24 +209,35 @@ class LifecycleMixin(SessionManagerBase):
                     return None
                 agent_id = rows[0]["agent_id"]
                 async with self.agent_operation(agent_id, creates_session=False):
-                    current = await db.load_sessions(session_id=session_id)
-                    if not current or current[0]["fork_status"] != "ready" or current[0]["agent_id"] != agent_id:
-                        return None
-                    session = _session_from_row(current[0])
-                    session.restore_message_state(*await db.message_sequence_state(session_id))
                     await db.require_application_session_writable(session_id)
-                    has_inputs = await db.session_has_inputs(session_id)
-                    metadata = json.loads(session.fork_metadata or "{}")
+                    original = _session_from_row(rows[0])
+                    metadata = json.loads(original.fork_metadata or "{}")
                     marker = rewind_restore_marker(metadata) if isinstance(metadata, dict) else None
-                    if marker is not None:
-                        await self._settle_rewind_restore(db, session, marker)
-                    elif binding_released:
-                        require_rewind_worktree(session.working_dir, session.fork_metadata)
-                    else:
+                    message_state = await db.message_sequence_state(session_id)
+                    has_inputs = await db.session_has_inputs(session_id)
+                    if marker is None and not binding_released:
                         return None
-                    self.sessions[session_id] = session
-                    self._unavailable_rewind_archives.discard(session_id)
-                    self.reopen_application_session_work(session_id)
+                    settled = await self._settle_rewind_restore(db, original, marker) if marker is not None else None
+
+                    async def register(
+                        expected_agent: str | None = agent_id, sequence_state: tuple[int, int, int] = message_state,
+                    ) -> Session | None:
+                        async with db.configuration_lock:
+                            current = await db.load_session_for_restore(session_id)
+                            if (current is None or current["archived"] or current["fork_status"] != "ready"
+                                    or current["agent_id"] != expected_agent):
+                                return None
+                            session = _session_from_row(current)
+                            require_rewind_worktree(session.working_dir, session.fork_metadata)
+                            session.restore_message_state(*sequence_state)
+                            self.sessions[session_id] = session
+                            self._unavailable_rewind_archives.discard(session_id)
+                            self.reopen_application_session_work(session_id)
+                            return session
+
+                    session = await self._register_settled_rewind(db, session_id, settled, register)
+                    if session is None:
+                        return None
                     await self._publish_lifecycle({
                         "type": "session_unarchived", "session_id": session.id, "name": session.name,
                         "session": session_info(session, has_inputs=has_inputs).model_dump(mode="json"),
@@ -234,6 +248,20 @@ class LifecycleMixin(SessionManagerBase):
                 await asyncio.sleep(0.05)
             except (ApplicationDeleting, SessionAdmissionClosed, WorktreeChanged, json.JSONDecodeError):
                 return None
+
+    async def _register_settled_rewind[T](
+        self, db: Database, session_id: str, metadata: str | None, register: Callable[[], Awaitable[T]],
+    ) -> T:
+        try:
+            return await self._retry_rewind_restore(register)
+        except (WorktreeChanged, ApplicationDeleting):
+            if metadata is None or await self._retry_rewind_restore(
+                lambda: db.rearchive_confirmed_bound_restore(session_id, metadata),
+            ):
+                raise
+        # Application cleanup can detach the worktree after this restore's
+        # commit. A missed compensation must be reconciled on the new row.
+        return await self._retry_rewind_restore(register)
 
     def _release_application_admission(self, session: Session, *, rewind_metadata: str | None) -> None:
         if (self.sessions.get(session.id) is session and session._archive_reservation is None
@@ -1225,26 +1253,40 @@ class LifecycleMixin(SessionManagerBase):
             marker = uuid.uuid4().hex
 
         async def install() -> Session:
-            session = _session_from_row(match)
+            expected_archived = match["archived"] if marker is None else False
+
+            async def register() -> Session:
+                async with db.configuration_lock:
+                    current = await db.load_session_for_restore(session_id, user_id)
+                    if current is None or current["archived"] != expected_archived:
+                        raise SessionAdmissionClosed("The original archive restore was superseded")
+                    session = _session_from_row(current)
+                    if marker is None:
+                        await db.update_session_field(session_id, archived=False)
+                    else:
+                        require_rewind_worktree(session.working_dir, session.fork_metadata)
+                    paused, revision, order = self._archived_dispatch.pop(session_id, (False, 0, 0))
+                    session._dispatch_paused = paused
+                    session._dispatch_revision, session._dispatch_order = revision + 1, order
+                    session.restore_message_state(*message_state)
+                    self.sessions[session.id] = session
+                    self._unavailable_rewind_archives.discard(session.id)
+                    self.reopen_application_session_work(session.id)
+                    return session
+
             try:
                 if marker is None:
-                    await db.update_session_field(session_id, archived=False)
-                elif not await db.begin_bound_archive_restore(
-                    session_id, original_metadata, marker, was_archived=match["archived"],
-                    require_current_directory=require_directory,
-                ):
-                    raise SessionAdmissionClosed("The original archive restore was superseded")
+                    session = await register()
                 else:
-                    await self._settle_rewind_restore(db, session, marker)
+                    if not await db.begin_bound_archive_restore(
+                        session_id, original_metadata, marker, was_archived=match["archived"],
+                        require_current_directory=require_directory,
+                    ):
+                        raise SessionAdmissionClosed("The original archive restore was superseded")
+                    settled = await self._settle_rewind_restore(db, _session_from_row(match), marker)
+                    session = await self._register_settled_rewind(db, session_id, settled, register)
             except (WorktreeChanged, ApplicationDeleting) as error:
                 raise SessionAdmissionClosed(str(error)) from error
-            paused, revision, order = self._archived_dispatch.pop(session_id, (False, 0, 0))
-            session._dispatch_paused = paused
-            session._dispatch_revision, session._dispatch_order = revision + 1, order
-            session.restore_message_state(*message_state)
-            self.sessions[session.id] = session
-            self._unavailable_rewind_archives.discard(session.id)
-            self.reopen_application_session_work(session.id)
             from .owner_runtime import ReadContext
 
             await self._session_owner(session).call_runtime(ReadContext())

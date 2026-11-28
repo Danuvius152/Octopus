@@ -105,7 +105,7 @@ async def test_claude_configuration_replacement_reads_history_committed_during_e
 
     monkeypatch.setattr(old_run, "_stop_process", stop_with_late_history)
     try:
-        await manager.update_session_configuration(session.id, {"model": "sonnet"}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "sonnet"}, session.user_id)
         replacement = await manager.start_message(session.id, "Continue with the new model")
         await asyncio.wait_for(entered.wait(), 3)
         assert resource.state == "pending" and replacement.execution.attempts == ()

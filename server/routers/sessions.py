@@ -110,9 +110,11 @@ async def update_session(
     session_id: str, req: SessionUpdate, user_id: ScopeUser = None,
     _: str = Depends(verify_token)
 ):
-    """Save settings under the engine the client observed."""
+    """Save settings under the engine and configuration the client observed."""
     fields = req.model_dump(exclude_unset=True, mode="json")
-    if not req.expected_backend and ({"backend", *SESSION_OVERRIDE_FIELDS} & fields.keys()):
+    if (req.expected_backend is None or req.expected_configuration_version is None) and (
+        {"backend", *SESSION_OVERRIDE_FIELDS} & fields.keys()
+    ):
         _own_session(session_manager, session_id, user_id)
         raise HTTPException(428, "Reload the conversation before changing its settings.")
     try:

@@ -64,7 +64,7 @@ async def test_selected_credential_launch_budget_is_checked_before_child(claude_
     key = await UserManager(db).data_key_for(parent.user_id)
     await db.save_credential("oversize-key", "claude-code", "Selected", "api_key",
                              encrypt("x" * 131072, key), "now", user_id=parent.user_id)
-    await manager.update_session_configuration(parent.id, {"credential_id": "oversize-key"}, parent.user_id)
+    await manager.update_session_configuration(parent.id, {"expected_backend": parent.backend, "expected_configuration_version": parent.configuration_version, "credential_id": "oversize-key"}, parent.user_id)
     await db.append_message(session_id=parent.id, seq=0, role="user", type="text", content="Edit me")
     parent.restore_message_state(1, 1, 0)
     before = await db.load_sessions(include_archived=True)
@@ -90,7 +90,7 @@ async def test_encoded_reserve_boundary_and_first_turn_after_restart(native_runt
     monkeypatch.setattr(harness, "profile", replace(harness.profile, tools_prompt="Replay boundary fixture."))
 
     async def seed(session):
-        await manager.update_session_configuration(session.id, {"model": "fixture", "reasoning_effort": "low"}, session.user_id)
+        await manager.update_session_configuration(session.id, {"expected_backend": session.backend, "expected_configuration_version": session.configuration_version, "model": "fixture", "reasoning_effort": "low"}, session.user_id)
         await db.admit_client_submission(session.id, "source", "digest", "0" * 32,
             payload={"content": history, "attachment_ids": [], "order": 1}, receipt={"accepted": True})
         await db.claim_client_submission(session.id, "0" * 32, "0" * 32, "generation")
@@ -153,7 +153,7 @@ async def test_rewind_reads_selected_oauth_without_refreshing(claude_runtime, mo
     secret = encrypt(json.dumps({"access_token": "stored-access", "refresh_token": "stored-refresh",
                                 "expires_at_epoch": time.time() + lifetime}), key)
     await db.save_credential("short-oauth", "claude-code", "Selected", "oauth", secret, "now", user_id=parent.user_id)
-    await manager.update_session_configuration(parent.id, {"credential_id": "short-oauth"}, parent.user_id)
+    await manager.update_session_configuration(parent.id, {"expected_backend": parent.backend, "expected_configuration_version": parent.configuration_version, "credential_id": "short-oauth"}, parent.user_id)
     await db.append_message(session_id=parent.id, seq=0, role="user", type="text", content="Editable")
     parent.restore_message_state(1, 1, 0)
     before = await db.get_credential("short-oauth", parent.user_id)

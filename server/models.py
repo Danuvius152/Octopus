@@ -84,9 +84,10 @@ class CreateSessionRequest(CreateAgentSessionRequest):
 
 
 class SessionUpdate(BaseModel):
-    """Change conversation settings under the observed engine."""
+    """Change conversation settings under the observed engine and configuration."""
 
     expected_backend: BackendKind | None = None
+    expected_configuration_version: int | None = Field(default=None, ge=0, le=9007199254740991, strict=True)
     backend: BackendKind | None = None
     credential_id: str | None = Field(default=None)
     name: str | None = None
@@ -163,6 +164,7 @@ class SessionInfo(BaseModel):
     # Which AI backend drives this session.
     backend: BackendKind = BackendKind.claude_code
     defaults_source: SessionDefaultsSource | None = None
+    configuration_version: int
     has_inputs: bool | None = None
     # Per-session override; null selects the saved default source.
     model: str | None = None
@@ -610,13 +612,18 @@ class ShowMeEditTarget(BaseModel):
     source: str | None = None
 
 
-class ShowMeResolveResponse(BaseModel):
-    # A checked path from cwd is relative to cwd. Other checked paths are absolute.
-    path: str | None = None
-    message: str | None = None
-    metadata: FileViewerMetadata | None = None
-    target: ShowMeEditTarget | None = None
+class ShowMeFileResponse(BaseModel):
+    metadata: FileViewerMetadata
+    target: ShowMeEditTarget
     description: str | None = None
+
+
+class ShowMeClarificationResponse(BaseModel):
+    message: str
+    description: str
+
+
+ShowMeResolveResponse = ShowMeFileResponse | ShowMeClarificationResponse
 
 
 class ShowMeFileErrorResponse(BaseModel):
@@ -624,7 +631,7 @@ class ShowMeFileErrorResponse(BaseModel):
     target: ShowMeEditTarget | None = None
     description: str | None = None
     can_search_description: Literal[True] | None = None
-    code: Literal["working_directory_unavailable"] | None = None
+    code: Literal["working_directory_unavailable", "target_changed", "source_directory_changed"] | None = None
 
 
 class AgentScheduleRequest(BaseModel):

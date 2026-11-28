@@ -207,26 +207,26 @@ def bg_list() -> str:
     don't dump it verbatim in long sessions.
 
     Returns:
-        A short text summary. For programmatic detail, the user can
-        check the UI chip popover.
+        A short text summary with bounded descriptions and delivery errors.
+        For a task's retained stdout and stderr, open its details in the UI.
     """
     api = _api_base()
     sid = _session_id()
     hdrs = _headers()
     if not (api and sid and hdrs):
         return "Error: bg server is misconfigured (env vars missing)."
-    url = f"{api}/api/sessions/{sid}/bg-tasks"
+    url = f"{api}/api/sessions/{sid}/bg-task-summaries"
     try:
         r = httpx.get(url, headers=hdrs, timeout=10.0)
     except httpx.HTTPError as e:
         return f"Error: failed to reach Octopus to list bg tasks: {e}"
     if r.status_code != 200:
         return f"Error listing bg tasks ({r.status_code}): {r.text[:300]}"
-    items = r.json()
+    items = r.json()[:25]
     if not items:
         return "No background tasks in this session yet."
     lines = [f"{len(items)} bg task(s) — most recent first:"]
-    for item in items[:25]:
+    for item in items:
         desc = f" — {item['description']}" if item.get("description") else ""
         line = f"  • {item['id']}  [{item['status']}]{desc}"
         if item.get("exit_code") is not None:

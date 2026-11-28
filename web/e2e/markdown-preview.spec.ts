@@ -307,20 +307,32 @@ previewTest("showme searches conversation descriptions in the viewer and recover
     await openSession(page, "Context search session");
     const viewer = page.getByRole("dialog");
     const close = () => viewer.getByRole("button", { name: "Close", exact: true }).click();
-    await showFile(page, "中文 计划.md");
-    await expect(viewer.getByRole("heading", { name: "Literal Chinese filename" })).toBeVisible();
+    const waitForConfirmation = () => page.waitForResponse(response =>
+      new URL(response.url()).pathname === `/api/sessions/${id}/showme/resolve` && response.ok());
+    const positioned = waitForConfirmation();
+    await showFile(page, "中文 计划.md#L1");
+    const fileResult = await (await positioned).json();
+    expect(Object.keys(fileResult).sort()).toEqual(["metadata", "target"]);
+    expect(fileResult.target).toEqual({ path: "中文 计划.md", position: { kind: "lines", start: 1 } });
+    await expect(viewer.locator('[data-line="1"][data-located="true"]')).toHaveText("# Literal Chinese filename");
     await close();
 
     await showFile(page, "请打开 plan.md");
     await expect(viewer.getByRole("alert")).toHaveText("File not found.");
-    expect(resolutions).toEqual([{ text: "中文 计划.md", status: 200 }, { text: "请打开 plan.md", status: 404 }]);
+    expect(resolutions).toEqual([{ text: "中文 计划.md#L1", status: 200 }, { text: "请打开 plan.md", status: 404 }]);
+    const clarified = waitForConfirmation();
     await viewer.getByRole("button", { name: "Search by description" }).press("Enter");
+    expect(await (await clarified).json()).toEqual({ message: "Which plan did you mean?", description: "请打开 plan.md" });
     await expect(viewer.getByRole("status")).toHaveText("Which plan did you mean?");
     const description = viewer.getByRole("textbox", { name: "File description" });
     await expect(description).toHaveValue("请打开 plan.md");
     await expect(description).toBeFocused();
     await description.fill("the implementation plan.md");
+    const inferred = waitForConfirmation();
     await viewer.getByRole("button", { name: "Search conversation" }).click();
+    const inferredResult = await (await inferred).json();
+    expect(Object.keys(inferredResult).sort()).toEqual(["description", "metadata", "target"]);
+    expect(inferredResult.description).toBe("the implementation plan.md");
     await expect(viewer.getByRole("heading", { name: "Plan from the conversation" })).toBeVisible();
     await close();
 
@@ -347,6 +359,56 @@ previewTest("showme searches conversation descriptions in the viewer and recover
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+previewTest("showme opens and browses registered application data outside the workspace", async ({ page, request, previewDirectory }) => {
+  const agentList = await request.get(`${API}/agents`, { headers });
+  expect(agentList.ok()).toBeTruthy();
+  const agents = await agentList.json() as { id: string }[];
+  const created = await request.post(`${API}/applications`, {
+    headers, data: { name: "Viewer data example", description: "Application data for the file viewer", agent_id: agents[0].id },
+  });
+  expect(created.status(), await created.text()).toBe(201);
+  const { app_dir: code } = await created.json() as { app_dir: string };
+  const source = `${code}.data`;
+  const reportName = "Application report.md";
+  const report = path.join(source, reportName);
+  mkdirSync(source, { recursive: true });
+  writeFileSync(report, "# Application report\n\n[View details](details.md)");
+  writeFileSync(path.join(source, "details.md"), "# Data details");
+  const sessionName = "Read application data";
+  const id = await createSession(request, previewDirectory, sessionName);
+  const messages = async () => {
+    const response = await request.get(`${API}/sessions/${id}/messages?before_seq=10000`, { headers });
+    expect(response.ok()).toBeTruthy();
+    return (await response.json()).messages;
+  };
+  const initialMessages = await messages();
+  const confirmations: { text: string; mode?: string }[] = [];
+  page.on("request", req => {
+    if (new URL(req.url()).pathname === `/api/sessions/${id}/showme/resolve`) {
+      confirmations.push(req.postDataJSON());
+    }
+  });
+
+  await signIn(page);
+  await openSession(page, sessionName);
+  const relative = path.relative(previewDirectory, report);
+  await showFile(page, relative);
+  const viewer = page.getByRole("dialog");
+  const close = () => viewer.getByRole("button", { name: "Close", exact: true }).click();
+  await expect(viewer.getByRole("heading", { name: "Application report", exact: true })).toBeVisible();
+  await viewer.getByRole("button", { name: /^Open file: View details/ }).click();
+  await expect(viewer.getByRole("heading", { name: "Data details", exact: true })).toBeVisible();
+  await close();
+
+  await showFile(page, "");
+  await viewer.getByRole("combobox", { name: "Source" }).selectOption(source);
+  await viewer.getByRole("searchbox", { name: "Search filenames" }).fill(reportName);
+  await viewer.getByRole("button").filter({ has: page.getByText(reportName, { exact: true }) }).click();
+  await expect(viewer.getByRole("heading", { name: "Application report", exact: true })).toBeVisible();
+  expect(confirmations).toEqual([{ text: relative }]);
+  expect(await messages()).toEqual(initialMessages);
 });
 
 previewTest("bare showme browses sources and opens the selected filename without a chat turn", async ({ page, request, account, previewDirectory }) => {
@@ -478,7 +540,7 @@ previewTest("ten historical file links open from a saved reply and preserve the 
       mkdirSync(path.dirname(absolute), { recursive: true });
       const marker = `Historical source for ${label}`;
       writeFileSync(absolute, "\n".repeat(line - 1) + `# ${marker}\n`);
-      const href = format === "file" ? `file://${encodePath(absolute)}:${line}`
+      const href = format === "file" ? `file:${encodePath(absolute)}:${line}`
         : format === "fragment" ? `${encodePath(absolute)}#L${line}`
         : format === "relative" ? `${filename}:${line}` : `${encodePath(absolute)}:${line}`;
       return { label, absolute, line, marker, link: `[${label}](${href})` };
@@ -496,6 +558,7 @@ previewTest("ten historical file links open from a saved reply and preserve the 
       `后文 ${files[7].link} ${files[8].link}`,
       "",
       "[普通网页](./health) [页内片段](#details)",
+      "[Malformed URI](bad%FF.md#L4) [External website](https://example.test/guide.md)",
       "",
       ...Array.from({ length: 28 }, (_, index) => `Later paragraph ${index + 1}.\n`),
     ].join("\n");
@@ -534,6 +597,8 @@ previewTest("ten historical file links open from a saved reply and preserve the 
     const buttonName = (label: string, line?: number) => `Open file: ${label}${line ? ` at line ${line}` : ""}`;
     const fileButton = (label: string, line?: number) => reply.getByRole("button", { name: buttonName(label, line), exact: true });
     await expect(reply.getByRole("button", { name: /^Open file:/ })).toHaveCount(10);
+    await expect(reply.getByRole("link", { name: "Malformed URI" })).toHaveAttribute("href", "bad%FF.md#L4");
+    await expect(reply.getByRole("link", { name: "External website" })).toHaveAttribute("href", "https://example.test/guide.md");
     await expect(reply.getByRole("table").getByRole("button")).toHaveCount(7);
     const firstCell = reply.getByRole("cell").filter({
       has: page.getByRole("button", { name: buttonName(files[0].label, files[0].line), exact: true }),
@@ -713,7 +778,7 @@ previewTest("showme reopens positioned Markdown and corrects literal paths separ
   await close();
 
   for (const [target, error] of [
-    ["../计划.md#附录 25%.md", "You don't have access to this file."],
+    ["../../计划.md#附录 25%.md", "You don't have access to this file."],
     ["missing 25%#附录.md", "File not found."],
   ]) {
     await showFile(page, `${JSON.stringify(target)}:3`);
@@ -1063,10 +1128,10 @@ previewTest("a position edit started before metadata uses the confirmed source",
   }
 });
 
-previewTest("retrying a denied Markdown target keeps its original source and parent directory", async ({
+previewTest("editing a denied Markdown target keeps its original source and parent directory", async ({
   page, request, account, previewDirectory: directory,
 }) => {
-  if (!account) throw new Error("The candidate retry story requires an offline account");
+  if (!account) throw new Error("The failed path edit requires an offline account");
   const repo = mkdtempSync(path.join(os.tmpdir(), "showme-candidate-retry-"));
   try {
     const docs = path.join(repo, "docs");
@@ -1088,8 +1153,10 @@ previewTest("retrying a denied Markdown target keeps its original source and par
     const planMeta = (url: URL) => url.pathname === `${files}/meta` && url.searchParams.get("path") === "../team/plan.md";
     const planBody = (url: URL) => url.pathname === files && url.searchParams.get("path") === "team/plan.md";
     let release!: () => void;
+    let byteRequests = 0;
     const canRead = new Promise<void>((resolve) => { release = resolve; });
     await page.route(planBody, async (route) => {
+      byteRequests++;
       await canRead;
       await route.continue();
     });
@@ -1111,23 +1178,29 @@ previewTest("retrying a denied Markdown target keeps its original source and par
     } finally {
       release();
     }
-    await bodyDenied;
+    const denied = await bodyDenied;
     const alert = dialog.getByRole("alert");
     await expect(alert).toContainText("You don't have access to this file.");
     await expect(dialog.getByRole("tab", { name: "guide.md" })).toBeFocused();
-    const retry = page.waitForResponse((res) => planMeta(new URL(res.url())));
-    await dialog.getByRole("button", { name: /Retry opening/ }).click();
-    const [initial, retried] = await Promise.all([initialMeta, retry]);
+    await expect(dialog.getByRole("button", { name: /Retry opening/ })).toHaveCount(0);
+    await dialog.getByRole("button", { name: /Edit path for/ }).click();
+    await expect(dialog.getByRole("textbox", { name: "File path" })).toHaveValue("../team/plan.md");
+    await expect(dialog.getByRole("textbox", { name: "Position (optional)" })).toHaveValue("#plan");
+    const confirmation = page.waitForResponse((res) => planMeta(new URL(res.url())));
+    await dialog.getByRole("button", { name: "Open file", exact: true }).click();
+    const [initial, reopened] = await Promise.all([initialMeta, confirmation]);
     expect(initial.status()).toBe(200);
-    expect(retried.status()).toBe(403);
+    expect(reopened.status()).toBe(403);
+    expect(new URL(denied.url()).searchParams.get("canonical_path_id")).toBe((await initial.json()).canonical_path_id);
     const originalBinding = new URL(initial.url()).searchParams;
-    const retryBinding = new URL(retried.url()).searchParams;
-    expect(retryBinding.get("source")).toBe(repo);
-    expect(retryBinding.get("source_directory")).toBe("docs");
-    expect(retryBinding.get("source_directory_id")).toBeTruthy();
-    expect(retryBinding.get("source_directory_id")).toBe(originalBinding.get("source_directory_id"));
+    const reopenedBinding = new URL(reopened.url()).searchParams;
+    expect(reopenedBinding.get("source")).toBe(repo);
+    expect(reopenedBinding.get("source_directory")).toBe("docs");
+    expect(reopenedBinding.get("source_directory_id")).toBeTruthy();
+    expect(reopenedBinding.get("source_directory_id")).toBe(originalBinding.get("source_directory_id"));
     await expect(dialog.getByRole("heading", { name: "Guide", exact: true })).toBeVisible();
     await expect(alert).toContainText("You don't have access to this file.");
+    expect(byteRequests).toBe(1);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
@@ -1652,7 +1725,8 @@ previewTest("Markdown local file buttons use the source boundary and preserve we
     writeFileSync(guide, [
       "# File references",
       `[Server path](${encodePath(serverPathWithDot)}#目标章节)`,
-      `[Local URI](file://localhost${encodePath(target)}#L1)`,
+      `[Local URI](file:${encodePath(target)}#L1)`,
+      `[Localhost URI](file://localhost${encodePath(target)}#L1)`,
       `[Linked footnote](nested/${encodeURIComponent(path.basename(target))}#user-content-fn-%E4%B8%AD%E6%96%87)`,
       `[Relative through symlink](jump/../${encodeURIComponent(path.basename(target))})`,
       `[Neighboring root](${encodePath(sibling)})`,
@@ -1661,6 +1735,7 @@ previewTest("Markdown local file buttons use the source boundary and preserve we
       "[Reserved API route](/api/health?check=1#status)",
       "[Normalized reserved route](/docs/../api/sessions)",
       "[External website](https://example.test/docs?check=1#status)",
+      "[Malformed URI](bad%FF.md#L4)",
       "[Web URI with numeric value](mailto:123)",
     ].join("\n\n"));
     const setExtraRoots = await editExtraRoots(request, account.user_id);
@@ -1688,12 +1763,14 @@ previewTest("Markdown local file buttons use the source boundary and preserve we
       ["Reserved API route", "/api/health?check=1#status"],
       ["Normalized reserved route", "/docs/../api/sessions"],
       ["External website", "https://example.test/docs?check=1#status"],
+      ["Malformed URI", "bad%FF.md#L4"],
       ["Web URI with numeric value", "mailto:123"],
     ]) {
       await expect(article.getByRole("link", { name: label, exact: true })).toHaveAttribute("href", href);
     }
     const requests: string[] = [];
     page.on("request", (request) => requests.push(new URL(request.url()).pathname));
+    await expect(button("Localhost URI")).toBeVisible();
     const serverPath = button("Server path");
     await expect(serverPath).not.toHaveAttribute("href");
     await expect(serverPath).not.toHaveAttribute("aria-haspopup");
@@ -1818,7 +1895,7 @@ previewTest("same-document references repeatedly position the loaded Markdown", 
   await expect(dialog.getByRole("note")).toHaveText("The requested lines are outside this file.");
   const read = () => dialog.getByRole("button", { name: "Reading", exact: true }).click();
   const first = dialog.locator('[data-line="2002"][data-located="true"]');
-  await read();
+  await expect(dialog.getByRole("button", { name: "Reading", exact: true })).toHaveAttribute("aria-pressed", "true");
   await article.getByRole("link", { name: "Open range" }).click();
   await expect(first).toBeInViewport();
   await expect(first).toHaveText("Final line 1.");
@@ -2181,6 +2258,7 @@ cacheTest("a legacy cached image cannot satisfy a new viewer read after revocati
     await page.locator("button.btn-send").click();
     const response = await freshRead;
     expect(response.status()).toBe(403);
+    expect(new URL(response.url()).searchParams.get("viewer")).toBe("1");
     const viewer = page.getByRole("dialog");
     await expect(viewer.getByRole("alert")).toHaveText("You don't have access to this file.");
     await expect(viewer.getByRole("button", { name: "Edit path" })).toBeVisible();
@@ -2233,9 +2311,11 @@ cacheTest("reopening a Markdown preview rechecks the canonical path with an HTTP
     return url.pathname === `/api/sessions/${sessionId}/files` && url.searchParams.get("path") === "readme.md";
   });
   await dialog.getByRole("button", { name: "Reload file" }).click();
-  expect((await attemptedRead).status()).toBe(409);
-  await expect(dialog.getByText(/file path changed/i)).toBeVisible();
-  await dialog.getByRole("button", { name: "Reload file" }).click();
+  const conflict = await attemptedRead;
+  expect(conflict.status()).toBe(409);
+  expect((await conflict.json()).code).toBe("target_changed");
+  await expect(dialog.getByText(/target file changed/i)).toBeVisible();
+  await dialog.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(dialog.getByRole("heading", { name: "Redirected Markdown" })).toBeVisible();
 });
 
@@ -2338,7 +2418,9 @@ previewTest("the reader picker opens the current document directory and preserve
   await note.click();
   await expect(reader.getByRole("alert")).toContainText(/document directory changed/i);
   await expect(reader.getByRole("tab", { name: "guide.md" })).toHaveAttribute("aria-selected", "true");
-  await expect(reader.getByRole("button", { name: "Retry opening note.md" })).toBeVisible();
+  await expect(reader.getByRole("alert")).toContainText("Reopen the source document.");
+  await expect(reader.getByRole("button", { name: "Retry opening note.md" })).toHaveCount(0);
+  await expect(reader.getByRole("button", { name: "Edit path for note.md" })).toHaveCount(0);
   await expect.poll(() => body.evaluate((node) => node.scrollTop)).toBe(600);
 
   const staleBrowse = browse();
@@ -2352,13 +2434,15 @@ previewTest("the reader picker opens the current document directory and preserve
   await reader.getByRole("searchbox", { name: "Search filenames" }).fill("note.md");
   const found = reader.getByRole("button", { name: /^note\.md docs$/ });
   await expect(found).toBeVisible();
-  const searched = page.waitForRequest((resource) =>
-    new URL(resource.url()).pathname === `/api/sessions/${sessionId}/files/meta`);
+  const searched = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === `/api/sessions/${sessionId}/files/meta`);
   await found.click();
-  const searchSelection = new URL((await searched).url()).searchParams;
+  const searchResponse = await searched;
+  const searchSelection = new URL(searchResponse.url()).searchParams;
   expect(searchSelection.get("path")).toBe("note.md");
   expect(searchSelection.get("source_directory_id")).toBe(params.get("source_directory_id"));
-  await expect(reader.getByRole("alert")).toContainText(/document directory changed/i);
+  expect(searchResponse.status()).toBe(409);
+  await expect(reader.getByRole("alert")).toHaveText(/document directory changed/i);
   await expect.poll(() => body.evaluate((node) => node.scrollTop)).toBe(600);
   await reader.getByRole("tab", { name: "note.md" }).click();
   await expect(reader.getByRole("heading", { name: "A neighboring note" })).toBeVisible();
@@ -2407,12 +2491,61 @@ previewTest("picker selection, reload and download recheck revoked access while 
 
     await setExtraRoots([overlapping, grant]);
     writeFileSync(target, "# Report after access is restored");
-    await reader.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(reader.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
+    await reader.getByRole("button", { name: "Edit path", exact: true }).click();
+    await expect(reader.getByRole("textbox", { name: "File path" })).toHaveValue(target);
+    await reader.getByRole("button", { name: "Open file", exact: true }).click();
     await expect(reader.getByRole("heading", { name: "Report after access is restored" })).toBeVisible();
     await expect(reader.getByRole("tab")).toHaveCount(1);
   } finally {
     rmSync(overlapping, { recursive: true, force: true });
   }
+});
+
+previewTest("bad links can be dismissed or expire while the original document stays at its reading position", async ({
+  page, request, previewDirectory: directory,
+}) => {
+  writeFileSync(path.join(directory, "a.md"), [
+    "# Original document", "[Broken link](missing.md)", "[Good link](b.md)", "[Bad position in B](b.md#L9999)",
+    ...Array.from({ length: 80 }, (_, index) => `Paragraph ${index}`),
+  ].join("\n\n"));
+  writeFileSync(path.join(directory, "b.md"), [
+    "# Next document", ...Array.from({ length: 80 }, (_, index) => `Paragraph ${index} in B`),
+  ].join("\n\n"));
+  await createSession(request, directory, "Reading through broken links");
+  await signIn(page);
+  await openSession(page, "Reading through broken links");
+  await showFile(page, "a.md");
+  const reader = page.getByRole("dialog");
+  const badLink = reader.getByRole("button", { name: "Open file: Broken link" });
+  const goodLink = reader.getByRole("button", { name: "Open file: Good link" });
+  const original = reader.getByRole("heading", { name: "Original document" });
+  const body = reader.locator(".file-viewer-body:visible");
+  await expect(original).toBeVisible();
+  await page.clock.install();
+  for (const method of ["dismiss", "expire"]) {
+    await badLink.focus();
+    await body.evaluate((node) => { node.scrollTop = 600; });
+    await badLink.press("Enter");
+    await expect(reader.getByRole("alert")).toContainText("Couldn't open missing.md.");
+    expect(await body.evaluate((node) => node.scrollTop)).toBe(600);
+    if (method === "dismiss") {
+      await reader.getByRole("button", { name: "Dismiss file opening notice" }).press("Enter");
+    } else {
+      await page.clock.fastForward(8010);
+    }
+    await expect(reader.getByRole("alert")).toHaveCount(0);
+    await expect(reader.getByRole("tab", { name: "a.md" })).toHaveAttribute("aria-selected", "true");
+    expect(await body.evaluate((node) => node.scrollTop)).toBe(600);
+  }
+  await goodLink.press("Enter");
+  await expect(reader.getByRole("heading", { name: "Next document" })).toBeVisible();
+  await body.evaluate((node) => { node.scrollTop = 440; });
+  await reader.getByRole("tab", { name: "a.md" }).click();
+  await reader.getByRole("button", { name: /^Open file: Bad position in B/ }).press("Enter");
+  await expect(reader.getByRole("note")).toContainText("The requested lines are outside this file.");
+  await expect(reader.getByRole("button", { name: "Reading", exact: true })).toHaveAttribute("aria-pressed", "true");
+  expect(await body.evaluate((node) => node.scrollTop)).toBe(440);
 });
 
 previewTest("reloading a relative file keeps its document directory binding after a local jump", async ({
@@ -2453,6 +2586,7 @@ previewTest("reloading a relative file keeps its document directory binding afte
     expect(query.get("source_directory")).toBe(folder);
     expect(query.get("source_directory_id")).toBeTruthy();
     expect(response.status()).toBe(409);
+    expect((await response.json()).code).toBe("source_directory_changed");
     await expect(dialog.getByRole("alert")).toHaveText(/document directory changed/i);
     await dialog.getByRole("button", { name: "Close", exact: true }).click();
   }
@@ -2471,7 +2605,6 @@ previewTest("reloading a showme alias re-resolves the command after a slow retry
   const dialog = page.getByRole("dialog");
   const fileEndpoint = `/api/sessions/${sessionId}/files`;
   const resolveEndpoint = `/api/sessions/${sessionId}/showme/resolve`;
-  const original = path.join(directory, "original.md");
   const originalBody = (url: URL) => url.pathname === fileEndpoint && url.searchParams.get("path") === "original.md";
   await page.clock.install();
   for (const jump of [false, true]) {
@@ -2491,12 +2624,12 @@ previewTest("reloading a showme alias re-resolves the command after a slow retry
       await showFile(page, command);
       await firstBody;
       await page.clock.fastForward(5_001);
-      const retryMeta = page.waitForRequest((read) =>
-        new URL(read.url()).pathname === `${fileEndpoint}/meta`);
+      const retryBody = page.waitForRequest((read) => originalBody(new URL(read.url())));
       await dialog.getByRole("button", { name: "Retry", exact: true }).click();
-      const retryQuery = new URL((await retryMeta).url()).searchParams;
-      expect(retryQuery.get("path")).toBe(original);
+      const retryQuery = new URL((await retryBody).url()).searchParams;
+      expect(retryQuery.get("path")).toBe("original.md");
       expect(retryQuery.get("source")).toBe(directory);
+      expect(retryQuery.get("canonical_path_id")).toBe(new URL((await firstBody).url()).searchParams.get("canonical_path_id"));
       await expect(located).toHaveText("# Original first line");
     } finally {
       releaseBody();
@@ -2515,6 +2648,7 @@ previewTest("reloading a showme alias re-resolves the command after a slow retry
     await dialog.getByRole("button", { name: "Reload file", exact: true }).click();
     const reloadRequest = await reload;
     expect(new URL(reloadRequest.url()).pathname).toBe(resolveEndpoint);
+    expect(new URL(reloadRequest.url()).searchParams.get("source")).toBeNull();
     expect(reloadRequest.postDataJSON()).toEqual({ text: command });
     await expect(located).toHaveText(jump ? "Replacement third line" : "# Replacement first line");
     if (jump) {

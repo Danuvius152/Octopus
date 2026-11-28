@@ -38,7 +38,8 @@ test("App Server preserves native history and original submissions across reload
   expect(session.backend).toBe("codex");
   const sessionId = session.id;
   const settings = await request.patch(`${API}/sessions/${sessionId}`, {
-    headers, data: { reasoning_effort: "low", expected_backend: session.backend },
+    headers, data: { reasoning_effort: "low", expected_backend: session.backend,
+      expected_configuration_version: session.configuration_version },
   });
   expect(settings.ok()).toBeTruthy();
   expect((await settings.json()).reasoning_effort).toBe("low");

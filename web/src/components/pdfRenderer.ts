@@ -1,5 +1,5 @@
 import { AnnotationMode, getDocument, GlobalWorkerOptions, TextLayer, type PDFDocumentProxy, type RenderTask } from "pdfjs-dist/legacy/build/pdf.mjs";
-// Vite minifies the patched worker source for the production bundle.
+// Vite bundles and minifies the worker for production.
 import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.mjs?worker&url";
 import { version } from "pdfjs-dist/package.json";
 export { default as viewerStyles } from "pdfjs-dist/web/pdf_viewer.css?inline";
@@ -17,7 +17,6 @@ export function openPdf(bytes: ArrayBuffer, ownerDocument: HTMLDocument) {
     standardFontDataUrl: `${resources}standard_fonts/`,
     iccUrl: `${resources}iccs/`,
     wasmUrl: `${resources}wasm/`,
-    stopAtErrors: true,
     maxImageSize: 32_000_000,
     canvasMaxAreaInBytes: 32_000_000,
   });
@@ -45,14 +44,20 @@ export function paintPdfPage(pdf: PDFDocumentProxy, pageNumber: number, zoom: nu
     canvas.style.width = `${viewport.width}px`;
     canvas.style.height = `${viewport.height}px`;
     text.style.setProperty("--total-scale-factor", String(scale * page.userUnit));
-    textLayer = new TextLayer({ textContentSource: page.streamTextContent(), container: text, viewport });
     drawing = page.render({
       canvas,
       viewport,
       transform: [pixelRatio, 0, 0, pixelRatio, 0, 0],
       annotationMode: AnnotationMode.ENABLE,
     });
-    await Promise.all([drawing.promise, textLayer.render()]);
+    // Text selection can finish independently of the canvas.
+    void (async () => {
+      textLayer = new TextLayer({ textContentSource: page.streamTextContent(), container: text, viewport });
+      await textLayer.render();
+    })().catch(() => {
+      if (!cancelled) textLayer?.cancel();
+    });
+    await drawing.promise;
   })().catch((error: unknown) => {
     if (!cancelled) cancel();
     throw error;

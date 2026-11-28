@@ -11,7 +11,7 @@ export function PdfReaderFrame({ bytes, ownerDocument, interactive, onReady, onE
   ownerDocument: HTMLDocument;
   interactive: boolean;
   onReady: () => void;
-  onError: () => void;
+  onError: (message: string) => void;
   onReaderAction: () => boolean;
 }) {
   const [loaded, setLoaded] = useState<LoadedPdf>();
@@ -25,7 +25,7 @@ export function PdfReaderFrame({ bytes, ownerDocument, interactive, onReady, onE
     onReady();
   }, [onReady]);
   const reportFailure = useCallback(() => {
-    if (!firstPaint.current) onError();
+    if (!firstPaint.current) onError("Couldn't draw the first PDF page.");
   }, [onError]);
 
   useEffect(() => {
@@ -39,7 +39,7 @@ export function PdfReaderFrame({ bytes, ownerDocument, interactive, onReady, onE
         const pdf = await loading.promise;
         if (!retired) setLoaded({ pdf, renderer });
       } catch {
-        if (!retired) onError();
+        if (!retired) onError("Couldn't load the preview.");
       }
     })();
     return () => {

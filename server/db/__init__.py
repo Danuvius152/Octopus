@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..application_resources import ApplicationDataRecord
 from ..credential_use import CredentialUse
 from .agents import AgentsMixin
 from .applications import ApplicationsMixin
@@ -58,6 +59,21 @@ class Database(
     `DatabaseBase` last so it sits at the end of the MRO — every mixin already
     inherits it, so this only fixes the order, it does not add a base.
     """
+
+    async def get_viewer_account(self, token_hash: str) -> tuple[dict[str, Any], tuple[ApplicationDataRecord, ...]] | None:
+        """Read account viewer grants and application addresses in the bearer snapshot."""
+        async with self.transaction(write=False) as tx:
+            bearer = await self._get_token_user(tx, token_hash)
+            user = active_token_user(bearer)
+            if user is None:
+                return None
+            addresses = await tx.fetch_all(
+                "SELECT app_dir, deletion IS NOT NULL FROM applications WHERE user_id = ? ORDER BY created_at, id",
+                (user["id"],),
+            )
+        if active_token_user(bearer) is None:
+            return None
+        return user, tuple(ApplicationDataRecord(app_dir, bool(deleting)) for app_dir, deleting in addresses)
 
     async def get_viewer_run_user(
         self, user_id: str, credential_id: str | None, backend: str, *, token_hash: str | None,

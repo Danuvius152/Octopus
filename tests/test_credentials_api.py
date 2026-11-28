@@ -565,7 +565,8 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
 
     res = await c.patch(
         f"/api/sessions/{session.id}",
-        json={"credential_id": new_id, "expected_backend": session.backend},
+        json={"credential_id": new_id, "expected_backend": session.backend,
+              "expected_configuration_version": session.configuration_version},
         headers=c.headers,
     )
     assert res.status_code == 200, res.text
@@ -574,7 +575,8 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
 
     # Explicit null clears it again (back to the agent's credential).
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"credential_id": None, "expected_backend": session.backend}, headers=c.headers
+        f"/api/sessions/{session.id}", json={"credential_id": None, "expected_backend": session.backend,
+              "expected_configuration_version": session.configuration_version}, headers=c.headers
     )
     assert res.status_code == 200
     assert res.json()["credential_id"] is None
@@ -582,7 +584,8 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
     # A credential that doesn't exist is refused — a dangling id is exactly
     # what this route exists to get out of.
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"credential_id": "ghost", "expected_backend": session.backend}, headers=c.headers
+        f"/api/sessions/{session.id}", json={"credential_id": "ghost", "expected_backend": session.backend,
+              "expected_configuration_version": session.configuration_version}, headers=c.headers
     )
     assert res.status_code == 404
 
@@ -595,7 +598,8 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
         )
     ).json()["id"]
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"credential_id": codex_id, "expected_backend": session.backend}, headers=c.headers
+        f"/api/sessions/{session.id}", json={"credential_id": codex_id, "expected_backend": session.backend,
+              "expected_configuration_version": session.configuration_version}, headers=c.headers
     )
     assert res.status_code == 400
     assert "does not match" in res.json()["detail"]
@@ -654,7 +658,8 @@ async def test_patch_sets_a_per_session_model_and_clears_it(client):
     ).json()["model"] is None
 
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"model": "  opus  ", "expected_backend": session.backend}, headers=c.headers
+        f"/api/sessions/{session.id}", json={"model": "  opus  ", "expected_backend": session.backend,
+              "expected_configuration_version": session.configuration_version}, headers=c.headers
     )
     assert res.status_code == 200
     assert res.json()["model"] == "opus"
@@ -662,13 +667,15 @@ async def test_patch_sets_a_per_session_model_and_clears_it(client):
 
     # A name nothing knows about is still accepted — that is the point.
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"model": "some-model-9", "expected_backend": session.backend}, headers=c.headers
+        f"/api/sessions/{session.id}", json={"model": "some-model-9", "expected_backend": session.backend,
+              "expected_configuration_version": session.configuration_version}, headers=c.headers
     )
     assert res.json()["model"] == "some-model-9"
 
     for blank in (None, "   "):
         res = await c.patch(
-            f"/api/sessions/{session.id}", json={"model": blank, "expected_backend": session.backend}, headers=c.headers
+            f"/api/sessions/{session.id}", json={"model": blank, "expected_backend": session.backend,
+              "expected_configuration_version": session.configuration_version}, headers=c.headers
         )
         assert res.status_code == 200
         assert res.json()["model"] is None, blank

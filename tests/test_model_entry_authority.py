@@ -36,7 +36,8 @@ async def test_session_patch_rejects_foreign_binding_without_partial_update(bind
     for credential_id in ("missing", foreign):
         response = await client.patch(
             url, headers=headers,
-            json={"name": "Must not change", "credential_id": credential_id, "expected_backend": "codex"},
+            json={"name": "Must not change", "credential_id": credential_id, "expected_backend": "codex",
+                  "expected_configuration_version": created.json()["configuration_version"]},
         )
         assert response.status_code == 404, response.text
         assert response.json() == {"detail": "Credential not found"}

@@ -983,8 +983,8 @@ it("uses fresh GETs for a post-write observation and keeps ordinary navigation s
 });
 
 it("keeps the original sidebar baseline when metadata is joined after a settings write", async () => {
-  const old = { ...selectionInfo("s"), model: "old" };
-  const updated = { ...old, model: "new" };
+  const old = { ...selectionInfo("s"), model: "old", configuration_version: 0 };
+  const updated = { ...old, model: "new", configuration_version: 1 };
   useSessionStore.setState({ dispatchGeneration: "service", sessions: [old] });
   const metadata = deferred<Response>();
   const get = vi.fn((url: string) => {
@@ -994,7 +994,7 @@ it("keeps the original sidebar baseline when metadata is joined after a settings
   });
   vi.stubGlobal("fetch", get);
   const first = observeSession("s", "metadata");
-  expect(sessions.patch("s", { model: "new" })).toBe(true);
+  expect(sessions.settingsSaved(updated, sessions.capture())).toBe(true);
   const next = observeSession("s", "metadata");
   first.cancel();
   const detail = observeSession("s", "detail");

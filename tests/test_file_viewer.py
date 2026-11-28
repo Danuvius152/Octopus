@@ -1,7 +1,7 @@
 """Tests for the in-app file viewer.
 
 Covers:
-  * `server.file_viewer.resolve_safe_path` — the single security gate
+  * `server.file_viewer.load_safe_file` — the single security gate
     every viewer entry point funnels through. The most important tests
     are the negative ones (escape, symlink escape, missing, oversize).
   * `GET /api/sessions/{id}/files{,/meta}` — wired endpoint, including
@@ -15,6 +15,7 @@ import asyncio
 import fcntl
 import json
 import os
+import subprocess
 import sys
 from contextlib import contextmanager
 from dataclasses import replace
@@ -28,32 +29,37 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from server import deps, file_viewer
+from server.application_resources import data_dir_for
+from server.config import settings
 from server.database import Database
 from server.file_viewer import (
     MAX_FILE_BYTES,
     FileNotFound,
+    FileSources,
     FileTooLarge,
     PathRejected,
     UnsupportedType,
-    resolve_safe_path,
+    load_safe_file,
 )
 from server.main import app
 from server.mcp_identity import mint, register_run, revoke_run
 from server.routers import files
 from server.routers.files import router as files_router
 from server.session_manager import session_manager
-from server.sessions import Session, SessionManager
 from server.workspace import paths_for
 from tests.accounts import create_account
 
 # ---------------------------------------------------------------------------
-# resolve_safe_path — security unit tests
+# load_safe_file — security unit tests
 # ---------------------------------------------------------------------------
+
+def cwd_source(root: Path) -> FileSources:
+    return FileSources(cwd=root, directory_identities={root: root.stat()})
 
 
 def test_resolves_simple_relative_path(tmp_path):
     (tmp_path / "doc.md").write_text("# hi")
-    r = resolve_safe_path(tmp_path, "doc.md")
+    r, _ = load_safe_file(cwd_source(tmp_path), "doc.md")
     assert r.relative_path == "doc.md"
     assert r.kind == "markdown"
     assert r.mime_type.startswith("text/markdown")
@@ -64,27 +70,53 @@ def test_resolves_nested_relative_path(tmp_path):
     sub = tmp_path / "sub" / "deep"
     sub.mkdir(parents=True)
     (sub / "file.py").write_text("x = 1\n")
-    r = resolve_safe_path(tmp_path, "sub/deep/file.py")
+    r, _ = load_safe_file(cwd_source(tmp_path), "sub/deep/file.py")
     assert r.kind == "code"
     assert r.relative_path == str(Path("sub/deep/file.py"))
 
 
+def test_viewer_reads_a_deep_path_with_a_low_descriptor_limit(tmp_path):
+    directory = tmp_path.joinpath(*(["nested"] * 48))
+    directory.mkdir(parents=True)
+    (directory / "report.md").write_bytes(b"# Deep report")
+    (directory / "child").mkdir()
+    (tmp_path / "alias").symlink_to(directory / "child")
+    child = subprocess.run(
+        [sys.executable, "-c", """
+import resource
+import sys
+from pathlib import Path
+from server.file_viewer import FileSources, load_safe_file
+
+root = Path(sys.argv[1])
+sources = FileSources(cwd=root, directory_identities={root: root.stat()})
+_, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (24, hard))
+metadata, body = load_safe_file(sources, "alias/../report.md", read_content=True)
+assert metadata.relative_path == sys.argv[2]
+assert body == b"# Deep report"
+""", str(tmp_path), str((directory / "report.md").relative_to(tmp_path))],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert child.returncode == 0, child.stderr
+
+
 def test_accepts_absolute_path_inside_root(tmp_path):
     (tmp_path / "a.txt").write_text("hello")
-    r = resolve_safe_path(tmp_path, str(tmp_path / "a.txt"))
+    r, _ = load_safe_file(cwd_source(tmp_path), str(tmp_path / "a.txt"))
     assert r.relative_path == "a.txt"
 
 
 def test_rejects_empty_path(tmp_path):
     with pytest.raises(PathRejected):
-        resolve_safe_path(tmp_path, "")
+        load_safe_file(cwd_source(tmp_path), "")
     with pytest.raises(PathRejected):
-        resolve_safe_path(tmp_path, "   ")
+        load_safe_file(cwd_source(tmp_path), "   ")
 
 
 def test_rejects_tilde_path(tmp_path):
     with pytest.raises(PathRejected):
-        resolve_safe_path(tmp_path, "~/secret")
+        load_safe_file(cwd_source(tmp_path), "~/secret")
 
 
 def test_rejects_dotdot_escape(tmp_path):
@@ -92,13 +124,13 @@ def test_rejects_dotdot_escape(tmp_path):
     sub.mkdir()
     (tmp_path.parent / "outside.txt").write_text("nope")
     with pytest.raises(PathRejected):
-        resolve_safe_path(sub, "../outside.txt")
+        load_safe_file(cwd_source(sub), "../outside.txt")
 
 
 def test_rejects_absolute_path_outside_root(tmp_path):
     (tmp_path.parent / "elsewhere.txt").write_text("nope")
     with pytest.raises(PathRejected):
-        resolve_safe_path(tmp_path, str(tmp_path.parent / "elsewhere.txt"))
+        load_safe_file(cwd_source(tmp_path), str(tmp_path.parent / "elsewhere.txt"))
 
 
 def test_rejects_symlink_escaping_root(tmp_path):
@@ -111,69 +143,69 @@ def test_rejects_symlink_escaping_root(tmp_path):
     # realpath resolves it; relative_to(/inside) must fail.
     (inside_root / "link.md").symlink_to(outside_root / "secret.md")
     with pytest.raises(PathRejected):
-        resolve_safe_path(inside_root, "link.md")
+        load_safe_file(cwd_source(inside_root), "link.md")
 
 
 def test_missing_file_raises_filenotfound(tmp_path):
     with pytest.raises(FileNotFound):
-        resolve_safe_path(tmp_path, "nope.md")
+        load_safe_file(cwd_source(tmp_path), "nope.md")
 
 
 def test_directory_path_raises_filenotfound(tmp_path):
     (tmp_path / "subdir").mkdir()
     with pytest.raises(FileNotFound):
-        resolve_safe_path(tmp_path, "subdir")
+        load_safe_file(cwd_source(tmp_path), "subdir")
 
 
 def test_oversized_file_raises_filetoolarge(tmp_path):
     big = tmp_path / "huge.md"
     big.write_bytes(b"x" * (MAX_FILE_BYTES + 1))
     with pytest.raises(FileTooLarge):
-        resolve_safe_path(tmp_path, "huge.md")
+        load_safe_file(cwd_source(tmp_path), "huge.md")
 
 
 def test_unsupported_extension_raises(tmp_path):
     (tmp_path / "blob.bin").write_bytes(b"\x00\x01\x02")
     with pytest.raises(UnsupportedType):
-        resolve_safe_path(tmp_path, "blob.bin")
+        load_safe_file(cwd_source(tmp_path), "blob.bin")
 
 
 def test_extensionless_dockerfile_allowed(tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM python\n")
-    r = resolve_safe_path(tmp_path, "Dockerfile")
+    r, _ = load_safe_file(cwd_source(tmp_path), "Dockerfile")
     assert r.kind == "code"
 
 
 def test_extensionless_readme_allowed(tmp_path):
     (tmp_path / "README").write_text("hi\n")
-    r = resolve_safe_path(tmp_path, "README")
+    r, _ = load_safe_file(cwd_source(tmp_path), "README")
     assert r.kind == "code"
 
 
 def test_classify_image(tmp_path):
     (tmp_path / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-    r = resolve_safe_path(tmp_path, "shot.png")
+    r, _ = load_safe_file(cwd_source(tmp_path), "shot.png")
     assert r.kind == "image"
     assert r.mime_type == "image/png"
 
 
 def test_classify_pdf(tmp_path):
     (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4\n%fake")
-    r = resolve_safe_path(tmp_path, "doc.pdf")
+    r, _ = load_safe_file(cwd_source(tmp_path), "doc.pdf")
     assert r.kind == "pdf"
     assert r.mime_type == "application/pdf"
 
 
 def test_classify_text_log(tmp_path):
     (tmp_path / "out.log").write_text("hello\n")
-    r = resolve_safe_path(tmp_path, "out.log")
+    r, _ = load_safe_file(cwd_source(tmp_path), "out.log")
     assert r.kind == "text"
     assert r.mime_type == "text/plain; charset=utf-8"
 
 
 def test_classify_yaml_is_code(tmp_path):
     (tmp_path / "ci.yaml").write_text("on: push\n")
-    r = resolve_safe_path(tmp_path, "ci.yaml")
+    r, _ = load_safe_file(cwd_source(tmp_path), "ci.yaml")
     assert r.kind == "code"
 
 
@@ -220,6 +252,370 @@ async def session_with_files(client, tmp_path):
         agent["id"], name="viewer-test", working_dir=str(root)
     )
     return sess.id, root
+
+
+@pytest.fixture
+async def application_data(session_with_files):
+    sid, _ = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    app_dir = paths_for(user_id).applications / "sapphire"
+    await session_manager.db.save_application(
+        app_id="sapphire", name="Sapphire", app_dir=str(app_dir), user_id=user_id,
+        created_at="2026-11-28T00:00:00Z", updated_at="2026-11-28T00:00:00Z", status="ready",
+    )
+    data = Path(data_dir_for(str(app_dir)))
+    data.mkdir()
+    return data
+
+
+async def test_only_account_bearer_adds_registered_application_data_to_viewer_sources(
+    client, session_with_files, application_data,
+):
+    sid, cwd = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    db = session_manager.db
+    paths = paths_for(user_id)
+    data = application_data
+    report = data / "Project summary.md"
+    report.write_bytes(b"# Application data\n")
+    private = paths.agents / "private.md"
+    private.write_text("# Internal data")
+    other, other_token = await create_account(db, username="another-application-owner")
+    foreign_app = paths.applications / "foreign"
+    await db.save_application(
+        app_id="foreign", name="Foreign", app_dir=str(foreign_app), user_id=other["id"],
+        created_at="2026-11-28T00:00:00Z", updated_at="2026-11-28T00:00:00Z",
+    )
+    foreign_data = Path(data_dir_for(str(foreign_app)))
+    foreign_data.mkdir()
+    (foreign_data / "foreign.md").write_text("# Outside the account's application records")
+    code_target = paths.workspace / "checked-out-code"
+    code_target.mkdir()
+    data.with_suffix("").symlink_to(code_target, target_is_directory=True)
+    api = f"/api/sessions/{sid}/files"
+
+    listed = await client.get(f"{api}/sources")
+    assert listed.status_code == 200 and str(data) in listed.json()["roots"]
+    assert str(foreign_data) not in listed.json()["roots"]
+    body = await client.get(api, params={"path": str(report)})
+    assert body.status_code == 200 and body.content == b"# Application data\n"
+    for denied in (private, foreign_data / "foreign.md"):
+        assert (await client.get(api, params={"path": str(denied)})).status_code == 403
+
+    lease = f"viewer-app-data-{sid}"
+    token = mint(sid, user_id=user_id, run_lease_id=lease)
+    headers = {"Authorization": f"Bearer {token}"}
+    register_run(lease, sid, user_id, None)
+    try:
+        listed = await client.get(f"{api}/sources", headers=headers)
+        assert listed.status_code == 200
+        assert str(cwd) in listed.json()["roots"] and str(data) not in listed.json()["roots"]
+        body = await client.get(api, params={"path": "plan.md"}, headers=headers)
+        assert body.status_code == 200 and body.text == "# plan\nstep one"
+        assert (await client.get(api, params={"path": str(report)}, headers=headers)).status_code == 403
+    finally:
+        revoke_run(lease)
+
+    body = await client.get(api, params={"path": str(report)}, headers={"Authorization": f"Bearer {other_token}"})
+    assert body.status_code == 404
+
+
+async def test_showme_opens_a_registered_application_report_from_three_paths(
+    client, session_with_files, application_data, monkeypatch,
+):
+    sid, _ = session_with_files
+    session = session_manager.get_session(sid)
+    workspace = paths_for(session.user_id).workspace
+    session.working_dir = str(workspace)
+    data = application_data
+    folder = data / "vault"
+    folder.mkdir()
+    report = folder / "Project summary.md"
+    report.write_bytes(b"# Application report\n")
+    literal_name = "\\literal.md"
+    (workspace / literal_name).write_text("# POSIX backslash")
+    relative = os.path.relpath(report, workspace)
+    references = (str(report), str(report).replace("/", "\\"), relative)
+    api = f"/api/sessions/{sid}"
+    (workspace / "plan.md").write_text("# Workspace plan")
+    (folder / "details.md").write_text("# Relative document")
+    captured = await _patch_showme(monkeypatch, json.dumps({"path": str(report)}))
+
+    files = []
+    for reference in references:
+        result = await client.post(f"{api}/showme/resolve", json={"text": reference})
+        assert result.status_code == 200, result.text
+        meta = result.json()["metadata"]
+        assert meta["source"] == str(data) and meta["path"] == "vault/Project summary.md"
+        files.append(meta)
+        body = await client.get(f"{api}/files", params={
+            key: meta[key] for key in ("source", "path", "canonical_path_id")
+        })
+        assert body.status_code == 200 and body.content == b"# Application report\n"
+    assert files[0] == files[1] == files[2]
+
+    constrained = await client.post(f"{api}/showme/resolve", params={"source": str(workspace)}, json={"text": relative})
+    assert constrained.status_code == 403
+    copied = f"{json.dumps(str(report))} --source {json.dumps(str(data))}#application-report"
+    result = await client.post(f"{api}/showme/resolve", json={"text": copied})
+    assert result.status_code == 200 and result.json()["metadata"] == files[0]
+    literal = await client.post(f"{api}/showme/resolve", json={"text": json.dumps(literal_name)})
+    assert literal.status_code == 200 and literal.json()["metadata"]["path"] == literal_name
+
+    source = str(data)
+    browse = await client.get(f"{api}/files/browse", params={"source": source, "directory": "vault"})
+    found = await client.get(f"{api}/files/find", params={"source": source, "query": "summary"})
+    for result in (browse, found):
+        assert result.status_code == 200
+        assert "vault/Project summary.md" in [entry["path"] for entry in result.json()["entries"]]
+    meta = await client.get(f"{api}/files/meta", params={"source": source, "path": found.json()["entries"][0]["path"]})
+    assert meta.status_code == 200 and meta.json() == files[0]
+
+    folder_info = files[0]["canonical_directory"]
+    document = {"source": source, "source_directory": folder_info["path"], "source_directory_id": folder_info["path_id"]}
+    relative_link = await client.get(f"{api}/files", params=document | {"path": "details.md"})
+    assert relative_link.status_code == 200 and relative_link.text == "# Relative document"
+    escaped = await client.get(f"{api}/files/meta", params=document | {"path": "../../../workspace/plan.md"})
+    assert escaped.status_code == 403
+    absolute_link = await client.get(f"{api}/files/meta", params={"path": str(workspace / "plan.md")})
+    assert absolute_link.status_code == 200 and absolute_link.json()["source"] == str(workspace)
+
+    description = "missing plan.md"
+    missing = await client.post(f"{api}/showme/resolve", json={"text": description})
+    assert missing.status_code == 404 and missing.json()["can_search_description"] is True
+    assert captured == {}
+    result = await client.post(f"{api}/showme/resolve", json={"text": description, "mode": "description"})
+    assert result.status_code == 200 and result.json()["metadata"] == files[0]
+    assert result.json()["description"] == description and captured["calls"] == 1
+    assert await session_manager.db.load_messages(sid) == []
+
+
+@pytest.mark.parametrize("overlap", ["none", "parent", "same-root"])
+async def test_viewer_rechecks_application_deletion_and_independent_grants(
+    client, session_with_files, application_data, overlap,
+):
+    sid, cwd = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    db = session_manager.db
+    data = application_data
+    report = data / "report.md"
+    report.write_text("# Retained application data")
+    grants = {"none": [cwd], "parent": [cwd, data.parent], "same-root": [cwd, data]}[overlap]
+    await db.update_user_field(user_id, extra_roots=json.dumps(list(map(str, grants))))
+    api = f"/api/sessions/{sid}/files"
+    metadata = await client.get(f"{api}/meta", params={"path": str(report)})
+    assert metadata.status_code == 200 and metadata.json()["source"] == str(data)
+    binding = {key: metadata.json()[key] for key in ("source", "path", "canonical_path_id")}
+
+    await db.set_application_deletion("sapphire", {"phase": "retiring", "keep_files": True})
+    for remove_record in (False, True):
+        if remove_record:
+            deleted, _ = await db.delete_application("sapphire")
+            assert deleted
+        sources = await client.get(f"{api}/sources")
+        assert (str(data) in sources.json()["roots"]) == (overlap == "same-root")
+        for suffix, params in (
+            ("/browse", {"source": str(data)}), ("/find", {"source": str(data), "query": "report"}),
+            ("/meta", {"source": str(data), "path": "report.md"}), ("", binding),
+        ):
+            result = await client.get(f"{api}{suffix}", params=params)
+            assert result.status_code == (200 if overlap == "same-root" else 403)
+
+        reopened = await client.get(f"{api}/meta", params={"path": str(report)})
+        if overlap == "none":
+            assert reopened.status_code == 403
+        else:
+            assert reopened.status_code == 200 and reopened.json()["source"] == str(grants[-1])
+            selected = {key: reopened.json()[key] for key in binding}
+            assert (await client.get(api, params=selected)).text == "# Retained application data"
+
+
+@pytest.mark.parametrize("deleting_id", ["sapphire", "legacy-other"])
+async def test_viewer_uses_any_readable_application_record_for_a_shared_data_root(
+    client, session_with_files, application_data, deleting_id,
+):
+    sid, _ = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    db = session_manager.db
+    data = application_data
+    (data / "report.md").write_text("# Shared application data")
+    await db.save_application(
+        app_id="legacy-other", name="Legacy other", app_dir=str(data.with_suffix("")), user_id=user_id,
+        created_at="2026-11-28T01:00:00Z", updated_at="2026-11-28T01:00:00Z", status="ready",
+    )
+    deletion = {"phase": "retiring", "keep_files": True}
+    await db.set_application_deletion(deleting_id, deletion)
+    api = f"/api/sessions/{sid}/files"
+    sources = await client.get(f"{api}/sources")
+    assert sources.status_code == 200 and sources.json()["roots"].count(str(data)) == 1
+    body = await client.get(api, params={"source": str(data), "path": "report.md"})
+    assert body.status_code == 200 and body.text == "# Shared application data"
+
+    await db.set_application_deletion("sapphire" if deleting_id == "legacy-other" else "legacy-other", deletion)
+    sources = await client.get(f"{api}/sources")
+    assert sources.status_code == 200 and str(data) not in sources.json()["roots"]
+    assert (await client.get(api, params={"source": str(data), "path": "report.md"})).status_code == 403
+
+
+@pytest.mark.parametrize("route", ["alias", "dotdot", "late-alias", "late-missing"])
+async def test_showme_implicit_path_checks_each_application_source_it_crosses(
+    client, session_with_files, application_data, monkeypatch, route,
+):
+    sid, _ = session_with_files
+    session = session_manager.get_session(sid)
+    workspace = paths_for(session.user_id).workspace
+    session.working_dir = str(workspace)
+    data = application_data
+    safe = workspace / "permitted"
+    safe.mkdir()
+    (safe / "report.md").write_text("# Workspace report")
+    await session_manager.db.update_user_field(session.user_id, extra_roots=json.dumps([str(data.parent)]))
+
+    def replace_data():
+        data.rename(data.with_name("retained-data"))
+        data.symlink_to(safe, target_is_directory=True)
+
+    endpoint = f"/api/sessions/{sid}/showme/resolve"
+    if route in {"late-alias", "late-missing"}:
+        gather = files.file_sources
+        if route == "late-missing":
+            data.rmdir()
+
+        def gather_then_replace(*args, **kwargs):
+            result = gather(*args, **kwargs)
+            if not data.is_symlink():
+                if data.is_dir():
+                    data.rename(data.with_name("retained-data"))
+                data.symlink_to(safe, target_is_directory=True)
+            return result
+
+        monkeypatch.setattr(files, "file_sources", gather_then_replace)
+    else:
+        replace_data()
+    reference = os.path.relpath(data / "report.md", workspace)
+    if route == "alias":
+        (workspace / "nested-alias").symlink_to(data)
+        reference = "nested-alias/report.md"
+    elif route == "dotdot":
+        reference = f"{os.path.relpath(data, workspace)}/../../workspace/permitted/report.md"
+    denied = await client.post(endpoint, json={"text": reference})
+    assert denied.status_code == 403 and denied.json()["detail"] == "The file source is no longer available."
+    reopened = await client.post(endpoint, json={"text": str(safe / "report.md")})
+    assert reopened.status_code == 200 and reopened.json()["metadata"]["source"] == str(workspace)
+
+
+@pytest.mark.parametrize("endpoint", ["/browse", "/find", "/meta", ""])
+async def test_viewer_rechecks_application_root_identity_at_open(
+    client, session_with_files, application_data, monkeypatch, endpoint,
+):
+    sid, _ = session_with_files
+    data = application_data
+    (data / "report.md").write_text("# Admitted directory")
+    gather = files.file_sources
+
+    def gather_then_replace(*args, **kwargs):
+        result = gather(*args, **kwargs)
+        data.rename(data.with_name("retained-data"))
+        data.mkdir()
+        (data / "report.md").write_text("# Replacement directory")
+        return result
+
+    monkeypatch.setattr(files, "file_sources", gather_then_replace)
+    result = await client.get(f"/api/sessions/{sid}/files{endpoint}", params={
+        "source": str(data), "path": "report.md", "query": "report",
+    })
+    assert result.status_code == 403 and result.json()["detail"] == "The file source is no longer available."
+
+
+async def test_viewer_does_not_grant_a_redirected_managed_application_directory(client, session_with_files, application_data):
+    sid, cwd = session_with_files
+    session = session_manager.get_session(sid)
+    workspace = paths_for(session.user_id).workspace
+    session.working_dir = str(workspace)
+    data = application_data
+    redirected = cwd / "redirected-applications"
+    data.parent.rename(redirected)
+    data.parent.symlink_to(redirected, target_is_directory=True)
+    (redirected / data.name / "report.md").write_text("# Independently permitted report")
+    api = f"/api/sessions/{sid}/files"
+    sources = await client.get(f"{api}/sources")
+    assert sources.status_code == 200 and str(data) not in sources.json()["roots"]
+    blocked = await client.get(api, params={"path": str(data / "report.md")})
+    assert blocked.status_code == 403
+    relative = await client.post(f"/api/sessions/{sid}/showme/resolve", json={
+        "text": os.path.relpath(data / "report.md", workspace),
+    })
+    assert relative.status_code == 403
+    reopened = await client.get(api, params={"path": str(redirected / data.name / "report.md")})
+    assert reopened.status_code == 200 and reopened.text == "# Independently permitted report"
+
+
+async def test_viewer_accepts_application_addresses_under_the_configured_users_directory_alias(
+    client, session_with_files, tmp_path, monkeypatch,
+):
+    sid, _ = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    actual_users = Path(settings.users_root)
+    configured_users = tmp_path / "configured-users"
+    configured_users.symlink_to(actual_users, target_is_directory=True)
+    monkeypatch.setattr(settings, "users_root", str(configured_users))
+    configured_code = paths_for(user_id).applications / "configured-code"
+    await session_manager.db.save_application(
+        app_id="configured-code", name="Configured address", app_dir=str(configured_code), user_id=user_id,
+        created_at="2026-11-28T00:00:00Z", updated_at="2026-11-28T00:00:00Z",
+    )
+    configured_data = Path(data_dir_for(str(configured_code)))
+    configured_data.mkdir()
+    report = configured_data / "report.md"
+    report.write_text("# Registered address")
+    api = f"/api/sessions/{sid}"
+    resolved = await client.post(f"{api}/showme/resolve", json={"text": str(report)})
+    assert resolved.status_code == 200 and resolved.json()["metadata"]["source"] == str(configured_data.resolve())
+    body = await client.get(f"{api}/files", params={"path": str(report)})
+    assert body.status_code == 200 and body.text == "# Registered address"
+
+
+async def test_viewer_rejects_a_relative_alias_for_a_replaced_source(client, session_with_files):
+    sid, cwd = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    old = cwd / "registered"
+    old.mkdir()
+    old.rename(cwd / "retired")
+    old.symlink_to(cwd / "sub", target_is_directory=True)
+    await session_manager.db.update_user_field(user_id, extra_roots=json.dumps([str(cwd), str(old)]))
+    api = f"/api/sessions/{sid}/files"
+    document = (await client.get(f"{api}/meta", params={"path": "plan.md"})).json()["canonical_directory"]
+    for scope in (
+        {}, {"source": str(cwd)},
+        {"source": str(cwd), "source_directory": document["path"], "source_directory_id": document["path_id"]},
+    ):
+        denied = await client.get(api, params=scope | {"path": "registered/note.txt"})
+        assert denied.status_code == 403 and denied.json()["detail"] == "The file source is no longer available."
+        allowed = await client.get(api, params=scope | {"path": "sub/note.txt"})
+        assert allowed.status_code == 200 and allowed.text == "nested"
+
+
+async def test_viewer_bound_application_file_requires_the_original_root_even_if_its_parent_stays(
+    client, session_with_files, application_data,
+):
+    sid, _ = session_with_files
+    data = application_data
+    folder = data / "vault"
+    folder.mkdir()
+    (folder / "report.md").write_text("# Original directory")
+    api = f"/api/sessions/{sid}/files"
+    metadata = await client.get(f"{api}/meta", params={"source": str(data), "path": "vault/report.md"})
+    assert metadata.status_code == 200
+    binding = {key: metadata.json()[key] for key in ("source", "path", "canonical_path_id")}
+    retained = data.with_name("retained-data")
+    data.rename(retained)
+    data.mkdir()
+    (retained / folder.name).rename(folder)
+    denied = await client.get(api, params=binding)
+    assert denied.status_code == 409
+    reopened = await client.get(f"{api}/meta", params={"source": str(data), "path": "vault/report.md"})
+    assert reopened.status_code == 200
+    assert reopened.json()["canonical_path_id"] != binding["canonical_path_id"]
 
 
 async def test_get_file_markdown(client, session_with_files):
@@ -305,6 +701,7 @@ async def test_markdown_bytes_follow_the_authorized_canonical_path(client, sessi
     (root / "plan.md").symlink_to("sub/second.md")
     changed = await client.get(url, params=params)
     assert changed.status_code == 409
+    assert changed.json()["code"] == "target_changed"
 
     reopened = await client.get(f"{url}/meta", params={"path": "alias.md"})
     assert reopened.status_code == 200 and reopened.json()["path"] == "sub/second.md"
@@ -441,6 +838,37 @@ async def test_relative_resources_recheck_the_document_directory(client, session
     assert replacement.status_code == 200 and replacement.text == "# Replacement appendix"
 
 
+async def test_confirmed_target_reads_keep_the_referring_directory_binding(client, session_with_files):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("# Guide")
+    (root / "target.md").write_text("Confirmed contents")
+    (root / "alternate.md").write_text("Retargeted contents")
+    alias = docs / "alias.md"
+    alias.symlink_to("../target.md")
+    guide = await client.get(f"{url}/meta", params={"path": "docs/guide.md"})
+    directory = guide.json()["canonical_directory"]
+    binding = {"source_directory": directory["path"], "source_directory_id": directory["path_id"]}
+    target = await client.get(f"{url}/meta", params={"path": "alias.md", **binding})
+    assert target.status_code == 200 and target.json()["path"] == "target.md"
+    opened = target.json()
+    request = {**binding, **{key: opened[key] for key in ("path", "source", "canonical_path_id")}}
+
+    alias.unlink()
+    alias.symlink_to("../alternate.md")
+    retried = await client.get(url, params=request)
+    assert retried.status_code == 200 and retried.text == "Confirmed contents"
+
+    docs.rename(root / "retired-docs")
+    docs.mkdir()
+    (docs / "alias.md").symlink_to("../target.md")
+    stale = await client.get(url, params=request)
+    assert stale.status_code == 409
+    assert "document directory changed" in stale.json()["detail"]
+
+
 async def test_get_file_code(client, session_with_files):
     sid, _ = session_with_files
     r = await client.get(
@@ -469,12 +897,14 @@ async def test_pdf_preview_is_inline_while_default_and_download_remain_attachmen
     name = "指南 %.pdf"
     (root / name).write_bytes((root / "doc.pdf").read_bytes())
     url = f"/api/sessions/{sid}/files"
-    preview = await client.get(url, params={"path": name, "preview": "true"})
+    metadata = (await client.get(f"{url}/meta", params={"path": name})).json()
+    confirmed = {key: metadata[key] for key in ("path", "source", "canonical_path_id")}
+    preview = await client.get(url, params={**confirmed, "preview": "true", "viewer": "1"})
     assert preview.status_code == 200
     assert preview.headers["content-type"] == "application/pdf"
     assert preview.headers["content-disposition"].startswith("inline;")
     assert "filename*=utf-8''%E6%8C%87%E5%8D%97%20%25.pdf" in preview.headers["content-disposition"]
-    for params in ({"path": name}, {"path": name, "preview": "false"}):
+    for params in (confirmed, {**confirmed, "preview": "false", "viewer": "1"}):
         download = await client.get(url, params=params)
         assert download.content == preview.content
         assert download.headers["content-disposition"].startswith("attachment;")
@@ -514,7 +944,7 @@ async def test_preview_preserves_non_pdf_behavior_and_path_gates(client, session
 
 
 @pytest.mark.parametrize(("path", "status"), [("../outside.md", 403), ("no-such.pdf", 404)])
-async def test_pdf_frame_exposes_the_read_error_status(client, session_with_files, path, status):
+async def test_pdf_preview_uses_the_normal_file_error(client, session_with_files, path, status):
     sid, _ = session_with_files
     url = f"/api/sessions/{sid}/files"
     params = {"path": path, "preview": "true"}
@@ -523,7 +953,7 @@ async def test_pdf_frame_exposes_the_read_error_status(client, session_with_file
 
     assert ordinary.status_code == framed.status_code == status
     assert framed.headers["cache-control"] == "no-store"
-    assert framed.json() == {**ordinary.json(), "status": status}
+    assert framed.json() == ordinary.json()
 
 
 async def test_get_file_nested_path(client, session_with_files):
@@ -810,13 +1240,78 @@ async def test_viewer_detects_document_parent_replacement_but_allows_file_edits(
     docs.mkdir()
     report.write_text("replacement report")
     (docs / "note.txt").write_text("replacement note")
-    for params in (body, asset):
+    for params, code in ((body, "target_changed"), (asset, "source_directory_changed")):
         stale = await client.get(url, params=params)
         assert stale.status_code == 409
+        assert stale.json()["code"] == code
         assert stale.headers["cache-control"] == "no-store"
     stale_browse = await client.get(f"{url}/browse", params=listing)
     assert stale_browse.status_code == 409
     assert stale_browse.headers["cache-control"] == "no-store"
+
+
+async def test_viewer_reports_the_document_directory_rebound_during_resolution(client, session_with_files, monkeypatch):
+    sid, cwd = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    docs = cwd / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("# Guide")
+    (docs / "linked.md").write_text("# Linked")
+    outside = cwd.with_name("outside")
+    outside.mkdir()
+    (outside / "linked.md").write_text("# Outside")
+    meta = await client.get(f"{url}/meta", params={"path": "docs/guide.md"})
+    assert meta.status_code == 200
+    directory = meta.json()["canonical_directory"]
+    params = {"path": "linked.md", "source": str(cwd),
+              "source_directory": directory["path"], "source_directory_id": directory["path_id"]}
+    resolve_path = file_viewer._resolve_checked_path
+
+    def replace_during_resolution(path, sources):
+        if path == docs / "linked.md":
+            docs.rename(cwd / "retired-docs")
+            docs.symlink_to(outside, target_is_directory=True)
+        return resolve_path(path, sources)
+
+    monkeypatch.setattr(file_viewer, "_resolve_checked_path", replace_during_resolution)
+    stale = await client.get(f"{url}/meta", params=params)
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "source_directory_changed"
+    assert stale.headers["cache-control"] == "no-store"
+
+
+async def test_viewer_reports_the_document_directory_rebound_after_open(client, session_with_files, monkeypatch):
+    sid, cwd = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    docs = cwd / "docs"
+    docs.mkdir()
+    (docs / "guide.md").write_text("# Guide")
+    (docs / "linked.md").write_text("# Linked")
+    meta = await client.get(f"{url}/meta", params={"path": "docs/guide.md"})
+    assert meta.status_code == 200
+    directory = meta.json()["canonical_directory"]
+    binding = {"source": str(cwd), "source_directory": directory["path"], "source_directory_id": directory["path_id"]}
+    target = await client.get(f"{url}/meta", params=binding | {"path": "linked.md"})
+    assert target.status_code == 200
+    assert target.json()["path"] == "docs/linked.md"
+    open_regular_file = file_viewer._open_regular_file
+
+    @contextmanager
+    def replace_after_open(root_fd, relative):
+        with open_regular_file(root_fd, relative) as opened:
+            assert relative == Path("docs/linked.md")
+            docs.rename(cwd / "retired-docs")
+            docs.mkdir()
+            (docs / "linked.md").write_text("# Replacement")
+            yield opened
+
+    monkeypatch.setattr(file_viewer, "_open_regular_file", replace_after_open)
+    stale = await client.get(url, params=binding | {
+        "path": target.json()["path"], "canonical_path_id": target.json()["canonical_path_id"],
+    })
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "source_directory_changed"
+    assert stale.headers["cache-control"] == "no-store"
 
 
 async def test_absolute_file_sources_match_path_components_before_resolving_links(client, session_with_files):
@@ -946,31 +1441,18 @@ async def test_viewer_never_implicitly_grants_a_redirected_account_workspace(cli
     assert (await client.get(url, params={"path": "plan.md"})).status_code == 200
 
 
-async def test_viewer_without_an_account_has_only_the_original_session_source(tmp_path, monkeypatch):
-    cwd = tmp_path / "legacy-cwd"
-    cwd.mkdir()
-    (cwd / "plan.md").write_text("# Legacy report")
-    (tmp_path / "outside.md").write_text("outside report")
-    manager = SessionManager()
-    legacy_session = Session(id="legacy", name="Legacy session", working_dir=str(cwd))
-    manager.sessions[legacy_session.id] = legacy_session
-    legacy_app = FastAPI()
-    legacy_app.include_router(files_router)
-    legacy_app.dependency_overrides[deps.get_session_manager] = lambda: manager
-
-    async def legacy_authority(token: str) -> deps.ViewerAuthority | None:
-        return deps.ViewerAuthority(None, []) if token == "legacy-token" else None
-
-    monkeypatch.setattr(files, "resolve_viewer_authority", legacy_authority)
-    async with AsyncClient(transport=ASGITransport(app=legacy_app), base_url="http://test",
-                           headers={"Authorization": "Bearer legacy-token"}) as legacy:
-        url = f"/api/sessions/{legacy_session.id}/files"
-        relative = await legacy.get(url, params={"path": "plan.md"})
-        assert relative.status_code == 200 and relative.text == "# Legacy report"
-        absolute = await legacy.get(f"{url}/meta", params={"path": str(cwd / "plan.md")})
-        assert absolute.status_code == 200 and absolute.json()["source"] == str(cwd)
-        outside = await legacy.get(url, params={"path": str(cwd.parent / "outside.md")})
-        assert outside.status_code == 403
+async def test_viewer_requires_an_account_in_the_runtime_scope(client, session_with_files):
+    sid, _ = session_with_files
+    headers = {"Authorization": f"Bearer {mint(sid)}"}
+    base = f"/api/sessions/{sid}"
+    for endpoint in ("files", "files/meta", "files/sources"):
+        response = await client.get(f"{base}/{endpoint}", params={"path": "plan.md"}, headers=headers)
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid token"}
+    for text in ("plan.md", "the requested plan"):
+        response = await client.post(f"{base}/showme/resolve", json={"text": text}, headers=headers)
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid token"}
 
 
 @pytest.mark.parametrize("change", ["grant", "token", "account"])
@@ -1019,16 +1501,16 @@ async def test_viewer_does_not_combine_a_revoked_bearer_with_a_new_grant(client,
     old_token = client.headers["Authorization"].removeprefix("Bearer ")
     captured = asyncio.Event()
     continue_read = asyncio.Event()
-    resolve_token = users.resolve_token
+    get_viewer_account = users.db.get_viewer_account
 
-    async def read_then_wait(token, *, touch=True):
-        user = await resolve_token(token, touch=touch)
-        if token == old_token and user is not None:
+    async def read_then_wait(token_hash):
+        account = await get_viewer_account(token_hash)
+        if account is not None:
             captured.set()
             await continue_read.wait()
-        return user
+        return account
 
-    monkeypatch.setattr(users, "resolve_token", read_then_wait)
+    monkeypatch.setattr(users.db, "get_viewer_account", read_then_wait)
     url = f"/api/sessions/{sid}/files"
     params = {"source": str(repo), "path": "plan.md"}
     async with asyncio.timeout(5):
@@ -1189,20 +1671,19 @@ async def test_viewer_rejects_outside_redirect_at_the_checked_open(client, sessi
     target = root / name
     # The redirected entry points to a missing fixture outside the session root.
     unrelated = root.parent / "unavailable" / name
-    open_fd = os.open
+    open_regular_file = file_viewer._open_regular_file
     redirected = False
 
-    def open_changed_entry(path, flags, mode=0o777, *, dir_fd=None):
+    def replace_before_open(root_fd, relative):
         nonlocal redirected
-        if path == name and dir_fd is not None and flags & os.O_PATH and not redirected:
-            target.unlink()
-            target.symlink_to(unrelated)
-            redirected = True
-        return open_fd(path, flags, mode, dir_fd=dir_fd)
+        assert relative == Path(name)
+        target.unlink()
+        target.symlink_to(unrelated)
+        redirected = True
+        return open_regular_file(root_fd, relative)
 
-    with monkeypatch.context() as patch:
-        patch.setattr(os, "open", open_changed_entry)
-        response = await client.get(url, params=params, headers=headers)
+    monkeypatch.setattr(file_viewer, "_open_regular_file", replace_before_open)
+    response = await client.get(url, params=params, headers=headers)
     assert redirected
     assert response.status_code == 409
     assert "file path changed" in response.json()["detail"]
@@ -1590,7 +2071,7 @@ async def test_showme_child_uses_the_admitted_directory_after_rename(client, ses
     response = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "the requested report"})
     if replacement == "symlink":
         assert response.status_code == 200, response.text
-        assert response.json() == {"description": "the requested report", "path": None, "message": "original"}
+        assert response.json() == {"description": "the requested report", "message": "original"}
     else:
         assert response.status_code == 403, response.text
         assert response.json()["code"] == "working_directory_unavailable"
@@ -1704,12 +2185,25 @@ async def test_showme_resolve_no_credential_passes_none(
         headers=client.headers,
     )
     assert r.status_code == 200, r.text
-    assert r.json()["path"] == "answer.md"
+    assert set(r.json()) == {"metadata", "target", "description"}
+    assert r.json()["target"] == {"path": "answer.md"}
     assert r.json()["description"] == "the plan"
     assert r.json()["metadata"]["path"] == "answer.md"
     # No credential on the agent → resolver should receive None (the CLI
     # falls back to whatever host auth it finds).
     assert captured["credential"] is None
+
+
+async def test_showme_clarification_preserves_the_original_description(client, session_with_files, monkeypatch):
+    sid, _ = session_with_files
+    captured = await _patch_showme(monkeypatch, '{"message":"Which plan?"}')
+    description = "the plan from the reference notes"
+    response = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": description})
+
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"message": "Which plan?", "description": description}
+    assert captured["calls"] == 1
 
 
 async def test_showme_exact_path_does_not_require_model_authentication(client, session_with_files, monkeypatch):
@@ -1736,7 +2230,8 @@ async def test_showme_exact_path_does_not_require_model_authentication(client, s
     monkeypatch.setattr("server.harness.Harness.run_oneshot", forbidden_oneshot)
     direct = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "plan.md"})
     assert direct.status_code == 200, direct.text
-    assert direct.json()["path"] == "plan.md"
+    assert set(direct.json()) == {"metadata", "target"}
+    assert direct.json()["target"] == {"path": "plan.md"}
     assert history_reads == []
     inferred = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "the proposed plan"})
     assert inferred.status_code == 422
@@ -1793,7 +2288,7 @@ async def test_showme_inference_reads_last_twelve_total_rows_before_filtering(
     captured = await _patch_showme(monkeypatch)
     response = await client.post(f"/api/sessions/{sid}/showme/resolve", json=body)
     assert response.status_code == 200, response.text
-    assert response.json()["path"] == "answer.md"
+    assert response.json()["target"] == {"path": "answer.md"}
     assert response.json()["description"] == body["text"]
     assert loaded == [list(range(53, 65))]
     assert captured["calls"] == 1
@@ -1870,7 +2365,8 @@ async def test_showme_applies_current_file_authority_to_the_candidate(
         assert ("target" in resolve.json()) == (expected != 403)
         return
 
-    assert resolve.json()["path"] == path
+    assert set(resolve.json()) == {"metadata", "target", "description"}
+    assert resolve.json()["target"] == {"path": path}
     meta = resolve.json()["metadata"]
     assert meta["source"] == str(repo if "/" in candidate else cwd)
     assert meta["path"] == "plan.md"
@@ -1894,6 +2390,8 @@ async def test_showme_explicit_file_errors_skip_inference(
     client, session_with_files, monkeypatch, reference, status,
 ):
     sid, root = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    await session_manager.db.update_user_field(user_id, extra_roots=json.dumps([str(root)]))
     (root / "escape-link.md").symlink_to(root.parent / "outside.md")
     (root / ".md").write_text("literal dotfile")
     captured = await _patch_showme(monkeypatch)
@@ -1924,9 +2422,12 @@ async def test_showme_line_on_extensionless_file_keeps_a_standalone_path(
     result = response.json()
     assert result["target"] == {"path": command_path, "position": {"kind": "lines", "start": 12}}
     assert result["metadata"]["source"] == str(cwd)
-    legacy = await client.get(f"{base}/files", params={"path": result["path"]})
-    assert legacy.status_code == 200, legacy.text
-    assert legacy.text == "line\n" * 12
+    assert set(result) == {"metadata", "target"}
+    body = await client.get(f"{base}/files", params={
+        key: result["metadata"][key] for key in ("path", "source", "canonical_path_id")
+    })
+    assert body.status_code == 200, body.text
+    assert body.text == "line\n" * 12
 
 
 @pytest.mark.parametrize(("suffix", "position"), [
@@ -1947,7 +2448,7 @@ async def test_showme_quoted_filename_and_position_are_independent(client, sessi
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["path"] == filename
+    assert response.json()["metadata"]["path"] == filename
     assert response.json()["target"] == {"path": filename, "position": position}
 
 
@@ -1976,7 +2477,9 @@ async def test_showme_source_requires_a_quoted_path(client, session_with_files, 
 
 @pytest.mark.parametrize(("filename", "status"), [("~/中文 %23#计划.md", 404), ("../中文 %23#计划.md", 403)])
 async def test_showme_failed_file_target_can_be_edited(client, session_with_files, monkeypatch, filename, status):
-    sid, _ = session_with_files
+    sid, cwd = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    await session_manager.db.update_user_field(user_id, extra_roots=json.dumps([str(cwd)]))
     captured = await _patch_showme(monkeypatch)
     request = await client.post(
         f"/api/sessions/{sid}/showme/resolve", json={"text": f'{json.dumps(filename)}:12'},
@@ -1990,7 +2493,45 @@ async def test_showme_failed_file_target_can_be_edited(client, session_with_file
     assert captured == {}
 
 
-async def test_showme_legacy_paths_reopen_the_checked_sources(client, session_with_files, monkeypatch):
+async def test_reload_requires_original_source_without_selecting_it_again(client, session_with_files):
+    sid, cwd = session_with_files
+    user_id = session_manager.get_session(sid).user_id
+    narrow = cwd.parent / "narrow"
+    narrow.mkdir()
+    target = narrow / "report.md"
+    target.write_text("# Report")
+    alias = cwd / "alias.md"
+    alias.symlink_to(target)
+    resolve_url = f"/api/sessions/{sid}/showme/resolve"
+    metadata_url = f"/api/sessions/{sid}/files/meta"
+    await session_manager.db.update_user_field(user_id, extra_roots=json.dumps([str(cwd.parent), str(narrow)]))
+    command = {"text": "alias.md"}
+    opened = await client.post(resolve_url, json=command)
+    assert opened.status_code == 200, opened.text
+    assert opened.json()["metadata"]["source"] == str(narrow)
+    original_source = {"reload_source": str(narrow)}
+
+    alias.unlink()
+    alias.symlink_to(cwd / "plan.md")
+    moved = await client.post(resolve_url, params=original_source, json=command)
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["metadata"]["source"] == str(cwd)
+
+    alias.unlink()
+    alias.symlink_to(target)
+    await session_manager.db.update_user_field(user_id, extra_roots=json.dumps([str(cwd.parent)]))
+    revoked = await client.post(resolve_url, params=original_source, json=command)
+    assert revoked.status_code == 403, revoked.text
+    revoked_meta = await client.get(metadata_url, params={"path": str(target), **original_source})
+    assert revoked_meta.status_code == 403, revoked_meta.text
+    fresh = await client.post(resolve_url, json=command)
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["metadata"]["source"] == str(cwd.parent)
+
+
+async def test_showme_confirmation_binds_canonical_paths_and_resources_to_the_checked_sources(
+    client, session_with_files, monkeypatch,
+):
     sid, cwd = session_with_files
     db = session_manager.db
     user_id = session_manager.get_session(sid).user_id
@@ -2027,9 +2568,9 @@ async def test_showme_legacy_paths_reopen_the_checked_sources(client, session_wi
         ('"中文 %20#计划.md"', "中文 %20#计划.md", "# Literal", cwd),
         (str(cwd / "中文 %20#计划.md"), "中文 %20#计划.md", "# Literal", cwd),
         ("$(ignored).md", "$(ignored).md", "# Literal shell characters", cwd),
-        (str(workspace / "plan.md"), str(workspace / "plan.md"), "# Workspace", workspace),
-        (str(repo / "plan.md"), str(repo / "plan.md"), "# Repository", repo),
-        (str(repo / "alias.md"), str(repo / "alias.md"), "# Team plan\n\n![Diagram](../diagram.svg)", repo),
+        (str(workspace / "plan.md"), "plan.md", "# Workspace", workspace),
+        (str(repo / "plan.md"), "plan.md", "# Repository", repo),
+        (str(repo / "alias.md"), "team/plan.md", "# Team plan\n\n![Diagram](../diagram.svg)", repo),
         *((json.dumps(name, ensure_ascii=False), name, text, cwd) for name, text in literal_names.items()),
     ]
     for reference, expected_path, text, source in cases:
@@ -2037,14 +2578,18 @@ async def test_showme_legacy_paths_reopen_the_checked_sources(client, session_wi
         assert resolution.status_code == 200, resolution.text
         assert resolution.headers["cache-control"] == "no-store"
         result = resolution.json()
-        assert result["path"] == expected_path
-        meta = await client.get(f"{base}/files/meta", params={"path": result["path"]})
-        assert meta.json() == result["metadata"]
-        assert meta.json()["source"] == str(source)
-        body = await client.get(f"{base}/files", params={"path": result["path"]})
+        assert set(result) == {"metadata", "target"}
+        meta = result["metadata"]
+        assert meta["path"] == expected_path
+        assert meta["source"] == str(source)
+        checked = await client.get(f"{base}/files/meta", params={"path": meta["path"], "source": meta["source"]})
+        assert checked.json() == meta
+        body = await client.get(f"{base}/files", params={
+            key: meta[key] for key in ("path", "source", "canonical_path_id")
+        })
         assert body.status_code == 200 and body.text == text
         if reference == str(repo / "alias.md"):
-            folder = meta.json()["canonical_directory"]
+            folder = meta["canonical_directory"]
             resource = await client.get(f"{base}/files", params={
                 "path": "../diagram.svg", "source": str(source),
                 "source_directory": folder["path"], "source_directory_id": folder["path_id"],
@@ -2057,7 +2602,10 @@ async def test_showme_legacy_paths_reopen_the_checked_sources(client, session_wi
     assert reopened.status_code == 200, reopened.text
     assert reopened.json()["metadata"]["source"] == str(repo)
     assert reopened.json()["target"]["position"] == {"kind": "heading", "slug": "team-plan"}
-    reopened_body = await client.get(f"{base}/files", params={"path": reopened.json()["path"]})
+    reopened_meta = reopened.json()["metadata"]
+    reopened_body = await client.get(f"{base}/files", params={
+        key: reopened_meta[key] for key in ("path", "source", "canonical_path_id")
+    })
     assert reopened_body.text == "# Team plan\n\n![Diagram](../diagram.svg)"
 
     await db.update_user_field(user_id, extra_roots=json.dumps([str(cwd), str(team)]))

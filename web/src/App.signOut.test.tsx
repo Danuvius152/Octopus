@@ -23,31 +23,36 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   useSessionStore.getState().setToken("");
   jsdom.virtualConsole.off("jsdomError", observeNavigation);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
-async function clickSignOut() {
+async function beginSignOut() {
   fireEvent.keyDown(screen.getByRole("button", { name: "Account menu" }), { key: "Enter" });
-  fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }));
+  const signOut = await screen.findByRole("menuitem", { name: "Sign out" });
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  fireEvent.click(signOut);
 }
 
-type LogoutResult = "success" | "network error";
+type LogoutResult = "success" | "network error" | "server error";
 async function completeLogout(logout: ReturnType<typeof deferred<Response>>, result: LogoutResult) {
   await act(async () => {
-    if (result === "success") logout.resolve(new Response(null, { status: 204 }));
-    else logout.reject(new TypeError("Network failure"));
+    if (result === "network error") logout.reject(new TypeError("Network failure"));
+    else logout.resolve(new Response(null, { status: result === "success" ? 204 : 503 }));
   });
 }
 
 it.each([
   ["new-token", "success"],
   ["new-token", "network error"],
+  ["new-token", "timeout"],
   ["old-token", "success"],
   ["old-token", "network error"],
-] as const)("preserves the new login and draft for %s after the old logout returns %s", async (nextToken, result) => {
+  ["old-token", "timeout"],
+] as const)("preserves the new login and draft for %s when the old logout ends with %s", async (nextToken, result) => {
   const oldLogout = deferred<Response>();
   let revoked = false;
   let signedIn = false;
@@ -76,33 +81,36 @@ it.each([
   vi.stubGlobal("fetch", fetcher);
   render(<App />);
   await screen.findByText("Original account");
-  await clickSignOut();
-  expect(fetcher).toHaveBeenCalledWith(`${window.location.origin}/api/auth/logout`, {
-    method: "POST",
-    headers: { Authorization: "Bearer old-token" },
-    keepalive: true,
-  });
+  await beginSignOut();
 
-  fireEvent.focus(window);
-  fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "reader" } });
+  await act(async () => { fireEvent.focus(window); });
+  fireEvent.change(screen.getByLabelText("Username"), { target: { value: "reader" } });
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "secret" } });
-  fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
-  await screen.findByText("New account");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Sign in" })); });
+  expect(screen.getByText("New account")).toBeVisible();
 
   act(() => useSessionStore.getState().setActiveSessionId("new-chat"));
   fireEvent.change(screen.getByPlaceholderText("Send a message…"), { target: { value: "New draft" } });
   expect(screen.getByPlaceholderText("Send a message…")).toHaveValue("New draft");
 
-  await completeLogout(oldLogout, result);
+  if (result === "timeout") {
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    expect(screen.getByText("New account")).toBeVisible();
+    expect(screen.getByPlaceholderText("Send a message…")).toHaveValue("New draft");
+    await completeLogout(oldLogout, "network error");
+  } else {
+    await completeLogout(oldLogout, result);
+  }
 
   expect(screen.getByText("New account")).toBeVisible();
   expect(screen.getByPlaceholderText("Send a message…")).toHaveValue("New draft");
+  expect(localStorage.getItem("octopus_token")).toBe(nextToken);
   expect(navigate).not.toHaveBeenCalled();
 });
 
-it.each(["success", "network error"] as const)("signs out the current login after logout returns %s", async (result) => {
+it.each(["success", "network error", "server error", "timeout"] as const)("signs out the current login on %s", async (result) => {
   const logout = deferred<Response>();
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  const fetcher = vi.fn<typeof globalThis.fetch>(async (input) => {
     const { pathname } = new URL(String(input), window.location.origin);
     if (pathname === "/api/auth/logout") return logout.promise;
     if (pathname === "/api/auth/state") return Response.json({ accounts_exist: true });
@@ -111,15 +119,27 @@ it.each(["success", "network error"] as const)("signs out the current login afte
     }
     return Response.json([]);
   });
+  vi.stubGlobal("fetch", fetcher);
   render(<App />);
   await screen.findByText("Original account");
-  await clickSignOut();
+  await beginSignOut();
   expect(screen.getByText("Original account")).toBeVisible();
   expect(navigate).not.toHaveBeenCalled();
 
-  await completeLogout(logout, result);
+  if (result === "timeout") {
+    await act(() => vi.advanceTimersByTimeAsync(29_999));
+    expect(screen.getByText("Original account")).toBeVisible();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+  } else {
+    await completeLogout(logout, result);
+  }
 
-  expect(await screen.findByLabelText("Username")).toBeVisible();
+  expect(screen.getByLabelText("Username")).toBeVisible();
   expect(localStorage.getItem("octopus_token")).toBe("");
+  if (result === "timeout") await completeLogout(logout, "success");
   expect(navigate).toHaveBeenCalledTimes(1);
+  expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith("/api/auth/logout"))).toEqual([[
+    `${window.location.origin}/api/auth/logout`,
+    { method: "POST", headers: { Authorization: "Bearer old-token" }, keepalive: true },
+  ]]);
 });

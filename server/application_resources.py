@@ -33,6 +33,12 @@ class ApplicationResource:
     links: frozenset[Path]
 
 
+@dataclass(frozen=True)
+class ApplicationDataRecord:
+    app_dir: str
+    deleting: bool
+
+
 def application_access_links(stored: Path) -> frozenset[Path]:
     """Locate the link entries used by an application address at their physical parents."""
     links: set[Path] = set()

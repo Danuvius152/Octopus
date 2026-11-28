@@ -39,6 +39,7 @@ def session_info(
         "claude_session_id": get("claude_session_id"), "credential_id": get("credential_id"),
         "agent_id": get("agent_id"), "origin": get("origin") or "user", "backend": backend,
         "defaults_source": get("defaults_source", "agent"),
+        "configuration_version": get("configuration_version"),
         "has_inputs": bool(count or get("claude_session_id") or get("has_inputs") or has_inputs),
         "model": get("model"), "reasoning_effort": get("reasoning_effort"), "service_tier": get("service_tier"),
         "parent_session_id": get("parent_session_id"), "delegation_request": get("delegation_request"),

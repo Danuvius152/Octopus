@@ -283,15 +283,28 @@ authorities for actual directory access.
 ### Viewer file access
 
 The viewer accepts the original session's authorized working directory, the
-active account's workspace, and its current extra roots. A relative path uses
-the original working directory by default. A relative path with an explicit
-source, as in the file picker, uses that source. A relative document reference
-uses the document's checked parent directory within its source. Without an
-explicit source, an absolute path selects the working directory when it
-contains the path, then the most specific available grant. A working directory
-outside the account root requires a current extra-root grant. Saved roots
-must still be real directories. An unavailable root replaced by an alias
-cannot be reselected implicitly through an overlapping grant.
+active account's workspace and its current extra roots. Account login credentials
+can additionally select the account's registered application data directories.
+Application records must be available for reads, and their derived data roots
+must still resolve inside the account's managed applications directory. Agent and
+application runtime credentials keep their own grants. Directory listing, search,
+metadata and byte reads apply the same source admission. Application deletion or
+revocation removes that application's grant from later admissions. An independent
+grant or another readable application at the same root can still authorize it.
+If a parent remains authorized, a fresh absolute-path request can select that
+parent. A request bound to the removed source still requires that source.
+
+An implicit relative command starts at the session's authorized working directory
+and can select a current grant for the resolved destination. An absolute path
+selects a source from the supplied path before canonical resolution, preferring
+the working directory when it contains that path and otherwise the most specific
+grant. Its resolved target must stay within that source. A single leading
+backslash in a direct command can denote an absolute host path. Quoted paths
+preserve literal characters. An explicit source confines resolution to that root,
+and a relative document reference uses its checked parent within that source.
+A working directory outside the account root requires a current extra-root grant.
+A path through an unavailable root replaced by an alias is rejected before an
+overlapping grant can be selected.
 
 The server rechecks the original session binding, account and source when
 listing, reading metadata or serving bytes. Directory browsing lists the
@@ -299,12 +312,17 @@ selected directory. Filename search bounds the scan and results within the
 source. The metadata binds the selected source, canonical file path and parent
 directory identity. The picker can reuse the recorded parent identity to
 list files beside an open document. A replaced directory invalidates that
-binding.
+binding. Search scans up to 5,000 entries, returns up to 100 results and has a
+roughly 200 ms scan budget. Budget exhaustion marks the results as possibly partial.
 Markdown body and relative resources carry the applicable binding back to the
 server. File responses revalidate path, type and size and snapshot bytes from
-the same checked, opened file. Revocation applies to later admissions, while
-an admitted bounded read can finish. The exact name `.env` is accepted as
-text within the same authorization and size limits. File and metadata responses use
+the same checked, opened file. A target binding mismatch or a read shorter than
+the checked size returns `409 target_changed`. Ordinary content edits can be read
+with the same binding. A replaced source document parent returns
+`409 source_directory_changed`. Revocation
+applies to later admissions, while an admitted bounded read can finish. Metadata,
+preview and original-file reads accept up to 2 MiB, including `.env` as text under
+the same authorization. File and metadata responses use
 `Cache-Control: no-store`. The [viewer interaction](frontend-interaction-state.md#文件查看意图)
 owns rendering, navigation and recovery.
 
@@ -315,7 +333,9 @@ selected credential, and the identity of the original working directory. The
 process uses the checked directory handle. A returned candidate goes through
 the same file admission check. Candidates that use the original working
 directory must still match its identity. The viewer can offer another source
-if that directory has become unavailable. Context search adds no chat messages.
+if that directory has become unavailable. A `/showme` file result returns `metadata`
+and `target`, with `description` when found by description. A clarification returns
+`message` and `description`. Context search adds no chat messages.
 
 ### Attachment storage limits
 

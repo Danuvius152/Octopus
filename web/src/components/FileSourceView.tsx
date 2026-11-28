@@ -5,16 +5,35 @@ import { scrollSourceViewportTo, type ReportFilePosition } from "./fileReaderScr
 
 // Keep source rows and scroll height bounded independently of the file limit.
 const LINES_PER_SECTION = 2000;
+const OUTSIDE_SOURCE = "The requested lines are outside this file.";
 
 type LinePosition = Extract<FilePosition, { kind: "lines" }>;
+
+function sourceLineBreaks(raw: string) {
+  return raw.matchAll(/\r\n?|\n/g);
+}
+
+function hasSourceLine(raw: string, line: number) {
+  if (!raw.length) return false;
+  let current = 1;
+  for (const match of sourceLineBreaks(raw)) {
+    if (current === line) return true;
+    if (match.index + match[0].length === raw.length) break;
+    current++;
+  }
+  return current === line;
+}
+
+export function linePositionNote(raw: string, position: LinePosition) {
+  return hasSourceLine(raw, position.end ?? position.start) ? undefined : OUTSIDE_SOURCE;
+}
 
 function sourceLines(raw: string) {
   const text = raw.replace(/\r\n?/g, "\n");
   const starts = raw.length ? [0] : [];
   const rawStarts = raw.length === text.length ? starts : [0];
-  const newline = /\r\n?|\n/g;
   let removed = 0;
-  for (const match of raw.matchAll(newline)) {
+  for (const match of sourceLineBreaks(raw)) {
     const end = match.index + match[0].length;
     if (end === raw.length) break;
     removed += match[0].length - 1;
@@ -134,7 +153,7 @@ export function FileSourceView({ raw, highlight, language, position, onPosition,
 
   useLayoutEffect(() => {
     if (!position) return;
-    if (onPosition(located ? null : "The requested lines are outside this file.")) {
+    if (onPosition(located ? null : OUTSIDE_SOURCE)) {
       scrollSourceViewportTo(target.current);
     }
   }, [position, located, onPosition]);
