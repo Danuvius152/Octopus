@@ -1,4 +1,4 @@
-export type ReportFilePosition = (note: string | null) => boolean;
+export type ReportFilePosition = (note: string | null, footnoteId?: string) => boolean;
 
 function visibleTop(viewport: HTMLElement, top = viewport.getBoundingClientRect().top) {
   const sections = viewport.querySelector(".file-source-sections");

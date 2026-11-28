@@ -9436,6 +9436,8 @@ export interface operations {
                 source?: string;
                 directory?: string;
                 token?: string | null;
+                source_directory?: string | null;
+                source_directory_id?: string | null;
             };
             header?: never;
             path: {
@@ -9503,6 +9505,7 @@ export interface operations {
     resolve_showme_api_sessions__session_id__showme_resolve_post: {
         parameters: {
             query?: {
+                source?: string | null;
                 token?: string | null;
             };
             header?: never;

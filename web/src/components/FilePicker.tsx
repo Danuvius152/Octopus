@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { IconFile, IconFolder, IconX } from "@tabler/icons-react";
-import type { FilePickerResult, FilePickerSources } from "../api";
+import type { FilePickerResult, FilePickerSources, FileResourceDirectory } from "../api";
 import { accountFetch } from "../lib/accountFetch";
-import { isCurrentFileViewer, useSessionStore, type FileViewerIntent } from "../stores/sessionStore";
+import { isCurrentFileViewer, type FileViewerIntent, type FileViewerOptions } from "../stores/sessionStore";
+import type { PickerLocation } from "./fileViewerTabs";
 
-type PickerContext = { viewer: FileViewerIntent; token: string };
+type PickerContext = {
+  viewer: FileViewerIntent;
+  token: string;
+  initial?: PickerLocation;
+  onSelect: (path: string, options: FileViewerOptions) => void;
+};
 
 function pickerUrl(viewer: FileViewerIntent, endpoint: string, query: Record<string, string> = {}): string {
   return `${window.location.origin}/api/sessions/${encodeURIComponent(viewer.sessionId)}/files/${endpoint}?${new URLSearchParams(query)}`;
@@ -23,8 +29,9 @@ function usePickerRead<T>({ viewer, token }: PickerContext, url: string) {
         });
         if (!current()) return;
         if (!response.ok) {
-          const message = response.status === 403 ? "This file source is no longer available."
+          const message = response.status === 401 || response.status === 403 ? "This file source is no longer available."
             : response.status === 404 ? "This session or folder is no longer available."
+              : response.status === 409 ? "The document directory changed. Choose another folder or return to the file."
               : `Couldn't list files (HTTP ${response.status}).`;
           setRead({ error: message });
           return;
@@ -40,7 +47,7 @@ function usePickerRead<T>({ viewer, token }: PickerContext, url: string) {
   return read;
 }
 
-export function FilePicker({ onClose, ...context }: PickerContext & { onClose: () => void }) {
+export function FilePicker({ onClose, onCancel, ...context }: PickerContext & { onClose: () => void; onCancel: () => void }) {
   const [refresh, setRefresh] = useState(0);
   return (
     <>
@@ -52,6 +59,7 @@ export function FilePicker({ onClose, ...context }: PickerContext & { onClose: (
         <button type="button" className="text-sm underline" onClick={() => setRefresh(value => value + 1)}>
           Refresh sources
         </button>
+        <button type="button" className="text-sm underline" onClick={onCancel}>Cancel file picker</button>
         <button type="button" onClick={onClose} title="Close" aria-label="Close"
           className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground">
           <IconX size={18} />
@@ -70,14 +78,19 @@ function FilePickerSourceList(context: PickerContext) {
 }
 
 function FilePickerBrowser({ sources, ...context }: PickerContext & { sources: FilePickerSources }) {
-  const [source, setSource] = useState(sources.cwd ?? sources.roots[0]);
-  const [directory, setDirectory] = useState("");
+  const [location, setLocation] = useState(() => ({
+    source: context.initial?.source ?? sources.cwd ?? sources.roots[0],
+    directory: context.initial?.directory.path === "." ? "" : context.initial?.directory.path ?? "",
+    binding: context.initial?.directory,
+  }));
+  const { source, directory, binding } = location;
+  const sourceAvailable = source !== undefined && sources.roots.includes(source);
   const [query, setQuery] = useState("");
   const search = useRef<HTMLInputElement>(null);
   const segments = directory ? directory.split("/") : [];
   const visit = (path: string) => {
     search.current?.focus();
-    setDirectory(path);
+    setLocation({ source, directory: path, binding: undefined });
     setQuery("");
   };
 
@@ -92,15 +105,15 @@ function FilePickerBrowser({ sources, ...context }: PickerContext & { sources: F
             Source
             <select className="w-full rounded-md border border-border bg-background px-2 py-1 font-mono"
               value={source} title={source} onChange={event => {
-                setSource(event.currentTarget.value);
-                setDirectory("");
+                setLocation({ source: event.currentTarget.value, directory: "", binding: undefined });
               }}>
+              {!sourceAvailable && <option value={source} disabled>{source}</option>}
               {sources.roots.map(root => <option key={root} value={root}>{root}</option>)}
             </select>
           </label>
           <label className="flex min-w-0 flex-[1_1_12rem] flex-col gap-1">
             Search filenames
-            <input ref={search} type="search" value={query} onChange={event => setQuery(event.currentTarget.value)}
+            <input ref={search} type="search" value={query} disabled={!sourceAvailable} onChange={event => setQuery(event.currentTarget.value)}
               aria-describedby="file-picker-search-scope"
               className="w-full rounded-md border border-border bg-background px-2 py-1" />
           </label>
@@ -115,23 +128,27 @@ function FilePickerBrowser({ sources, ...context }: PickerContext & { sources: F
               : <button key={path} type="button" className="break-all underline" onClick={() => visit(path)}>{name}</button>;
           })}
         </nav>
-        <FilePickerEntries key={JSON.stringify([source, directory, query])} {...context}
-          source={source} directory={directory} query={query} visit={visit} />
+        {sourceAvailable ? <FilePickerEntries key={JSON.stringify([source, directory, query, binding?.path_id])} {...context}
+          source={source} directory={directory} binding={binding} query={query} visit={visit} />
+          : <p role="alert" className="px-5 py-3">This file source is no longer available.</p>}
       </>}
     </div>
   );
 }
 
-function FilePickerEntries({ source, directory, query, visit, ...context }: PickerContext & {
-  source: string; directory: string; query: string; visit: (path: string) => void;
+function FilePickerEntries({ source, directory, binding, query, visit, ...context }: PickerContext & {
+  source: string; directory: string; binding?: FileResourceDirectory; query: string; visit: (path: string) => void;
 }) {
+  const selectionBinding = query ? (context.initial?.source === source ? context.initial.directory : undefined) : binding;
   const url = query ? pickerUrl(context.viewer, "find", { source, query })
-    : pickerUrl(context.viewer, "browse", { source, directory });
+    : binding ? pickerUrl(context.viewer, "browse", {
+      source, source_directory: binding.path, source_directory_id: binding.path_id,
+    }) : pickerUrl(context.viewer, "browse", { source, directory });
   const read = usePickerRead<FilePickerResult>(context, url);
-  const select = (path: string) => {
+  const select = (path: string, sourceDirectory?: FileResourceDirectory) => {
     if (!isCurrentFileViewer(context.viewer)) return;
     const target = path.startsWith("~") || !path.trim() ? `./${path}` : path;
-    useSessionStore.getState().openViewer(context.viewer.sessionId, target, { source });
+    context.onSelect(target, { source, sourceDirectory });
   };
   if (!read) return <p role="status" className="px-5 py-3">{query ? "Searching…" : "Loading folder…"}</p>;
   if ("error" in read) return <p role="alert" className="px-5 py-3">{read.error}</p>;
@@ -149,14 +166,16 @@ function FilePickerEntries({ source, directory, query, visit, ...context }: Pick
           {entries.map(entry => {
             const folder = entry.kind === "directory";
             const Icon = folder ? IconFolder : IconFile;
+            const parent = entry.path.slice(0, -entry.name.length - 1) || ".";
+            const sourceDirectory = selectionBinding?.path === parent ? selectionBinding : undefined;
             return <li key={entry.path}>
               <button type="button" className="flex w-full items-start gap-2 rounded-md px-2 py-2 text-left hover:bg-accent"
-                onClick={() => folder ? visit(entry.path) : select(entry.path)}>
+                onClick={() => folder ? visit(entry.path) : select(sourceDirectory ? entry.name : entry.path, sourceDirectory)}>
                 <Icon size={16} className="mt-0.5 shrink-0 text-muted-foreground" aria-hidden />
                 <span className="min-w-0 font-mono">
                   <span className="block whitespace-pre-wrap break-all">{entry.name}</span>
                   {query && <span className="block whitespace-pre-wrap break-all text-xs text-muted-foreground">
-                    {entry.path.slice(0, -entry.name.length - 1) || "."}
+                    {parent}
                   </span>}
                 </span>
               </button>

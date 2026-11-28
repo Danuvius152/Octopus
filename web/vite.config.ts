@@ -6,6 +6,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitestEvidence } from './tests/vitestEvidence'
 import { OFFLINE_VITE_HMR_PATH } from './e2e/vite-hmr'
+import { pdfjsAssets } from './pdfjs-assets'
 
 const apiTarget = `http://localhost:${process.env.OCTOPUS_API_PORT || '8000'}`
 const evidenceDirectory = process.env.OCTOPUS_VITEST_EVIDENCE_DIR
@@ -21,7 +22,7 @@ const evidencePlugin: Plugin | undefined = evidence && {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), pdfjsAssets()],
   // Two dev servers run at once during e2e (playwright.config.ts: one proxying
   // to the shared backend, one to the accounts backend). They share this
   // project, so they share `node_modules/.vite` — and each one's dependency
@@ -30,9 +31,9 @@ export default defineConfig({
   // way instead of 45 seconds. A cache dir per server costs nothing and ends
   // it.
   cacheDir: process.env.VITE_CACHE_DIR || undefined,
-  // The lazy source worker is outside the initial dependency scan. Prepare
-  // its dependency up front so the first source view doesn't reload open tabs.
-  optimizeDeps: { include: ['highlight.js'] },
+  // Prepare dependencies for the lazy source and PDF readers so first use
+  // doesn't reload open tabs during development.
+  optimizeDeps: { include: ['highlight.js', 'pdfjs-dist/legacy/build/pdf.mjs'] },
   server: {
     ...(process.env.OCTOPUS_E2E_MODE === 'offline' && { hmr: { path: OFFLINE_VITE_HMR_PATH } }),
     // Worktrees reuse installed dependencies; font URLs resolve to that

@@ -35,6 +35,13 @@ uncertain operations. A later explicit user request establishes a new execution.
 <a id="51-forking-from-the-browser"></a>
 ### Forking from the browser
 
+The rewind chooser reads older history using the server's `before_seq` cursor
+and deduplicates candidates by message sequence. Pages with no eligible user
+messages can still have earlier history. A page failure leaves loaded choices
+available and offers a retry at the same cursor. The final empty state follows
+successful exhaustion. The history completeness check still guards rewind;
+launching it from a specific message opens confirmation for that target.
+
 `POST /api/sessions/{id}/fork` selects `rewind_to_msg_seq=M`, optional
 `revert_files` and an optional label. The server validates that M exists and is
 a user message, including M=0. The new conversation copies only `seq < M`; the

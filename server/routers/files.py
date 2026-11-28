@@ -210,11 +210,12 @@ async def _listing_until_disconnect(
 @router.get("/{session_id}/files/browse")
 async def browse_viewer_source(
     session_manager: SessionMgr, session_id: str, token: ViewerToken, request: Request, response: Response,
-    source: str = "", directory: str = "",
+    source_directory: SourceDirectory, source: str = "", directory: str = "",
 ) -> FilePickerResult:
     response.headers.update(_NO_STORE)
     return await _listing_until_disconnect(request, session_manager, session_id, token, partial(
-        browse_files, source=source, directory=directory, check_cancelled=from_thread.check_cancelled,
+        browse_files, source=source, directory=directory, source_directory=source_directory,
+        check_cancelled=from_thread.check_cancelled,
     ))
 
 
@@ -300,6 +301,7 @@ async def resolve_showme(
     response: Response,
     token: ViewerToken,
     user_id: ViewerUser = None,
+    source: str | None = None,
 ) -> ShowMeResolveResponse | JSONResponse:
     """Check an explicit path or ask the session's model about a description."""
     response.headers.update(_NO_STORE)
@@ -311,6 +313,8 @@ async def resolve_showme(
         await _working_dir_for(session_manager, session_id, user_id)
         raise HTTPException(422, str(error), headers=_NO_STORE) from error
     if direct is not None:
+        if source is not None and direct.source is None:
+            direct = replace(direct, source=source)
         return await _resolve_showme_file(session_manager, session_id, token, direct)
     return await _resolve_showme_description(session_manager, session_id, token, user_id, req.text)
 

@@ -110,6 +110,7 @@ ALLOWLISTED_BARE_NAMES = {
     "notice",
     "changelog",
     "authors",
+    ".env",
     ".gitignore",
     ".dockerignore",
     ".editorconfig",
@@ -386,16 +387,28 @@ class FilePickerResult:
 
 
 @contextmanager
-def _picker_directory(root: Path, root_fd: int, relative: Path) -> Iterator[Iterator[os.DirEntry[str]]]:
-    with _directory_fd(relative, root_fd=root_fd) as fd:
-        expected = root / relative
-        if not _has_path(fd, expected):
-            raise PathRejected(_SOURCE_UNAVAILABLE)
+def _picker_directory(
+    root: Path, root_fd: int, relative: Path, source_directory: ResourceDirectory | None = None,
+) -> Iterator[Iterator[os.DirEntry[str]]]:
+    with ExitStack() as stack:
+        if source_directory is None:
+            expected = root / relative
+            fd = stack.enter_context(_directory_fd(relative, root_fd=root_fd))
+        else:
+            expected, fd = stack.enter_context(_document_directory(root, root_fd, source_directory))
+        def check_directory() -> None:
+            if not _has_path(fd, expected):
+                if source_directory is not None:
+                    raise DocumentDirectoryChanged(_DOCUMENT_DIRECTORY_CHANGED)
+                raise PathRejected(_SOURCE_UNAVAILABLE)
+
+        check_directory()
         # The descriptor was opened without following any directory symlinks.
         with os.scandir(_fd_path(fd)) as entries:
             yield entries
-        if not _has_path(fd, expected) or not _has_path(root_fd, root):
+        if not _has_path(root_fd, root):
             raise PathRejected(_SOURCE_UNAVAILABLE)
+        check_directory()
 
 
 def _picker_entry(parent: Path, entry: os.DirEntry[str]) -> FilePickerEntry | None:
@@ -410,15 +423,19 @@ def _picker_entry(parent: Path, entry: os.DirEntry[str]) -> FilePickerEntry | No
     return None
 
 
-def browse_files(sources: FileSources, source: str, directory: str, check_cancelled: Callable[[], None]) -> FilePickerResult:
+def browse_files(
+    sources: FileSources, source: str, directory: str, check_cancelled: Callable[[], None],
+    *, source_directory: ResourceDirectory | None = None,
+) -> FilePickerResult:
     root = sources.select(Path(), source, bound_to_cwd=False)
+    directory = source_directory.path if source_directory is not None else directory
     relative = Path(directory)
     if relative.is_absolute() or ".." in relative.parts or "\0" in directory:
         raise PathRejected("Invalid directory path.")
     entries = []
     skipped = False
     try:
-        with _directory_fd(root) as root_fd, _picker_directory(root, root_fd, relative) as children:
+        with _directory_fd(root) as root_fd, _picker_directory(root, root_fd, relative, source_directory) as children:
             for child in children:
                 check_cancelled()
                 item = _picker_entry(relative, child)

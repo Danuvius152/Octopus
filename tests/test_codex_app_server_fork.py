@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from server.harness import get_harness
+from server.codex_login import codex_home_for
+from server.harness import codex_app_server, get_harness
 from server.harness.codex import _cleanup_legacy_fork
 from server.sessions import ForkError, SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
@@ -52,6 +53,17 @@ async def fork_source(native_runtime, tmp_path, monkeypatch):
     (tmp_path / "native-injections.jsonl").unlink()
     mode[0] = "normal"
     return (*native_runtime[:2], parent, *native_runtime[3:]), receipt
+
+
+async def leave_fork_initializing(manager, database, parent, monkeypatch):
+    async def fail_install(*args):
+        raise OSError("Lost final product installation")
+
+    monkeypatch.setattr(database, "finish_full_copy_fork", fail_install)
+    with pytest.raises(OSError, match="Lost final product installation"):
+        await manager.duplicate_session(parent.id, user_id=parent.user_id)
+    row, = await database.load_incomplete_forks()
+    return row
 
 
 async def test_rewind_at_steer_uses_product_seq_and_keeps_native_sources(native_runtime, tmp_path):
@@ -163,7 +175,8 @@ async def test_full_fork_copies_history_with_bad_agent_tools_but_refuses_new_inp
     assert (tmp_path / "native-business.jsonl").read_bytes() == before
 
 
-async def test_native_fork_rechecks_binding_before_writing_the_history_request(fork_source, tmp_path, monkeypatch):
+@pytest.mark.parametrize("same_home", [True, False], ids=["original-home", "changed-home"])
+async def test_native_fork_rechecks_binding_before_writing_the_history_request(fork_source, tmp_path, monkeypatch, same_home):
     runtime, _ = fork_source
     manager, database, parent, _, _, _ = runtime
     update = database.update_session_field
@@ -203,18 +216,27 @@ async def test_native_fork_rechecks_binding_before_writing_the_history_request(f
     assert json.loads(pending["fork_metadata"])["native_fork"]["phase"] == "not_sent"
     copy.unlink()
     (tmp_path / "displaced").rename(copy)
+    if not same_home:
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "other-home"))
     recovered = SessionManager()
     try:
         await recovered.initialize(database)
-        assert not await database.load_incomplete_forks()
-        assert not copy.exists()
+        assert bool(await database.load_incomplete_forks()) is not same_home
+        assert copy.exists() is not same_home
         assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
     finally:
         await recovered.close_session_owners()
 
 
-@pytest.mark.parametrize("failure", ["fork_lost_ack", "fork_error_after_creation", "fork_wrong_identity"])
-async def test_unknown_creation_keeps_saga_and_never_deletes_the_hint(fork_source, tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize(("failure", "blank_metadata"), [
+    ("fork_lost_ack", False),
+    ("fork_error_after_creation", False),
+    ("fork_wrong_identity", False),
+    pytest.param("fork_lost_ack", True, id="lost-ack-empty-metadata"),
+])
+async def test_unknown_creation_keeps_saga_and_never_deletes_the_hint(
+    fork_source, tmp_path, monkeypatch, failure, blank_metadata,
+):
     runtime, _ = fork_source
     manager, database, parent, mode, _, _ = runtime
     mode[0] = failure
@@ -223,13 +245,24 @@ async def test_unknown_creation_keeps_saga_and_never_deletes_the_hint(fork_sourc
     row, = await database.load_incomplete_forks()
     artifact = json.loads(row["fork_metadata"])["native_fork"]
     assert artifact["phase"] == "unknown" and row["resume_id"] is None
-    assert (tmp_path / "actual-native-fork.jsonl").exists()
+    copied_rollout = tmp_path / "actual-native-fork.jsonl"
+    assert copied_rollout.exists()
     assert manager.get_session(row["id"]) is None
-    # Current selection must not turn an unknown native artifact into a
-    # legacy hint-based file deletion at the next service entry.
-    select_legacy_cleanup(monkeypatch)
-    await manager._recover_incomplete_forks()
-    assert len(await database.load_incomplete_forks()) == 1
+    if blank_metadata:
+        await database.update_session_field(row["id"], fork_metadata="")
+    else:
+        # Changing strategies must still use the saved unknown checkpoint.
+        select_legacy_cleanup(monkeypatch)
+    await manager.close_session_owners()
+    cold = SessionManager()
+    try:
+        await cold.initialize(database)
+        retained, = await database.load_incomplete_forks()
+        assert retained["id"] == row["id"]
+        assert retained["fork_metadata"] == ("" if blank_metadata else row["fork_metadata"])
+        assert Path(row["working_dir"]).is_dir() and copied_rollout.exists()
+    finally:
+        await cold.close_session_owners()
     assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
     assert len([frame for frame in wire_frames(tmp_path) if frame.get("method") == "thread/fork"]) == 1
     assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1
@@ -315,6 +348,109 @@ async def test_restart_cleans_only_acknowledged_artifact_using_saved_strategy(fo
     assert (tmp_path / "native-history.jsonl").exists()
     assert {frame["params"]["threadId"] for frame in wire_frames(tmp_path) if frame.get("method") == "thread/delete"} == {"actual-native-fork"}
     assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("login", ["host", "named", "legacy-host"])
+async def test_cold_cleanup_uses_the_original_login_after_agent_switch(fork_source, tmp_path, monkeypatch, login):
+    runtime, _ = fork_source
+    manager, database, parent, _, _, _ = runtime
+    source = tmp_path / "native-history.jsonl"
+    transcript = source.read_bytes()
+    original_id = "original-login" if login == "named" else None
+    original_home = tmp_path
+    if original_id is not None:
+        await database.save_credential(original_id, "codex", "Original login", "oauth", "", "now", user_id=parent.user_id)
+        await database.update_agent(parent.agent_id, credential_id=original_id)
+        original_home = Path(codex_home_for(original_id))
+        original_home.mkdir(parents=True)
+        (original_home / source.name).write_bytes(transcript)
+    build_argv = codex_app_server.build_argv
+
+    def use_selected_store(context):
+        argv, kwargs = build_argv(context)
+        home = context.credential.home_dir if context.credential is not None else str(tmp_path)
+        argv[3] = home
+        kwargs["env"]["CODEX_HOME"] = home
+        return argv, kwargs
+
+    monkeypatch.setattr(codex_app_server, "build_argv", use_selected_store)
+
+    row = await leave_fork_initializing(manager, database, parent, monkeypatch)
+    original_artifact = original_home / "actual-native-fork.jsonl"
+    assert original_artifact.is_file() and Path(row["working_dir"]).is_dir()
+    metadata = json.loads(row["fork_metadata"])
+    if login == "legacy-host":
+        metadata.pop("cleanup_credential_id", None)
+        await database.update_session_field(row["id"], fork_metadata=json.dumps(metadata))
+
+    await database.save_credential("new-login", "codex", "New login", "oauth", "", "now", user_id=parent.user_id)
+    await database.update_agent(parent.agent_id, credential_id="new-login")
+    new_home = Path(codex_home_for("new-login"))
+    new_home.mkdir(parents=True)
+    unrelated = new_home / original_artifact.name
+    unrelated.write_bytes(b"Unrelated history with the same name")
+
+    await manager.close_session_owners()
+    cold = SessionManager()
+    try:
+        await cold.initialize(database)
+        assert not await database.load_incomplete_forks()
+        assert not original_artifact.exists() and not Path(row["working_dir"]).exists()
+        assert cold.get_session(parent.id, parent.user_id).claude_session_id == ROOT
+    finally:
+        await cold.close_session_owners()
+    if login != "legacy-host":
+        assert metadata["cleanup_credential_id"] == original_id
+    assert source.read_bytes() == (original_home / source.name).read_bytes() == transcript
+    assert unrelated.read_bytes() == b"Unrelated history with the same name"
+    assert [frame["params"]["threadId"] for frame in wire_frames(original_home)
+            if frame.get("method") == "thread/delete"] == ["actual-native-fork"]
+    assert not (new_home / "native-frames.jsonl").exists()
+
+
+@pytest.mark.parametrize("fault", [
+    "missing-credential", "invalid-pin", "legacy-foreign-home", "foreign-home", "source-thread", "changed-path", "changed-cwd",
+])
+async def test_cold_cleanup_retains_fork_when_its_store_or_artifact_cannot_be_verified(
+    fork_source, tmp_path, monkeypatch, fault,
+):
+    runtime, _ = fork_source
+    manager, database, parent, _, _, _ = runtime
+
+    row = await leave_fork_initializing(manager, database, parent, monkeypatch)
+    metadata = json.loads(row["fork_metadata"])
+    artifact = metadata["native_fork"]
+    copied = Path(artifact["path"])
+    source = tmp_path / "native-history.jsonl"
+    original_contents, copied_contents = source.read_bytes(), copied.read_bytes()
+    if fault == "missing-credential":
+        metadata["cleanup_credential_id"] = "removed-login"
+    elif fault == "invalid-pin":
+        metadata["cleanup_credential_id"] = ""
+    elif fault in {"legacy-foreign-home", "foreign-home"}:
+        if fault == "legacy-foreign-home":
+            del metadata["cleanup_credential_id"]
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "other-home"))
+    elif fault == "source-thread":
+        artifact["thread_id"] = ROOT
+        artifact["path"] = str(source)
+    elif fault == "changed-path":
+        artifact["path"] = str(tmp_path / "other-history.jsonl")
+    elif fault == "changed-cwd":
+        copied.with_suffix(".cwd").write_text(parent.working_dir)
+    await database.update_session_field(row["id"], fork_metadata=json.dumps(metadata))
+
+    await manager.close_session_owners()
+    cold = SessionManager()
+    try:
+        await cold.initialize(database)
+        retained, = await database.load_incomplete_forks()
+        assert retained["id"] == row["id"]
+        assert Path(row["working_dir"]).is_dir()
+        assert source.read_bytes() == original_contents and copied.read_bytes() == copied_contents
+        assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
+    finally:
+        await cold.close_session_owners()
 
 
 @pytest.mark.parametrize("missing_is_proven", [False, True])

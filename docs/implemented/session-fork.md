@@ -131,9 +131,13 @@ can change while the copy is in progress.
      base alone is no deletion permission: a rewind can borrow a ready parent's
      directory there. The sweep resolves the saved credential for native cleanup.
      API creation additionally checkpoints unknown before write and the actual
-     returned ID/path before subsequent work. Recovery uses that saved strategy,
-     home and fork-time credential. An unknown artifact retains row and cwd for
-     inspection; it is never deleted by the old hint. The original Owner also
+     returned ID/path before subsequent work. Recovery uses the saved strategy,
+     home and fork-time credential binding. For Codex, an explicit null in
+     [storage metadata](current-storage-format.md#json-facts-and-unknown-values) selects the host
+     login. For an older native checkpoint without that key, the saved session
+     binding or host login must match the checkpoint's home before cleanup.
+     Recovery retains the row and working directory when creation or store
+     identity remains unconfirmed. The original Owner also
      supervises recovery hosts for noninstalled initializing rows.
      ACK alone leaves `cleanup_allowed` closed. Trusted, confirmed host retirement
      grants that qualification; a new management operation closes it before

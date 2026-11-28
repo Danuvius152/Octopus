@@ -127,25 +127,23 @@ class ForkingMixin(SessionManagerBase):
                 recovery = None
                 try:
                     harness = get_harness(row["backend"])
-                    # Codex needs the credential to find its CODEX_HOME rollout
-                    # store; Claude ignores it. Prefer the FORK-TIME effective
-                    # credential pinned in fork_metadata (so an agent whose
-                    # credential changed after the fork doesn't send cleanup to
-                    # the wrong CODEX_HOME); else fall back to the
-                    # row's credential_id, else its agent's. require_auth=False
-                    # so a since-revoked login still yields its home dir.
-                    eff_cred_id = None
-                    if row.get("fork_metadata"):
-                        try:
-                            eff_cred_id = json.loads(
-                                row["fork_metadata"]
-                            ).get("cleanup_credential_id")
-                        except (json.JSONDecodeError, AttributeError):
-                            eff_cred_id = None
-                    if not eff_cred_id:
-                        eff_cred_id = row.get("credential_id")
-                    if not eff_cred_id and row["defaults_source"] == "agent" and row.get("agent_id"):
+                    saved_metadata = row["fork_metadata"]
+                    metadata = {} if saved_metadata is None else json.loads(saved_metadata)
+                    if not isinstance(metadata, dict):
+                        raise ValueError("Malformed fork metadata; retain recovery material")
+                    artifact = read_fork_checkpoint(metadata["native_fork"]) if "native_fork" in metadata else None
+                    eff_cred_id = row.get("credential_id")
+                    if "cleanup_credential_id" in metadata:
+                        # A saved null identifies the host login.
+                        eff_cred_id = metadata["cleanup_credential_id"]
+                        if eff_cred_id is not None and (not isinstance(eff_cred_id, str) or not eff_cred_id):
+                            raise ValueError("Malformed fork cleanup credential; retain recovery material")
+                    elif artifact is None and not eff_cred_id and row["defaults_source"] == "agent" and row.get("agent_id"):
+                        # Saved pre-native copies still use the legacy lookup.
                         eff_cred_id = await self.db.get_agent_credential_id(row["agent_id"], row.get("user_id"))
+                    # For an unpinned native fork, the adapter must corroborate
+                    # the saved session binding or the host against its checkpoint.
+                    # Artifact lookup can use an owned binding whose login has lapsed.
                     cred = await self.resolve_credential_by_id(
                         eff_cred_id,
                         backend=harness.profile.backend,
@@ -153,11 +151,8 @@ class ForkingMixin(SessionManagerBase):
                         require_auth=False,
                         user_id=row.get("user_id"),
                     )
-                    metadata = json.loads(row["fork_metadata"]) if row.get("fork_metadata") else {}
-                    artifact = None
                     hooks = None
-                    if "native_fork" in metadata:
-                        artifact = read_fork_checkpoint(metadata["native_fork"])
+                    if artifact is not None:
                         recovery = Session(id=fork_id, name="Incomplete fork cleanup", working_dir=row["working_dir"],
                             backend=row["backend"], user_id=row["user_id"], agent_id=row["agent_id"],
                             origin="fork", fork_status="initializing")
@@ -705,16 +700,14 @@ class ForkingMixin(SessionManagerBase):
             # failure: `full_copy`/`duplicated_from` drive the UI, and
             # `cleanup_credential_id` pins the FORK-TIME effective credential so
             # the startup sweep finds the right CODEX_HOME even if the agent's
-            # credential later changes. Omitted when there's none.
+            # credential later changes. For directory-backed credentials, null
+            # records the host login.
             creation = uuid.uuid4().hex
             fork_meta_dict: dict[str, Any] = {
                 "full_copy": True, "duplicated_from": parent.name,
                 "copy_layout": location.layout, "copy_creation": creation, "copy_delivery_pending": True,
             }
-            # Pin only when the backend has a per-credential on-disk store to
-            # clean up (parent_cred resolved → home_dir-style, i.e. Codex);
-            # Claude's transcript isn't credential-scoped, so no pin.
-            if eff_cred_id and parent_cred is not None:
+            if harness.profile.credential_style == "home_dir":
                 fork_meta_dict["cleanup_credential_id"] = eff_cred_id
             fork_meta = json.dumps(fork_meta_dict)
             # 1. Commit recovery responsibility before any directory copy.

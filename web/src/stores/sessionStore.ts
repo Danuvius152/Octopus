@@ -47,7 +47,8 @@ export interface FileViewerIntent {
   accountGeneration: number;
   foregroundSessionId: string | null;
   foregroundView: MainView;
-  position?: FilePosition;
+  // Omitted uses the command's position. Null clears it on reload.
+  position?: FilePosition | null;
   source?: string;
   sourceDirectory?: FileResourceDirectory;
 }

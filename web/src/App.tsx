@@ -62,36 +62,27 @@ function AuthenticatedApp() {
   const sidebarOpen = useSessionStore((s) => s.sidebarOpen);
   const setSidebarOpen = useSessionStore((s) => s.setSidebarOpen);
   const connected = useSessionStore((s) => s.connected);
-  const setToken = useSessionStore((s) => s.setToken);
   const mainView = useSessionStore((s) => s.mainView);
   const sidebarCollapsed = useSessionStore((s) => s.sidebarCollapsed);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
 
   const signOut = async () => {
-    // Hand the bearer back before forgetting it — a token the server still
-    // honours is one whoever finds it can use (multi-tenancy.md §3).
-    //
-    // Awaited, not fired and forgotten: `location.reload()` tears the document
-    // down, and an in-flight request goes with it. Sign-out would then revoke
-    // the token or not depending on which won, which is not a property a
-    // credential may have. `keepalive` covers the case where the browser
-    // unloads us anyway. Failure is survivable — the install's own token has
-    // nothing to revoke, and an unreachable server must not trap anybody on a
-    // signed-in screen — so we sign out locally either way.
-    const bearer = useSessionStore.getState().token;
-    if (bearer) {
-      try {
-        await fetch(`${window.location.origin}/api/auth/logout`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${bearer}` },
-          keepalive: true,
-        });
-      } catch {
-        // Signed out here regardless; see above.
-      }
+    const { token: bearer, accountGeneration } = useSessionStore.getState();
+    if (!bearer) return;
+    try {
+      // Give the server a chance to revoke the original bearer before unload.
+      await fetch(`${window.location.origin}/api/auth/logout`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bearer}` },
+        keepalive: true,
+      });
+    } catch {
+      // The original login can still sign out locally when the server is unreachable.
     }
-    setToken("");
+    const current = useSessionStore.getState();
+    if (current.token !== bearer || current.accountGeneration !== accountGeneration) return;
+    current.setToken("");
     window.location.reload();
   };
   const toggleSidebar = () => setSidebarOpen(!sidebarOpen);

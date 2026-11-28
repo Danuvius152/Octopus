@@ -57,6 +57,10 @@ The rows remain the persistent authority; there is no second resource registry.
   (`<script src>`, `<link href>`, `fetch`) have to authenticate too. The SPA
   sets it (same-origin, `path=/apps`) right before mounting the iframe.
 
+Static reads return `404` for a path containing a NUL byte, including an
+existing entrypoint with that value. The application metadata remains readable
+so the owner can repair the entrypoint through PATCH.
+
 The iframe is sandboxed with `allow-scripts allow-same-origin allow-forms
 allow-popups allow-modals allow-downloads`. `allow-same-origin` is deliberate:
 without it the app gets an opaque origin and `localStorage` throws, which
@@ -213,6 +217,10 @@ as database state; a correct row alone does not prove notification ordering.
 | `POST /api/applications/{id}/build` | another build turn (`{prompt}`) |
 | `DELETE /api/applications/{id}` | close admission, retire original work, process files, then remove the row; `keep_files=true` skips only file removal |
 | `GET /apps/{id}/{path}` | the app itself (cookie/bearer/query auth) |
+
+Create and update validate the entrypoint as a relative path before writing
+the application or starting build work. A malformed value, including an
+embedded NUL byte, returns `400`.
 
 Creation returns the stored row at its final read, including any deletion
 marker. If the created row has already been removed, the POST returns

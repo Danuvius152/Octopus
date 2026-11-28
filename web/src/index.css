@@ -450,7 +450,7 @@ body {
   outline-offset: 2px;
 }
 
-.chat-file-link {
+.markdown-file-link {
   display: inline-flex;
   align-items: baseline;
   vertical-align: baseline;
@@ -469,21 +469,21 @@ body {
   user-select: text;
 }
 
-.chat-file-link:hover {
+.markdown-file-link:hover {
   background: hsl(var(--primary) / 0.15);
 }
 
-.chat-file-link:focus-visible {
+.markdown-file-link:focus-visible {
   outline: 2px solid hsl(var(--primary));
   outline-offset: 2px;
 }
 
-.chat-file-link > svg {
+.markdown-file-link > svg {
   flex: none;
   align-self: center;
 }
 
-.chat-file-link [data-file-position] {
+.markdown-file-link [data-file-position] {
   flex: none;
   max-inline-size: 50%;
   overflow: hidden;
@@ -495,7 +495,7 @@ body {
   white-space: nowrap;
 }
 
-.chat-file-link [data-file-position]::before {
+.markdown-file-link [data-file-position]::before {
   content: attr(data-file-position);
 }
 

@@ -50,6 +50,7 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
   const [started, setStarted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [unconfirmed, setUnconfirmed] = useState(false);
+  const [unconfirmedFields, setUnconfirmedFields] = useState<ReadonlySet<keyof Draft>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
   const write = useRef(false);
   const foreground = useRef(false);
@@ -97,9 +98,9 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
   const [showSignIn, setShowSignIn] = useState(false);
   const startNew = switching && (started || session.has_inputs || (session.message_count ?? 0) > 0 ||
     Boolean(session.claude_session_id) || session.status === "running");
-  const changes = Object.fromEntries(fields
-    .filter((field) => switching || (draft[field] ?? null) !== (initial[field] ?? null))
-    .map((field) => [field, draft[field] ?? null]));
+  const fieldsToSave = fields.filter((field) => switching || unconfirmedFields.has(field) ||
+    (draft[field] ?? null) !== (initial[field] ?? null));
+  const changes = Object.fromEntries(fieldsToSave.map((field) => [field, draft[field] ?? null]));
   const model = draft.model || defaults?.model;
   const selectedModel = modelOption(catalog, model);
   const efforts = selectedModel?.reasoning_efforts ?? catalog?.reasoning_efforts;
@@ -123,12 +124,15 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
   const options = ([...new Set([initialBackend, ...knownEngines])] as BackendKind[]).sort();
 
   const apply = async () => {
-    if (!foreground.current || write.current || unconfirmed || modelUnconfirmed || !Object.keys(changes).length) return;
+    if (!foreground.current || write.current || unconfirmed || modelUnconfirmed || !fieldsToSave.length) return;
     const observation = sessionList.capture();
     const deadline = new ArchiveDeadline();
     write.current = true;
     setBusy(true);
     setError(null);
+    // A refresh may precede the PATCH commit. Record the submitted fields before
+    // observing the reply so returning to an opening value remains saveable.
+    if (!switching) setUnconfirmedFields(new Set(fieldsToSave));
     let created: SessionInfo | null = null;
     try {
       const updated = await deadline.wait((async () => {
@@ -141,26 +145,30 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
             : { ...changes, ...(switching ? { backend } : {}), expected_backend: initialBackend }),
         });
         if (!res.ok) {
-          if (startNew && (res.status >= 500 || res.status === 408)) throw new Error("Creation could not be confirmed.");
-          return { error: (await res.json().catch(() => ({}))).detail, status: res.status };
+          const unknown = res.status >= 500 || res.status === 408;
+          if (startNew && unknown) throw new Error("Creation could not be confirmed.");
+          const detail = (await res.json().catch(() => ({}))).detail;
+          return { ok: false as const, detail, status: res.status, unknown };
         }
         const row = await res.json() as SessionInfo;
         if (!row?.id) throw new Error("Invalid conversation response.");
-        return { row };
+        return { ok: true as const, row };
       })());
       deadline.finish();
       if (!updated) throw new Error("Saving conversation settings could not be confirmed.");
       if (!sessionList.accountCurrent(observation)) return;
-      if ("error" in updated) {
-        const detail = updated.error;
-        if (foreground.current && sessionList.current(observation)) {
-          if (detail?.code === "conversation_started") setStarted(true);
-          if (detail?.code === "engine_changed") {
-            setUnconfirmed(true);
-            void loadSessionSnapshots(session.id, { fresh: true }).catch(() => {});
-          }
-          setError(typeof detail === "string" ? detail : detail?.message ?? `Could not save settings (HTTP ${updated.status}).`);
+      if (!updated.ok) {
+        if (!foreground.current || !sessionList.current(observation)) return;
+        const { detail } = updated;
+        const message = typeof detail === "string" ? detail : detail?.message ?? `Could not save settings (HTTP ${updated.status}).`;
+        if (updated.unknown) throw new Error(message);
+        if (!switching) setUnconfirmedFields(unconfirmedFields);
+        if (detail?.code === "conversation_started") setStarted(true);
+        if (detail?.code === "engine_changed") {
+          setUnconfirmed(true);
+          void loadSessionSnapshots(session.id, { fresh: true }).catch(() => {});
         }
+        setError(message);
         return;
       }
       if (startNew) {
@@ -189,6 +197,7 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
         can_compact: row.can_compact, compact_unavailable_reason: row.compact_unavailable_reason, can_fork: row.can_fork,
       }, observation);
       if (!foreground.current || !sessionList.current(observation)) return;
+      if (!switching) setUnconfirmedFields(new Set());
       if (knowsModelDefault) onModelDefault?.({ backend, credential: effectiveCredential || null, name: runtimeDefaultName });
       onApplied?.(row);
       onOpenChange(false);
@@ -199,8 +208,8 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
         setUnconfirmed(true);
         setError(created ? "The new conversation was saved. Check the session list."
           : "Creation could not be confirmed. Check the session list before creating another conversation.");
-      } else {
-        if (sessionList.current(observation)) void loadSessionSnapshots(session.id, { fresh: true }).catch(() => {});
+      } else if (sessionList.current(observation)) {
+        void loadSessionSnapshots(session.id, { fresh: true }).catch(() => {});
         setError(cause instanceof Error ? cause.message : "Could not change conversation settings.");
       }
     } finally {
@@ -293,7 +302,7 @@ function SessionModelPickerDialog({ session, open, onOpenChange, onApplied, onMo
           <div className="flex shrink-0 justify-end gap-2 border-t border-border pt-3">
             <Button type="button" variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button>
             <Button type="submit" className="btn-apply-model-settings"
-              disabled={!canEdit || modelUnconfirmed || !Object.keys(changes).length}>
+              disabled={!canEdit || modelUnconfirmed || !fieldsToSave.length}>
               {startNew ? `New session with ${backendLabel(backend)}` : "Apply"}
             </Button>
           </div>

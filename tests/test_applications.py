@@ -2463,6 +2463,54 @@ async def test_api_duplicate_name_is_409(client):
     assert set(app_dir.parent.iterdir()) == before
 
 
+async def test_api_create_rejects_nul_entrypoint_before_application_effects(client, db):
+    from server.workspace import paths_for
+
+    owner = await db.get_system_agent()
+    directory = paths_for(owner["user_id"]).applications
+    directory_existed = directory.exists()
+    files = set(directory.rglob("*"))
+
+    response = await client.post("/api/applications", json={
+        "name": "Invalid entrypoint",
+        "description": "Must not start a build",
+        "agent_id": owner["id"],
+        "entrypoint": "index\x00.html",
+    })
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "entrypoint must be a path inside the app"
+    assert (await client.get("/api/applications")).json() == []
+    assert directory.exists() == directory_existed
+    assert set(directory.rglob("*")) == files
+    assert client.sent == []
+
+
+async def test_api_patch_rejects_nul_entrypoint_without_changing_application(client, models):
+    created = await _api_create(client)
+    app_dir = Path(created["app_dir"])
+    entrypoint = app_dir / "index.html"
+    entrypoint.write_text("Original app", encoding="utf-8")
+    await models.emit(session_manager, {"type": "result", "session_id": created["session_id"]})
+    url = f"/api/applications/{created['id']}"
+    original = (await client.get(url)).json()
+    assert original["status"] == "ready"
+    files = set(app_dir.rglob("*"))
+    sent = list(client.sent)
+
+    response = await client.patch(url, json={
+        "entrypoint": "index\x00.html",
+        "description": "Must not be saved",
+    })
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "entrypoint must be a path inside the app"
+    assert (await client.get(url)).json() == original
+    assert set(app_dir.rglob("*")) == files
+    assert entrypoint.read_text(encoding="utf-8") == "Original app"
+    assert client.sent == sent
+
+
 async def test_api_application_id_collision_preserves_the_other_row_and_cleans_up(client, db, monkeypatch):
     first = await _api_create(client, name="Existing")
     root = Path(first["app_dir"]).parent
@@ -2831,6 +2879,43 @@ async def test_static_serves_the_entrypoint_for_the_app_root(client):
     assert "Hello Octopus" in resp.text
     assert resp.headers["content-type"].startswith("text/html")
     assert resp.headers["cache-control"] == "no-store"
+
+
+async def test_static_handles_legacy_nul_entrypoint_and_patch_repairs_it(client, db, models):
+    original_entrypoint = "pages/原始 页面.html"
+    created = await _api_create(client, entrypoint=original_entrypoint)
+    app_id = created["id"]
+    api_url = f"/api/applications/{app_id}"
+    app_url = f"/apps/{app_id}/"
+    app_dir = Path(created["app_dir"])
+    (app_dir / "pages").mkdir()
+    (app_dir / original_entrypoint).write_text("Original app", encoding="utf-8")
+    original = await client.get(app_url)
+    assert created["entrypoint"] == original_entrypoint
+    assert original.status_code == 200
+    assert original.text == "Original app"
+
+    # Reproduce an existing row saved before the request validation applied.
+    await db.update_application(app_id, entrypoint="pages/old\x00.html")
+    metadata = await client.get(api_url)
+    assert metadata.status_code == 200
+    assert metadata.json()["entrypoint"] == "pages/old\x00.html"
+    missing = await client.get(app_url)
+    assert missing.status_code == 404, missing.text
+    await models.emit(session_manager, {"type": "result", "session_id": created["session_id"]})
+    assert (await client.get(api_url)).json()["status"] == "failed"
+
+    repaired_entrypoint = "pages/修复 页面.html"
+    (app_dir / repaired_entrypoint).write_text("Repaired app", encoding="utf-8")
+    repaired = await client.patch(api_url, json={"entrypoint": repaired_entrypoint})
+
+    assert repaired.status_code == 200, repaired.text
+    assert repaired.json()["id"] == app_id
+    assert repaired.json()["entrypoint"] == repaired_entrypoint
+    assert repaired.json()["status"] == "ready"
+    page = await client.get(app_url)
+    assert page.status_code == 200
+    assert page.text == "Repaired app"
 
 
 @pytest.mark.asyncio

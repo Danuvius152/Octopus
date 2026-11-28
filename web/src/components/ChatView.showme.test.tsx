@@ -98,6 +98,356 @@ it("searches an ambiguous filename only on request and lets the user clarify onc
   expect(Object.values(useSessionStore.getState().messages).flat()).toEqual([]);
 });
 
+it.each(["plan.md", "the original report"])("keeps one lookup for a slow unresolved /showme %s", async (input) => {
+  await mount(true);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    await command(`/showme ${input}`);
+    expect(reads).toHaveLength(1);
+    await act(async () => vi.advanceTimersByTime(5000));
+    expect(screen.getByText("The file has not finished loading.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /^Retry$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reload file" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close" })).toBeVisible();
+
+    await act(async () => reads[0].resolve(Response.json({
+      path: "plan.md", metadata: markdown("plan.md"), ...(input === "plan.md" ? {} : { description: input }),
+    })));
+    expect(screen.getByRole("heading", { name: "Opened document" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Reload file" })).toBeVisible();
+    expect(reads).toHaveLength(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each(["resolving", "reading"])("keeps a background /showme %s retry tied to a confirmed file", async (stage) => {
+  const fallback = vi.mocked(fetch).getMockImplementation()!;
+  const candidate = { ...markdown("plan.md"), source: "/repo", absolute_path: "/repo/plan.md" };
+  const stalled = deferred<Response>();
+  const readsOfPlan: RequestInit[] = [];
+  const confirmedRetry: URLSearchParams[] = [];
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const url = new URL(String(input), window.location.origin);
+    if (url.pathname.endsWith("/sources")) return Promise.resolve(Response.json({ cwd: "/tmp", roots: ["/tmp"] }));
+    if (url.pathname.endsWith("/browse")) return Promise.resolve(Response.json({
+      entries: [{ path: "other.md", name: "other.md", kind: "file" }], skipped: false, truncated: false,
+    }));
+    if (url.pathname.endsWith("/files/meta") && url.searchParams.get("path") === candidate.absolute_path) {
+      confirmedRetry.push(url.searchParams);
+      return Promise.resolve(Response.json(candidate));
+    }
+    if (url.pathname.endsWith("/files") && url.searchParams.get("path") === "plan.md") {
+      readsOfPlan.push(init!);
+      return readsOfPlan.length === 1 ? stalled.promise : Promise.resolve(new Response("# Plan\n\nConfirmed line"));
+    }
+    return fallback(input, init);
+  });
+  await mount();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    await command("/showme the original report");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open file picker" })));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "other.md" })));
+    expect(screen.getByRole("tab", { name: "other.md", selected: true })).toBeVisible();
+
+    if (stage === "reading") {
+      await act(async () => reads[0].resolve(Response.json({
+        description: "the original report", path: candidate.absolute_path, metadata: candidate,
+        target: { path: candidate.absolute_path, position: { kind: "lines", start: 3 } },
+      })));
+    }
+    await act(async () => vi.advanceTimersByTime(5000));
+    if (stage === "resolving") {
+      expect(screen.getByText("the original report is taking longer to load")).toBeVisible();
+      expect(screen.queryByRole("button", { name: /Retry opening/ })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Cancel opening the original report" })).toBeVisible();
+    } else {
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry opening plan.md" })));
+      expect(confirmedRetry).toHaveLength(1);
+      expect(confirmedRetry[0].get("source")).toBe(candidate.source);
+      expect(readsOfPlan[0].signal?.aborted).toBe(true);
+      await act(async () => stalled.resolve(new Response("# Retired plan")));
+      expect(screen.getByText("Confirmed line")).toHaveAttribute("data-located", "true");
+      expect(screen.queryByText("Retired plan")).not.toBeInTheDocument();
+    }
+    expect(reads).toHaveLength(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it.each([
+  { scenario: "slow read after its origin closes", slowRetry: true },
+  { scenario: "failed read after its origin closes" },
+  { scenario: "failed read after its alias is replaced", replaceAlias: true },
+  { scenario: "failed read after its alias is replaced and the alias confirms first", replaceAlias: true, aliasConfirmsFirst: true },
+  { scenario: "failed read when its alias confirms first and its origin closes", aliasConfirmsFirst: true },
+  { scenario: "failed read retried from its link origin", retryFrom: "origin" },
+  { scenario: "failed read retried from recovery", retryFrom: "recovery" },
+  { scenario: "alias-first read retried from its link origin", aliasConfirmsFirst: true, retryFrom: "origin" },
+  { scenario: "alias-first read retried from recovery", aliasConfirmsFirst: true, retryFrom: "recovery" },
+  { scenario: "alias-first read retried after the failed link origin closes", aliasConfirmsFirst: true, retryFrom: "after-close" },
+  { scenario: "failed read retried through a repointed link", retryFrom: "repointed-origin" },
+  { scenario: "failed read retried again after its link origin closes", aliasConfirmsFirst: true, retryFrom: "after-denial" },
+  { scenario: "parallel retry succeeds before an older denial", retryFrom: "parallel-success" },
+  { scenario: "parallel retry succeeds before an older denial with alias first", aliasConfirmsFirst: true, retryFrom: "parallel-success" },
+  { scenario: "late same-file open cannot reopen the closed result", retryFrom: "parallel-closed" },
+  { scenario: "parallel retry keeps a delayed independent redirect", aliasConfirmsFirst: true, retryFrom: "parallel-repoint" },
+  { scenario: "parallel retry denial survives an older success", retryFrom: "parallel-denial" },
+  { scenario: "parallel retry denial survives an older success with alias first", aliasConfirmsFirst: true, retryFrom: "parallel-denial" },
+  { scenario: "older authorization succeeds after the newer denial", retryFrom: "parallel-denial-first" },
+  { scenario: "older authorization succeeds after the newer denial with alias first", aliasConfirmsFirst: true, retryFrom: "parallel-denial-first" },
+  { scenario: "older confirmed file fails after the redirect is ready", retryFrom: "parallel-distinct-ready" },
+  { scenario: "older confirmed file fails after the redirect is denied", retryFrom: "parallel-distinct-denied" },
+  { scenario: "repointed body denial falls back to the original file", aliasConfirmsFirst: true, retryFrom: "repointed-denial" },
+  { scenario: "repointed read fails after its origin closes", retryFrom: "repointed-closed" },
+  { scenario: "alias-first repointed read fails after its origin closes", aliasConfirmsFirst: true, retryFrom: "repointed-closed" },
+  { scenario: "denied read edited at the parsed path", aliasConfirmsFirst: true, editPosition: true },
+  { scenario: "description retried and reloaded after its alias confirms first", aliasConfirmsFirst: true, descriptionSearch: true },
+])("recovers a shared command read for a $scenario", async ({
+  slowRetry, replaceAlias, aliasConfirmsFirst, retryFrom, editPosition, descriptionSearch,
+}) => {
+  const fallback = vi.mocked(fetch).getMockImplementation()!;
+  const candidate = markdown("initial.md");
+  const stalled = deferred<Response>();
+  const repointedBody = deferred<Response>();
+  const retryRequests: URLSearchParams[] = [];
+  let fileReads = 0;
+  let aliasReplaced = false;
+  let denyAlias = false;
+  const retryMetadata: Promise<Response>[] = [];
+  const retryBodies: Promise<Response>[] = [];
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    const url = new URL(String(input), window.location.origin);
+    if (url.pathname.endsWith("/sources")) return Promise.resolve(Response.json({ cwd: "/tmp", roots: ["/tmp"] }));
+    if (url.pathname.endsWith("/browse")) return Promise.resolve(Response.json({
+      entries: [{ path: "other.md", name: "other.md", kind: "file" }], skipped: false, truncated: false,
+    }));
+    const path = url.searchParams.get("path");
+    if (url.pathname.endsWith("/files/meta") && path === "alias.md") {
+      if (retryMetadata.length) return retryMetadata.shift()!;
+      if (denyAlias) return Promise.resolve(new Response(null, { status: 403 }));
+      return Promise.resolve(Response.json(aliasReplaced ? markdown("replacement.md") : candidate));
+    }
+    if (url.pathname.endsWith("/files/meta") && path === candidate.absolute_path) {
+      retryRequests.push(url.searchParams);
+      return Promise.resolve(Response.json(candidate));
+    }
+    if (url.pathname.endsWith("/files") && path === "other.md") {
+      return Promise.resolve(new Response("# Other\n\n[Read alias at seven](alias.md#L7)"));
+    }
+    if (url.pathname.endsWith("/files") && path === candidate.path) {
+      const body = "# Plan\n\nOriginal line\n\nMiddle\n\nAlias line";
+      return ++fileReads === 1 ? stalled.promise : retryBodies.shift() ?? Promise.resolve(new Response(body));
+    }
+    if (url.pathname.endsWith("/files") && path === "replacement.md" &&
+      (retryFrom === "repointed-denial" || retryFrom === "parallel-distinct-denied")) {
+      return Promise.resolve(new Response(null, { status: 403 }));
+    }
+    if (url.pathname.endsWith("/files") && path === "replacement.md" && retryFrom === "repointed-closed") return repointedBody.promise;
+    return fallback(input, init);
+  });
+  await mount();
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const description = "the original report";
+    await command(descriptionSearch ? `/showme ${description}` : "/showme initial.md#L3");
+    const confirmInitial = () => act(async () => reads[0].resolve(Response.json({ metadata: candidate,
+      description: descriptionSearch ? description : undefined,
+      target: { path: candidate.path, position: descriptionSearch ? undefined : { kind: "lines", start: 3 } },
+    })));
+    if (!aliasConfirmsFirst) await confirmInitial();
+    expect(fileReads).toBe(aliasConfirmsFirst ? 0 : 1);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open file picker" })));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "other.md" })));
+    const aliasLink = screen.getByRole("button", { name: "Open file: Read alias at seven at line 7" });
+    await act(async () => fireEvent.click(aliasLink));
+    expect(fileReads).toBe(1);
+    if (aliasConfirmsFirst) await confirmInitial();
+    expect(fileReads).toBe(1);
+    if (replaceAlias) {
+      aliasReplaced = true;
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open file: Read alias at seven at line 7" })));
+      expect(screen.getByRole("tab", { name: "replacement.md", selected: true })).toBeVisible();
+    } else if (!retryFrom) {
+      fireEvent.click(screen.getByRole("button", { name: "Close other.md" }));
+    }
+    if (retryFrom) {
+      aliasLink.focus();
+      await act(async () => stalled.reject(new TypeError("Interrupted body")));
+      expect(screen.getByRole("tab", { name: "other.md", selected: true })).toBeVisible();
+      expect(aliasLink).toHaveFocus();
+      expect(screen.getByRole("heading", { name: "Other" })).toBeVisible();
+      expect(screen.getByRole("alert")).toHaveTextContent("Couldn't open alias.md. Couldn't load the file. Check your connection and retry.");
+      expect(screen.getByRole("button", { name: "Retry opening alias.md" })).toBeVisible();
+      if (retryFrom === "repointed-closed") {
+        aliasReplaced = true;
+        fireEvent.click(screen.getByRole("tab", { name: "initial.md" }));
+        await act(async () => fireEvent.click(screen.getByRole("button", { name: /^Retry$/ })));
+        expect(screen.getByRole("tab", { name: "replacement.md", selected: true })).toBeVisible();
+        fireEvent.click(screen.getByRole("button", { name: "Close other.md" }));
+        await act(async () => repointedBody.resolve(new Response(null, { status: 403 })));
+        expect(screen.getByRole("tab", { name: "initial.md", selected: true })).toHaveAttribute("title", candidate.absolute_path);
+        expect(screen.getByRole("alert")).toHaveTextContent("Check your connection and retry.");
+        fireEvent.click(screen.getByRole("button", { name: "Edit path" }));
+        expect(screen.getByRole("textbox", { name: "File path" })).toHaveValue(candidate.absolute_path);
+        expect(screen.getByRole("textbox", { name: "Position (optional)" })).toHaveValue(":3");
+        fireEvent.click(screen.getByRole("button", { name: /^Cancel$/ }));
+        await act(async () => fireEvent.click(screen.getByRole("button", { name: /^Retry$/ })));
+        expect(screen.getByText("Original line")).toHaveAttribute("data-located", "true");
+        expect(retryRequests).toHaveLength(1);
+        expect(retryRequests[0].get("source")).toBe(candidate.source);
+        return;
+      }
+      const deniesFirst = retryFrom === "parallel-denial-first";
+      if (retryFrom.startsWith("parallel-")) {
+        const older = deferred<Response>();
+        const newer = deferred<Response>();
+        retryMetadata.push(older.promise, newer.promise);
+        fireEvent.click(screen.getByRole("tab", { name: "initial.md" }));
+        await act(async () => fireEvent.click(screen.getByRole("button", { name: /^Retry$/ })));
+        fireEvent.click(screen.getByRole("tab", { name: "other.md" }));
+        await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry opening alias.md" })));
+        expect(retryMetadata).toHaveLength(0);
+        if (retryFrom.startsWith("parallel-distinct-")) {
+          const oldBody = deferred<Response>();
+          retryBodies.push(oldBody.promise);
+          await act(async () => older.resolve(Response.json(candidate)));
+          expect(fileReads).toBe(2);
+          await act(async () => newer.resolve(Response.json(markdown("replacement.md"))));
+          const denied = retryFrom === "parallel-distinct-denied";
+          expect(screen.getByRole("tab", { name: denied ? "other.md" : "replacement.md", selected: true })).toBeVisible();
+          await act(async () => oldBody.reject(new TypeError("Original body was interrupted")));
+          fireEvent.click(screen.getByRole("tab", { name: "other.md" }));
+          const alerts = screen.getAllByRole("alert");
+          expect(alerts).toHaveLength(denied ? 2 : 1);
+          expect(alerts.some((alert) => alert.textContent?.includes("Check your connection and retry."))).toBe(true);
+          return;
+        }
+        if (retryFrom === "parallel-closed") {
+          await act(async () => newer.resolve(Response.json(candidate)));
+          fireEvent.click(screen.getByRole("button", { name: "Close initial.md" }));
+          await act(async () => older.resolve(Response.json(candidate)));
+          expect(screen.getAllByRole("tab")).toHaveLength(1);
+          expect(screen.getByRole("tab", { name: "other.md", selected: true })).toBeVisible();
+          expect(fileReads).toBe(2);
+          return;
+        }
+        if (retryFrom !== "parallel-denial" && !deniesFirst) {
+          await act(async () => newer.resolve(Response.json(candidate)));
+          await act(async () => older.resolve(retryFrom === "parallel-repoint" ? Response.json(markdown("replacement.md"))
+            : new Response(null, { status: 403 })));
+          expect(screen.getAllByRole("tab")).toHaveLength(retryFrom === "parallel-repoint" ? 3 : 2);
+          expect(screen.getAllByRole("tab", { name: "initial.md" })).toHaveLength(1);
+          expect(screen.getByText("Alias line")).toHaveAttribute("data-located", "true");
+          if (retryFrom === "parallel-repoint") {
+            fireEvent.click(screen.getByRole("tab", { name: "replacement.md", selected: false }));
+            expect(screen.getByText("# Opened document")).toBeVisible();
+          }
+        } else {
+          const oldBody = deferred<Response>();
+          retryBodies.push(oldBody.promise);
+          if (deniesFirst) await act(async () => newer.resolve(new Response(null, { status: 403 })));
+          await act(async () => older.resolve(Response.json(candidate)));
+          if (!deniesFirst) await act(async () => newer.resolve(new Response(null, { status: 403 })));
+          expect(screen.getByRole("alert")).toHaveTextContent("don't have access");
+          expect(fileReads).toBe(2);
+          await act(async () => oldBody.resolve(new Response("# Readable older snapshot")));
+          expect(screen.getByRole("tab", { name: "other.md", selected: true })).toBeVisible();
+          expect(screen.getByRole("tab", { name: "initial.md", selected: false })).toBeVisible();
+          expect(screen.getByRole("alert")).toHaveTextContent("don't have access");
+          expect(screen.getByRole("button", { name: "Retry opening alias.md" })).toBeVisible();
+        }
+        return;
+      }
+      if (retryFrom === "origin" || retryFrom === "repointed-origin") {
+        aliasReplaced = retryFrom === "repointed-origin";
+        await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry opening alias.md" })));
+        if (aliasReplaced) {
+          expect(screen.getByRole("tab", { name: "replacement.md", selected: true })).toBeVisible();
+          fireEvent.click(screen.getByRole("tab", { name: "initial.md" }));
+          expect(screen.getByRole("alert")).toHaveTextContent("Check your connection and retry.");
+          await act(async () => fireEvent.click(screen.getByRole("button", { name: /^Retry$/ })));
+        }
+      } else {
+        if (retryFrom === "after-close") fireEvent.click(screen.getByRole("button", { name: "Close other.md" }));
+        fireEvent.click(screen.getByRole("tab", { name: "initial.md" }));
+        if (retryFrom === "after-denial" || retryFrom === "repointed-denial") {
+          denyAlias = retryFrom === "after-denial";
+          aliasReplaced = retryFrom === "repointed-denial";
+          await act(async () => fireEvent.click(screen.getByRole("button", { name: /^Retry$/ })));
+          expect(screen.getByRole("alert")).toHaveTextContent("don't have access");
+          fireEvent.click(screen.getByRole("button", { name: "Close other.md" }));
+          if (retryFrom === "repointed-denial") {
+            expect(screen.getByRole("alert")).toHaveTextContent("Check your connection and retry.");
+          }
+        }
+        await act(async () => fireEvent.click(screen.getByRole("button", {
+          name: retryFrom === "after-denial" ? "Reload file" : /^Retry$/,
+        })));
+      }
+      expect(screen.getAllByRole("tab", { name: "initial.md" })).toHaveLength(1);
+      expect(screen.getByRole("tab", { name: "initial.md", selected: true })).toBeVisible();
+      const keepsOrigin = retryFrom !== "after-close" && retryFrom !== "after-denial" && retryFrom !== "repointed-denial";
+      const keepsAlias = keepsOrigin && retryFrom !== "repointed-origin";
+      expect(screen.getByText(keepsAlias ? "Alias line" : "Original line")).toHaveAttribute("data-located", "true");
+      expect(fileReads).toBe(2);
+      expect(reads).toHaveLength(1);
+      if (keepsOrigin) {
+        fireEvent.click(screen.getByRole("tab", { name: "other.md" }));
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Retry opening alias.md" })).not.toBeInTheDocument();
+      }
+      return;
+    }
+    if (slowRetry) {
+      await act(async () => vi.advanceTimersByTime(5000));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry opening initial.md" })));
+    } else if (editPosition) {
+      await act(async () => stalled.resolve(new Response(null, { status: 403 })));
+      expect(screen.getByRole("alert")).toHaveTextContent("don't have access");
+      fireEvent.click(screen.getByRole("button", { name: "Edit path" }));
+      expect(screen.getByRole("textbox", { name: "File path" })).toHaveValue(candidate.path);
+      fireEvent.change(screen.getByRole("textbox", { name: "Position (optional)" }), { target: { value: "#L7" } });
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open file" })));
+      expect(screen.getByText("Alias line")).toHaveAttribute("data-located", "true");
+      const editRead = vi.mocked(fetch).mock.calls.map(([url]) => new URL(String(url), window.location.origin))
+        .find((url) => url.pathname.endsWith("/files/meta") && url.searchParams.get("path") === candidate.path);
+      expect(editRead?.searchParams.get("source")).toBe(candidate.source);
+      expect(reads).toHaveLength(1);
+      return;
+    } else {
+      await act(async () => stalled.reject(new TypeError("Interrupted body")));
+      if (replaceAlias) {
+        expect(screen.getByRole("tab", { name: "replacement.md", selected: true })).toBeVisible();
+        fireEvent.click(screen.getByRole("tab", { name: "other.md" }));
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole("tab", { name: "initial.md" }));
+      }
+      expect(screen.getByRole("tab", { name: "initial.md", selected: true })).toBeVisible();
+      expect(screen.getByRole("alert")).toHaveTextContent("Check your connection and retry.");
+      if (descriptionSearch) expect(screen.getByRole("textbox", { name: "File description" })).toHaveValue(description);
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry" })));
+    }
+    expect(reads).toHaveLength(1);
+    expect(retryRequests).toHaveLength(1);
+    expect(retryRequests[0].get("source")).toBe(candidate.source);
+    if (descriptionSearch) {
+      expect(screen.getByRole("heading", { name: "Plan" })).toBeVisible();
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Reload file" })));
+      expect(fileReads).toBe(3);
+      expect(reads).toHaveLength(1);
+      expect(retryRequests.map((query) => query.get("source"))).toEqual([candidate.source, candidate.source]);
+      return;
+    }
+    expect(screen.getByText("Original line")).toHaveAttribute("data-located", "true");
+    expect(screen.getByText("Alias line")).not.toHaveAttribute("data-located");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it("retries candidate bytes from the confirmed source without repeating inference", async () => {
   const fallback = vi.mocked(fetch).getMockImplementation()!;
   const candidate = { ...markdown("plan.md"), source: "/repo", absolute_path: "/repo/plan.md" };
@@ -255,7 +605,8 @@ it.each(["selection", "page", "page round trip", "close viewer", "explicit old f
 it.each(["success", "failure"])("keeps a newer viewing intent through an old %s and cleanup", async outcome => {
   await mount();
   await command("/showme first.md");
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Reload file" })); });
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  await command("/showme second.md");
   await act(async () => reads[0].resolve(outcome === "success" ? Response.json({ path: "/old.md" }) : Response.json({ detail: "Old failure" }, { status: 409 })));
   expect(screen.getByRole("status")).toHaveTextContent("Loading");
   await act(async () => reads[1].resolve(Response.json({ path: "new.md", metadata: markdown("new.md") })));
@@ -266,7 +617,8 @@ it.each(["success", "failure"])("keeps a newer viewing intent through an old %s 
 it("keeps the newer viewer when its response finishes before the old viewing", async () => {
   await mount();
   await command("/showme first.md");
-  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Reload file" })); });
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  await command("/showme second.md");
   await act(async () => reads[1].resolve(Response.json({ path: "new.md", metadata: markdown("new.md") })));
   await act(async () => reads[0].resolve(Response.json({ path: "/old.md" })));
   expect(screen.getByRole("dialog", { name: "new.md" })).toBeVisible();

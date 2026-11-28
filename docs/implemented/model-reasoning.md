@@ -67,6 +67,14 @@ opening, engine changes and effective sign-in changes. A failed save keeps the
 draft and displays the reason in the original dialog. A rejected Agent model
 control opens Model defaults and points to the field that needs repair.
 
+For a same-engine settings PATCH, the dialog includes edited fields and any
+fields it previously submitted with an unknown result. A timeout, network
+failure, HTTP 408 or 5xx leaves those submitted fields eligible for another
+explicit save, including an explicit `null` when the user restores a default.
+A refreshed snapshot updates observed settings while retaining the draft and
+unconfirmed fields. A definite rejection restores the field set from before
+that submission. Cross-engine updates still send the complete target settings.
+
 An empty conversation can switch engines in place. The Owner checks admitted
 input, history and the native binding before committing a complete target
 configuration and captures the success response before the next commit. The

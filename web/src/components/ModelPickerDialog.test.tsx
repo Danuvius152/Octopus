@@ -278,7 +278,7 @@ it("restores credential inheritance without changing other overrides", async () 
   expect(useSessionStore.getState().sessions[0]).toMatchObject({ model: "model-a", reasoning_effort: "high", credential_id: null });
 });
 
-it.each([200, 400])("a late model-settings response for another session does not close or write errors into this dialog (%s)", async (status) => {
+it.each([200, 400, 503])("a late model-settings response for another session does not close or write errors into this dialog (%s)", async (status) => {
   let finish!: (response: Response) => void;
   fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => init?.method === "PATCH"
     ? new Promise<Response>((resolve) => { finish = resolve; }) : json(catalog));
@@ -291,11 +291,12 @@ it.each([200, 400])("a late model-settings response for another session does not
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   await waitFor(() => expect(finish).toBeTypeOf("function"));
   rerender(<ModelPickerDialog session={b} open onOpenChange={close} onApplied={applied} />);
-  await act(async () => finish(status === 200 ? json({ ...a, reasoning_effort: "low" }) : json({ detail: "Original A refusal" }, 400)));
+  await act(async () => finish(status === 200 ? json({ ...a, reasoning_effort: "low" }) : json({ detail: "Original A failure" }, status)));
   expect(close).not.toHaveBeenCalled();
   expect(applied).not.toHaveBeenCalled();
-  expect(screen.queryByText("Original A refusal")).toBeNull();
+  expect(screen.queryByText("Original A failure")).toBeNull();
   expect(screen.getByLabelText("Model")).toHaveValue("model-b");
+  expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
   expect(useSessionStore.getState().sessions.find((s) => s.id === "b")?.reasoning_effort).toBeNull();
   if (status === 200) expect(useSessionStore.getState().sessions.find((s) => s.id === "a")?.reasoning_effort).toBe("low");
 });
@@ -390,12 +391,153 @@ it("shows a server rejection and keeps the saved settings", async () => {
   fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "high" } });
   fireEvent.click(screen.getByRole("button", { name: "Apply" }));
   expect(await screen.findByText("Effort unavailable for this model")).toBeVisible();
+  fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "" } });
+  expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
   expect(close).not.toHaveBeenCalled();
   expect(useSessionStore.getState().sessions[0].reasoning_effort).toBeNull();
 });
 
-it.each(["account", "service", "connection", "view-return"])(
-  "does not apply an old opening's notice or close after %s changes", async (transition) => {
+it.each([
+  { failure: "network", message: "Connection lost after save" },
+  { failure: "deadline", message: "Saving conversation settings could not be confirmed." },
+  { failure: 408, message: "Could not save settings (HTTP 408)." },
+  { failure: 503, message: "Could not save settings (HTTP 503)." },
+] as const)("restores inheritance after an unconfirmed PATCH ($failure)", async ({ failure, message }) => {
+  let saved = { ...session };
+  const snapshot = deferred<Response>();
+  const originalReply = deferred<Response>();
+  const patches: unknown[] = [];
+  const dispatch = { generation: "model-service", revision: 0, paused: false,
+    active_request_id: null, active_operation: null, items: [] };
+  useSessionStore.setState({ dispatchGeneration: dispatch.generation });
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") {
+      const patch = JSON.parse(String(init.body));
+      patches.push(patch);
+      saved = { ...saved, ...patch };
+      if (patches.length === 1) {
+        if (failure === "network") throw new Error(message);
+        if (failure === "deadline") return originalReply.promise;
+        return json({}, failure);
+      }
+      return json(saved);
+    }
+    if (String(url).includes("/models")) return json(catalog);
+    if (String(url).endsWith(`/api/sessions/${session.id}?view=browser`)) return snapshot.promise;
+    if (String(url).endsWith("/api/sessions")) return json([saved]);
+    return json([]);
+  });
+  const close = vi.fn(), applied = vi.fn();
+  function Settings() {
+    const observed = useSessionStore((state) => state.sessions.find((item) => item.id === session.id));
+    return observed ? <ModelPickerDialog session={observed} open onOpenChange={close} onApplied={applied} /> : null;
+  }
+  render(<Settings />);
+  const effort = await screen.findByLabelText("Reasoning effort");
+  await waitFor(() => expect(effort).toBeEnabled());
+  const apply = screen.getByRole("button", { name: "Apply" });
+  expect(effort).toHaveValue("");
+  fireEvent.change(effort, { target: { value: "low" } });
+  if (failure === "deadline") {
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(apply);
+      const request = fetchMock.mock.calls.find(([, init]) => init?.method === "PATCH");
+      expect(request?.[1]?.signal?.aborted).toBe(false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(request?.[1]?.signal?.aborted).toBe(true);
+    } finally { vi.useRealTimers(); }
+  } else {
+    fireEvent.click(apply);
+  }
+  expect(await screen.findByText(message)).toBeVisible();
+  expect(saved.reasoning_effort).toBe("low");
+
+  fireEvent.change(effort, { target: { value: "" } });
+  if (failure === "deadline") {
+    await act(async () => originalReply.resolve(json(saved)));
+    expect(close).not.toHaveBeenCalled();
+    expect(applied).not.toHaveBeenCalled();
+    expect(effort).toHaveValue("");
+    expect(apply).toBeEnabled();
+  }
+  saved = { ...saved, service_tier: "fast" };
+  await act(async () => snapshot.resolve(json({ ...saved, messages: [], dispatch_state: dispatch, active_attempt: null })));
+  expect(useSessionStore.getState().sessions[0]).toMatchObject({ reasoning_effort: "low", service_tier: "fast" });
+  expect(effort).toHaveValue("");
+  expect(screen.getByLabelText("Speed")).toHaveValue("");
+  expect(apply).toBeEnabled();
+  fireEvent.click(apply);
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches).toEqual([
+    { reasoning_effort: "low", expected_backend: "codex" },
+    { reasoning_effort: null, expected_backend: "codex" },
+  ]);
+  expect(saved).toMatchObject({ reasoning_effort: null, service_tier: "fast" });
+});
+
+it("keeps an earlier unconfirmed field after a later PATCH is rejected", async () => {
+  const patches: unknown[] = [];
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method !== "PATCH") {
+      return String(url).includes("/models") ? json(catalog) : json({ detail: "Unavailable" }, 503);
+    }
+    const patch = JSON.parse(String(init.body));
+    patches.push(patch);
+    if (patches.length === 1) throw new Error("Connection lost after save");
+    if ("service_tier" in patch) return json({ detail: "Speed unavailable for this model" }, 400);
+    return json({ ...session, ...patch });
+  });
+  const close = vi.fn();
+  render(<ModelPickerDialog session={session} open onOpenChange={close} />);
+  const effort = await screen.findByLabelText("Reasoning effort");
+  const speed = screen.getByLabelText("Speed");
+  const apply = screen.getByRole("button", { name: "Apply" });
+  await waitFor(() => expect(effort).toBeEnabled());
+  fireEvent.change(effort, { target: { value: "low" } });
+  fireEvent.click(apply);
+  expect(await screen.findByText("Connection lost after save")).toBeVisible();
+
+  fireEvent.change(effort, { target: { value: "" } });
+  fireEvent.change(speed, { target: { value: "fast" } });
+  fireEvent.click(apply);
+  expect(await screen.findByText("Speed unavailable for this model")).toBeVisible();
+
+  fireEvent.change(speed, { target: { value: "" } });
+  expect(apply).toBeEnabled();
+  fireEvent.click(apply);
+  await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+  expect(patches).toEqual([
+    { reasoning_effort: "low", expected_backend: "codex" },
+    { reasoning_effort: null, service_tier: "fast", expected_backend: "codex" },
+    { reasoning_effort: null, expected_backend: "codex" },
+  ]);
+});
+
+it("blocks a duplicate POST after creation could not be confirmed", async () => {
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "POST") return json({}, 503);
+    if (String(url).endsWith("/api/sessions")) return json([session]);
+    return json(catalog);
+  });
+  const close = vi.fn();
+  render(<ModelPickerDialog session={session} open onOpenChange={close} />);
+  fireEvent.click(screen.getByRole("radio", { name: "Claude Code" }));
+  const create = screen.getByRole("button", { name: "New session with Claude Code" });
+  fireEvent.click(create);
+  expect(await screen.findByText("Creation could not be confirmed. Check the session list before creating another conversation.")).toBeVisible();
+  expect(create).toBeDisabled();
+  fireEvent.submit(create.closest("form")!);
+  expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  expect(close).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["account", 200], ["account", 503], ["service", 200], ["service", 503],
+  ["connection", 200], ["connection", 503], ["view-return", 200],
+] as const)(
+  "does not apply an old opening's notice or close after %s changes (HTTP %s)", async (transition, status) => {
+    useSessionStore.setState({ dispatchGeneration: "original-service" });
     const receipt = deferred<Response>();
     let saved = false;
     fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
@@ -415,9 +557,23 @@ it.each(["account", "service", "connection", "view-return"])(
       else if (transition === "connection") sessions.connect({ socket: {}, accountGeneration: store.accountGeneration });
       else { store.openManage("connectors"); store.showChat(); }
     });
-    await act(async () => { saved = true; receipt.resolve(json({ ...session, model: "model-b" })); });
+    if (transition === "service") expect(useSessionStore.getState().dispatchGeneration).toBe("replacement-service");
+    await act(async () => {
+      saved = status === 200;
+      receipt.resolve(saved ? json({ ...session, model: "model-b" }) : json({ detail: "Original save failure" }, status));
+    });
     expect(applied).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledTimes(transition === "view-return" ? 1 : 0);
-    if (transition === "account") expect(useSessionStore.getState().sessions).toEqual([]);
-    else await waitFor(() => expect(useSessionStore.getState().sessions[0].model).toBe("model-b"));
+    expect(screen.queryByText("Original save failure")).toBeNull();
+    if (transition === "account") {
+      expect(useSessionStore.getState().sessions).toEqual([]);
+      expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+    } else if (status === 503) {
+      const model = screen.getByLabelText("Model");
+      expect(model).toHaveValue("model-b");
+      fireEvent.change(model, { target: { value: "model-a" } });
+      expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+    } else {
+      await waitFor(() => expect(useSessionStore.getState().sessions[0].model).toBe("model-b"));
+    }
   });

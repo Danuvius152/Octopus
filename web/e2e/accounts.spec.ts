@@ -327,6 +327,83 @@ test.describe("Accounts", () => {
     await expect(page.getByRole("button", { name: "Remove owner-private.txt" })).toHaveCount(0);
   });
 
+  for (const outcome of ["success", "network failure"] as const) {
+    test(`late sign-out ${outcome} leaves a new login and draft in the same document`, async ({ page, request }) => {
+      await signIn(page, OWNER);
+      const originalBearer = await page.evaluate(() => localStorage.getItem("octopus_token"));
+      await page.evaluate(() => {
+        const originalFetch = window.fetch;
+        document.documentElement.dataset.logoutReceipt = "pending";
+        window.fetch = (...args) => {
+          const result = originalFetch(...args);
+          if (String(args[0]).endsWith("/api/auth/logout")) {
+            const markSettled = () => window.setTimeout(() => {
+              document.documentElement.dataset.logoutReceipt = "settled";
+            });
+            void result.then(markSettled, markSettled);
+          }
+          return result;
+        };
+      });
+      let intercepted!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>((resolve) => { intercepted = resolve; });
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      await page.route("**/api/auth/logout", async (route) => {
+        try {
+          expect(route.request().headers().authorization).toBe(`Bearer ${originalBearer}`);
+          if (outcome === "success") {
+            const response = await route.fetch();
+            expect(response.ok()).toBeTruthy();
+            intercepted();
+            await gate;
+            await route.fulfill({ response });
+          } else {
+            intercepted();
+            await gate;
+            await route.abort("failed");
+          }
+        } catch (error) {
+          intercepted();
+          throw error;
+        }
+      });
+
+      try {
+        await page.locator("button.btn-account").click();
+        await page.locator(".menu-sign-out").click();
+        await started;
+        if (outcome === "network failure") {
+          const revoked = await request.post(`${API}/auth/logout`, {
+            headers: { Authorization: `Bearer ${originalBearer}` },
+          });
+          expect(revoked.ok()).toBeTruthy();
+        }
+        await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+        await expect(page.locator("#username")).toBeVisible();
+        await page.locator("#username").fill(GUEST.username);
+        await page.locator("#password").fill(GUEST.password);
+        await page.locator("button.btn-login").click();
+        await expect(page.locator(".account-handle")).toHaveText(GUEST.username);
+        await page.locator(".agent-item", { hasText: "Guest reauthentication agent" }).click();
+        await page.locator(".session-item", { hasText: "Guest after reauthentication" }).click();
+        const draft = `New login draft after ${outcome}`;
+        await page.locator("textarea").fill(draft);
+        const newBearer = await page.evaluate(() => localStorage.getItem("octopus_token"));
+        expect(newBearer).toBeTruthy();
+        expect(newBearer).not.toBe(originalBearer);
+
+        release();
+        await expect(page.locator("html")).toHaveAttribute("data-logout-receipt", "settled");
+        await expect(page.locator(".account-handle")).toHaveText(GUEST.username);
+        await expect(page.locator("textarea")).toHaveValue(draft);
+        expect(await page.evaluate(() => localStorage.getItem("octopus_token"))).toBe(newBearer);
+      } finally {
+        release();
+      }
+    });
+  }
+
   test("changing the password ends the other sessions", async ({ page, request }) => {
     await signIn(page, GUEST);
     const stale = (

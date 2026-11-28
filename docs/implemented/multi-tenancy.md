@@ -297,11 +297,14 @@ The server rechecks the original session binding, account and source when
 listing, reading metadata or serving bytes. Directory browsing lists the
 selected directory. Filename search bounds the scan and results within the
 source. The metadata binds the selected source, canonical file path and parent
-directory identity.
+directory identity. The picker can reuse the recorded parent identity to
+list files beside an open document. A replaced directory invalidates that
+binding.
 Markdown body and relative resources carry the applicable binding back to the
 server. File responses revalidate path, type and size and snapshot bytes from
 the same checked, opened file. Revocation applies to later admissions, while
-an admitted bounded read can finish. File and metadata responses use
+an admitted bounded read can finish. The exact name `.env` is accepted as
+text within the same authorization and size limits. File and metadata responses use
 `Cache-Control: no-store`. The [viewer interaction](frontend-interaction-state.md#文件查看意图)
 owns rendering, navigation and recovery.
 

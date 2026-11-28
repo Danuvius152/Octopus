@@ -191,23 +191,23 @@ def is_inside_root(path: str, user_id: str | None = None) -> bool:
 
 
 def is_safe_relative_path(rel_path: str) -> bool:
-    """True iff `rel_path` is a relative path that can't climb out of its own
-    directory. Used to validate a stored `entrypoint` before it ever reaches
-    the filesystem."""
-    if not rel_path or os.path.isabs(rel_path) or rel_path.startswith("/"):
+    """Check entrypoints for NUL bytes and require a relative path without
+    parent components before saving the configuration."""
+    if not rel_path or "\x00" in rel_path or os.path.isabs(rel_path) or rel_path.startswith("/"):
         return False
     parts = PurePosixPath(rel_path).parts
     return bool(parts) and ".." not in parts
 
 
 def resolve_within(app_dir: str, rel_path: str) -> str | None:
-    """Resolve `rel_path` inside `app_dir`, or None if it escapes.
+    """Resolve an app path, returning None for NUL bytes or an escape.
 
-    Used by the static-file route. Returns None for absolute paths, `..`
-    traversal, and symlinks pointing out of the directory — the caller turns
-    that into a 404 rather than a 403, so probing can't confirm what exists
-    outside the app.
+    Leading slashes are app-relative. Check containment after resolving
+    parent components and symlinks. The static-file route uses 404 for
+    paths that cannot be resolved inside the app.
     """
+    if "\x00" in rel_path:
+        return None
     base = os.path.realpath(app_dir)
     target = os.path.realpath(os.path.join(base, rel_path.lstrip("/")))
     if target != base and os.path.commonpath([base, target]) != base:
@@ -1025,7 +1025,7 @@ class ApplicationManager:
     # ------------------------------------------------------------- build eval
 
     def entrypoint_path(self, row: dict[str, Any]) -> str | None:
-        """Absolute path of the app's entry file, or None if it escapes."""
+        """Absolute path of the app's entry file, or None if it cannot be resolved safely."""
         return resolve_within(row["app_dir"], row["entrypoint"])
 
     def is_built(self, row: dict[str, Any]) -> bool:

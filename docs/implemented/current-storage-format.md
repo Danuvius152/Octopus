@@ -454,6 +454,11 @@ host remains unconfirmed; only trusted, confirmed retirement can open it.
 Starting another management operation first persists it closed. Missing or false
 qualification retains the recovery material instead of authorizing deletion.
 Ready history does not restore management hosts or execution authority from that metadata.
+For a directory-backed credential, `fork_metadata.cleanup_credential_id`
+records the effective binding at full-copy creation. An explicit JSON `null`
+records host login. A missing key in older records leaves the original binding
+unpinned. The [fork recovery](session-fork.md) contract defines how that record
+can qualify for cleanup.
 These facts add no DDL or storage root and require no format transition.
 
 Native `fileChange` result records retain their producer's tool name in the

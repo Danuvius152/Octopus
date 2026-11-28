@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
@@ -155,7 +155,7 @@ function server() {
       (url.pathname.includes("/child") ? result : url.pathname.includes("/b") ? b : a);
     if (url.pathname === `/api/sessions/${heldDetail}`) await new Promise<void>((resolve) => { finishDetail = resolve; });
     return Response.json({ ...info, messages: [{ role: "user", type: "text", seq: 7, content: `${info.name} original message` }],
-      pending_questions: [], subagents: [], dispatch_state: dispatch });
+      oldest_loaded_seq: 7, has_more_messages: false, pending_questions: [], subagents: [], dispatch_state: dispatch });
   });
   vi.stubGlobal("fetch", fetcher);
   return {
@@ -1055,6 +1055,306 @@ async function openRewind() {
   await waitFor(() => expect(screen.getByRole("button", { name: "Rewind" })).toBeEnabled());
 }
 
+function recentRewindPage() {
+  return Response.json({ ...a, messages: [{ role: "user", type: "text", seq: 20, content: "Recent message" }],
+    oldest_loaded_seq: 20, has_more_messages: true });
+}
+
+async function observeRewindScope(boundary: "connection" | "service") {
+  const first = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  let active = first;
+  await act(async () => { sessions.connect(first); });
+  return {
+    replace: () => act(() => {
+      if (boundary === "connection") {
+        sessions.disconnect(first);
+        active = { ...first, socket: {} };
+        sessions.connect(active);
+      } else {
+        useSessionStore.getState().applyDispatchState(a.id, { ...dispatch, generation: "new-service" });
+      }
+    }),
+    disconnect: () => act(() => sessions.disconnect(active)),
+  };
+}
+
+it("can pick an older human message when the latest rewind page contains no candidates", async () => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname === "/api/sessions/a" && url.searchParams.get("view") === "browser") {
+      return Response.json({ ...a, messages: [
+        { role: "assistant", type: "tool_use", seq: 200 },
+        { role: "user", type: "text", seq: 201, content: "Background output", tool_input: { request_context: { source: "bg" } } },
+      ], oldest_loaded_seq: 200, has_more_messages: true });
+    }
+    if (url.pathname === "/api/sessions/a/messages" && url.searchParams.get("before_seq") === "200") {
+      return Response.json({ messages: [
+        { role: "user", type: "text", seq: 7, content: "Earlier human message" },
+        { role: "user", type: "text", seq: 8, content: "[scheduled: hidden]" },
+      ], oldest_loaded_seq: 7, has_more_messages: false });
+    }
+    return original(input, init);
+  });
+  mount();
+  command("/rewind");
+  fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
+  expect(screen.queryByText("No user messages to rewind to.")).toBeNull();
+  const candidate = await screen.findByText("Earlier human message");
+  expect(screen.queryByText("[scheduled: hidden]")).toBeNull();
+  expect(screen.queryByText("Background output")).toBeNull();
+  fireEvent.click(candidate);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Rewind" })).toBeEnabled());
+  expect(api.fetcher.mock.calls.some(([url]) => url.endsWith("/a/fork-preview?rewind_to_msg_seq=7"))).toBe(true);
+});
+
+it("retries a failed earlier rewind page with its original cursor and keeps existing candidates", async () => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  const reads: (string | null)[] = [];
+  api.fetcher.mockImplementation(async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname === "/api/sessions/a" && url.searchParams.get("view") === "browser") {
+      return recentRewindPage();
+    }
+    if (url.pathname === "/api/sessions/a/messages") {
+      reads.push(url.searchParams.get("before_seq"));
+      if (reads.length === 1) return Response.json({ detail: "History storage unavailable" }, { status: 503 });
+      return Response.json({ messages: [
+        { role: "user", type: "text", seq: 20, content: "Overlapping recent message" },
+        { role: "user", type: "text", seq: 5, content: "Older message" },
+      ], oldest_loaded_seq: 5, has_more_messages: false });
+    }
+    return original(input, init);
+  });
+  mount();
+  command("/rewind");
+  fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
+  const picker = within(screen.getByTestId("fork-picker"));
+  expect(await picker.findByRole("alert")).toHaveTextContent("HTTP 503");
+  expect(picker.getByRole("alert")).toHaveTextContent("History storage unavailable");
+  expect(picker.getByText("Recent message")).toBeVisible();
+  fireEvent.click(picker.getByRole("button", { name: "Retry" }));
+  await picker.findByText("Older message");
+  expect(picker.getAllByRole("button").map((button) => button.textContent)).toEqual(["#5Older message", "#20Recent message"]);
+  expect(reads).toEqual(["20", "20"]);
+});
+
+it("distinguishes a pending initial rewind read, its network failure, and an exhausted empty history", async () => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  const first = deferred<Response>();
+  let initialReads = 0;
+  api.fetcher.mockImplementation(async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname !== "/api/sessions/a" || url.searchParams.get("view") !== "browser") return original(input, init);
+    if (++initialReads === 1) return first.promise;
+    return Response.json({ ...a, messages: [], oldest_loaded_seq: null, has_more_messages: false });
+  });
+  mount();
+  command("/rewind");
+  const picker = within(screen.getByTestId("fork-picker"));
+  expect(picker.getByRole("status")).toHaveTextContent("Loading rewind messages");
+  expect(picker.queryByText("No user messages to rewind to.")).toBeNull();
+  await act(async () => first.reject(new TypeError("Failed to fetch")));
+  expect(picker.getByRole("alert")).toHaveTextContent("Network error");
+  expect(picker.queryByText("No user messages to rewind to.")).toBeNull();
+  fireEvent.click(picker.getByRole("button", { name: "Retry" }));
+  expect(await picker.findByText("No user messages to rewind to.")).toBeVisible();
+  expect(picker.queryByRole("alert")).toBeNull();
+  expect(initialReads).toBe(2);
+});
+
+it.each(["close", "switch"])("cancels an old rewind page on %s and discards its late response", async (exit) => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  const late = deferred<Response>();
+  let oldSignal: AbortSignal | null | undefined;
+  api.fetcher.mockImplementation(async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname === "/api/sessions/a" && url.searchParams.get("view") === "browser") {
+      return recentRewindPage();
+    }
+    if (url.pathname === "/api/sessions/a/messages") {
+      oldSignal = init?.signal;
+      return late.promise;
+    }
+    return original(input, init);
+  });
+  mount();
+  command("/rewind");
+  fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
+  await waitFor(() => expect(oldSignal?.aborted).toBe(false));
+  if (exit === "close") fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  else act(() => useSessionStore.getState().setActiveSessionId(b.id));
+  expect(oldSignal?.aborted).toBe(true);
+  expect(screen.queryByTestId("fork-dialog")).toBeNull();
+  command("/rewind");
+  await act(async () => late.resolve(Response.json({
+    messages: [{ role: "user", type: "text", seq: 3, content: "Retired rewind page" }],
+    oldest_loaded_seq: 3, has_more_messages: false,
+  })));
+  const picker = within(screen.getByTestId("fork-picker"));
+  expect(picker.queryByText("Retired rewind page")).toBeNull();
+  expect(await picker.findByText(exit === "close" ? "Recent message" : "B original message")).toBeVisible();
+});
+
+it.each(["initial read", "earlier page", "direct preview", "submit"])("keeps rewind blocked with an export entry on %s", async (phase) => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  api.fetcher.mockImplementation(async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname === "/api/sessions/a" && url.searchParams.get("view") === "browser") {
+      if (phase === "initial read") return Response.json({ ...a, transcript_integrity: "duplicate_seq", messages: [] });
+      return recentRewindPage();
+    }
+    if (url.pathname === "/api/sessions/a/messages") {
+      return Response.json({ detail: { code: "duplicate_message_sequences" } }, { status: 409 });
+    }
+    if ((phase === "direct preview" && url.pathname === "/api/sessions/a/fork-preview") ||
+      (phase === "submit" && url.pathname === "/api/sessions/a/fork")) {
+      return Response.json({ detail: { reason: "duplicate_message_sequences" } }, { status: 409 });
+    }
+    return original(input, init);
+  });
+  useSessionStore.setState({ messages: { a: [{ role: "user", type: "text", seq: 7, content: "A original message" }] } });
+  mount();
+  if (phase === "direct preview" || phase === "submit") fireEvent.click(await screen.findByTestId("fork-from-here"));
+  else command("/rewind");
+  if (phase === "earlier page") fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
+  const dialog = within(screen.getByTestId("fork-dialog"));
+  if (phase === "submit") {
+    const rewind = dialog.getByRole("button", { name: "Rewind" });
+    await waitFor(() => expect(rewind).toBeEnabled());
+    fireEvent.click(rewind);
+  }
+  expect(await dialog.findByRole("alert")).toHaveTextContent("duplicate message sequence numbers");
+  expect(dialog.getByRole("button", { name: "Export all original rows" })).toBeEnabled();
+  expect(dialog.queryByRole("button", { name: "Rewind" })).toBeNull();
+  expect(dialog.queryByRole("button", { name: "Retry" })).toBeNull();
+  expect(dialog.queryByText("Recent message")).toBeNull();
+  expect(dialog.queryByText("No user messages to rewind to.")).toBeNull();
+});
+
+it.each((["connection", "service"] as const).flatMap((boundary) =>
+  (["page", "preview"] as const).map((read) => ({ boundary, read }))),
+)("retires a rewind $read when the $boundary changes while its body is pending", async ({ boundary, read }) => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  const body = deferred<unknown>();
+  const stale = new Response(null, { status: read === "page" ? 200 : 409 });
+  const decode = vi.spyOn(stale, "json").mockReturnValue(body.promise);
+  const target = read === "page" ? "/api/sessions/a/messages" : "/api/sessions/a/fork-preview";
+  const requests: URL[] = [];
+  let oldSignal: AbortSignal | null | undefined;
+  api.fetcher.mockImplementation(async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname === "/api/sessions/a" && url.searchParams.get("view") === "browser") return recentRewindPage();
+    if (url.pathname !== target) return original(input, init);
+    requests.push(url);
+    if (requests.length === 1) {
+      oldSignal = init?.signal;
+      return stale;
+    }
+    if (read === "preview") return original(input, init);
+    return Response.json({
+      messages: [{ role: "user", type: "text", seq: 5, content: "Current earlier message" }],
+      oldest_loaded_seq: 5, has_more_messages: false,
+    });
+  });
+  useSessionStore.setState({ messages: { a: [{ role: "user", type: "text", seq: 7, content: "A original message" }] } });
+  const scope = await observeRewindScope(boundary);
+  try {
+    mount();
+    if (read === "preview") fireEvent.click(await screen.findByTestId("fork-from-here"));
+    else {
+      command("/rewind");
+      fireEvent.click(await screen.findByRole("button", { name: "Load earlier messages" }));
+    }
+    const dialog = within(screen.getByTestId("fork-dialog"));
+    await waitFor(() => expect(decode).toHaveBeenCalledOnce());
+    scope.replace();
+    expect(oldSignal?.aborted).toBe(true);
+    fireEvent.click(dialog.getByRole("button", { name: "Retry" }));
+    if (read === "page") expect(await dialog.findByText("Current earlier message")).toBeVisible();
+    else await waitFor(() => expect(dialog.getByRole("button", { name: "Rewind" })).toBeEnabled());
+
+    await act(async () => body.resolve(read === "page" ? {
+      messages: [{ role: "user", type: "text", seq: 3, content: "Retired rewind page" }],
+      oldest_loaded_seq: 3, has_more_messages: true,
+    } : { detail: { reason: "duplicate_message_sequences" } }));
+    expect(dialog.queryByText("Retired rewind page")).toBeNull();
+    expect(dialog.queryByRole("button", { name: "Load earlier messages" })).toBeNull();
+    expect(dialog.queryByRole("button", { name: "Export all original rows" })).toBeNull();
+    expect(requests.map((url) => url.searchParams.get(read === "page" ? "before_seq" : "rewind_to_msg_seq")))
+      .toEqual(read === "page" ? ["20", "20"] : ["7", "7"]);
+  } finally {
+    scope.disconnect();
+  }
+});
+
+it("can retry a rewind preview when the error response body times out", async () => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  const stalled = new Response(null, { status: 409 });
+  const body = deferred<unknown>();
+  const decode = vi.spyOn(stalled, "json").mockReturnValue(body.promise);
+  const requests: (string | null)[] = [];
+  let signal: AbortSignal | null | undefined;
+  api.fetcher.mockImplementation(async (input, init) => {
+    const url = new URL(input);
+    if (url.pathname !== "/api/sessions/a/fork-preview") return original(input, init);
+    requests.push(url.searchParams.get("rewind_to_msg_seq"));
+    if (requests.length > 1) return original(input, init);
+    signal = init?.signal;
+    signal?.addEventListener("abort", () => body.reject(signal?.reason), { once: true });
+    return stalled;
+  });
+  useSessionStore.setState({ messages: { a: [{ role: "user", type: "text", seq: 7, content: "A original message" }] } });
+  mount();
+  const rewindAction = await screen.findByTestId("fork-from-here");
+  const deadline = new AbortController();
+  vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(deadline.signal);
+  fireEvent.click(rewindAction);
+  await waitFor(() => expect(decode).toHaveBeenCalledOnce());
+  const dialog = within(screen.getByTestId("fork-dialog"));
+  await act(async () => deadline.abort(new DOMException("Timed out", "TimeoutError")));
+  expect(signal?.aborted).toBe(true);
+  expect(dialog.getByRole("alert")).toHaveTextContent("Preview loading timed out");
+  fireEvent.click(dialog.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(dialog.getByRole("button", { name: "Rewind" })).toBeEnabled());
+  expect(requests).toEqual(["7", "7"]);
+});
+
+it.each(["connection", "service"] as const)("settles rewind after an old %s integrity refusal without blocking the dialog", async (boundary) => {
+  const api = server();
+  const original = api.fetcher.getMockImplementation()!;
+  const body = deferred<unknown>();
+  const stale = new Response(null, { status: 409 });
+  const decode = vi.spyOn(stale, "json").mockReturnValue(body.promise);
+  api.fetcher.mockImplementation(async (input, init) => (
+    new URL(input).pathname === "/api/sessions/a/fork" ? stale : original(input, init)
+  ));
+  const scope = await observeRewindScope(boundary);
+  try {
+    mount();
+    await openRewind();
+    const dialog = within(screen.getByTestId("fork-dialog"));
+    fireEvent.change(dialog.getByPlaceholderText("Fork label"), { target: { value: "Keep my label" } });
+    fireEvent.click(dialog.getByRole("button", { name: "Rewind" }));
+    await waitFor(() => expect(decode).toHaveBeenCalledOnce());
+    scope.replace();
+    await act(async () => body.resolve({ detail: { reason: "duplicate_message_sequences" } }));
+    expect(dialog.queryByRole("button", { name: "Export all original rows" })).toBeNull();
+    expect(dialog.getByTestId("fork-error")).toHaveTextContent("This rewind was refused. You can try again.");
+    expect(dialog.getByRole("button", { name: "Rewind" })).toBeEnabled();
+    expect(dialog.getByPlaceholderText("Fork label")).toHaveValue("Keep my label");
+  } finally {
+    scope.disconnect();
+  }
+});
+
 it("ends the old rewind on A→B→A and preserves a reopened dialog on late success", async () => {
   const api = server();
   mount();
@@ -1496,14 +1796,18 @@ it("a new rewind opening in the same session owns a fresh form and cannot inheri
 
 it.each(["command", "message"])("opens rewind through the %s entry without randomUUID", async (entry) => {
   vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
-  server();
+  const api = server();
   useSessionStore.setState({ messages: { a: [{ role: "user", type: "text", seq: 7, content: "A original message" }] } });
   mount();
   if (entry === "command") command("/rewind");
   else fireEvent.click(await screen.findByTestId("fork-from-here"));
   expect(await screen.findByTestId("fork-dialog")).toBeVisible();
   if (entry === "command") expect(screen.getByTestId("fork-picker")).toBeVisible();
-  else await waitFor(() => expect(screen.getByRole("button", { name: "Rewind" })).toBeEnabled());
+  else {
+    await waitFor(() => expect(screen.getByRole("button", { name: "Rewind" })).toBeEnabled());
+    expect(screen.queryByTestId("fork-picker")).toBeNull();
+    expect(api.fetcher.mock.calls.some(([input]) => input.endsWith("/api/sessions/a?view=browser"))).toBe(false);
+  }
 });
 
 it.each((["archive", "rewind"] as const).flatMap((mode) =>

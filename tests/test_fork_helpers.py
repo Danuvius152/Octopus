@@ -324,17 +324,20 @@ def _git(cwd, *args):
                    capture_output=True, text=True)
 
 
-@pytest.fixture
-def git_repo(tmp_path):
-    repo = tmp_path / "repo"
+def _init_git_repo(repo: Path, *init_args: str) -> Path:
     repo.mkdir()
-    _git(repo, "init", "-q")
+    _git(repo, "init", "-q", *init_args)
     _git(repo, "config", "user.email", "t@t.t")
     _git(repo, "config", "user.name", "t")
     (repo / "a.py").write_text("v1\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "init")
     return repo
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    return _init_git_repo(tmp_path / "repo")
 
 
 @pytest.mark.parametrize("stop", ["timeout", "cancel", "attachment"])
@@ -846,32 +849,50 @@ async def test_safe_revert_checks_both_rename_locations_and_restores_stash(git_r
 
 
 @pytest.mark.parametrize("staged,recreated", [(False, False), (True, False), (True, True)])
-async def test_safe_revert_restores_deleted_paths_and_preserves_original_staging(git_repo, staged, recreated):
+async def test_safe_revert_restores_deleted_paths_and_preserves_original_staging(tmp_path, staged, recreated):
+    # Supply a private template that preserves the bytes of a.py from the first commit.
+    template = tmp_path / "template"
+    info = template / "info"
+    info.mkdir(parents=True)
+    (info / "attributes").write_text("/a.py -text\n", encoding="ascii")
+    git_repo = _init_git_repo(tmp_path / "repo", f"--template={template}")
     path = git_repo / "a.py"
     head, clean, ignored = await fh.capture_git_anchor(str(git_repo))
+    untracked_contents = b"new untracked contents"
     if staged:
         _git(git_repo, "rm", "--", "a.py")
     else:
         path.unlink()
     if recreated:
-        path.write_text("new untracked contents")
+        path.write_bytes(untracked_contents)
+    index_command = ["git", "ls-files", "--stage", "-z"]
+    staged_diff_command = ["git", "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"]
+    original_index = subprocess.check_output(index_command, cwd=git_repo)
+    original_staged_diff = subprocess.check_output(staged_diff_command, cwd=git_repo)
+
     record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "deletion", fork_ignored_baseline=ignored)
     assert record["status"] == "completed", record
-    assert path.read_text() == "v1\n"
+    assert path.read_bytes() == b"v1\n"
     recovered = subprocess.run(["git", "stash", "apply", "--index", record["stash_ref"]],
-                               cwd=git_repo, capture_output=True)
+                               cwd=git_repo, capture_output=True, env={**os.environ, "LC_ALL": "C"})
     if recreated:
         # Native Git also reports this collision for a whole-tree stash, even
         # though it restores the original staged deletion + untracked content.
-        assert recovered.returncode == 1 and b"could not restore untracked files" in recovered.stderr
+        assert recovered.returncode != 0, recovered
+        assert b"could not restore untracked files" in recovered.stderr
     else:
         assert recovered.returncode == 0, recovered.stderr
     assert path.exists() is recreated
+    expected_status = b"D  a.py\0" if staged else b" D a.py\0"
     if recreated:
-        assert path.read_text() == "new untracked contents"
-    state = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=git_repo,
-                           capture_output=True, check=True).stdout
-    assert (b"a.py" in state) is staged
+        assert path.read_bytes() == untracked_contents
+        expected_status += b"?? a.py\0"
+    status = subprocess.check_output(
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], cwd=git_repo,
+    )
+    assert status == expected_status
+    assert subprocess.check_output(index_command, cwd=git_repo) == original_index
+    assert subprocess.check_output(staged_diff_command, cwd=git_repo) == original_staged_diff
 
 
 async def test_safe_revert_preserves_whitespace_in_repository_root(git_repo):

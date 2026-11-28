@@ -234,6 +234,57 @@ async def test_get_file_markdown(client, session_with_files):
     assert b"# plan" in r.content
 
 
+@pytest.mark.parametrize("filename", [".env", "settings.env"])
+async def test_viewer_opens_env_files_from_picker_and_explicit_path(client, session_with_files, monkeypatch, filename):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    content = "DISPLAY_MODE=compact\n"
+    (root / filename).write_text(content)
+
+    # The search budget is covered separately with a clock that advances.
+    monkeypatch.setattr(file_viewer, "monotonic", lambda: 0)
+    selection = {"name": filename, "path": filename, "kind": "file"}
+    source = {"source": str(root)}
+    for endpoint, params in (("browse", source), ("find", source | {"query": filename})):
+        listing = await client.get(f"{url}/{endpoint}", params=params)
+        assert listing.status_code == 200
+        assert selection in listing.json()["entries"]
+
+    picked = await client.get(f"{url}/meta", params=source | {"path": selection["path"]})
+    assert picked.status_code == 200, picked.text
+    metadata = picked.json()
+    assert metadata["kind"] == "code"
+    assert metadata["path"] == filename
+    assert metadata["source"] == str(root)
+
+    explicit = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": filename})
+    assert explicit.status_code == 200, explicit.text
+    assert explicit.json()["metadata"] == metadata
+
+    body = await client.get(url, params={
+        "path": metadata["path"], "source": metadata["source"], "canonical_path_id": metadata["canonical_path_id"],
+    })
+    assert body.status_code == 200
+    assert body.headers["content-type"] == "text/plain; charset=utf-8"
+    assert body.text == content
+
+
+@pytest.mark.parametrize(("path", "size", "status"), [
+    ("../.env", 1, 403),
+    (".env", MAX_FILE_BYTES + 1, 413),
+    (".env.unknown", 1, 415),
+])
+async def test_viewer_env_files_keep_existing_read_limits(client, session_with_files, path, size, status):
+    sid, root = session_with_files
+    url = f"/api/sessions/{sid}/files"
+    with (root / path).open("wb") as file:
+        file.truncate(size)
+
+    for endpoint in (url, f"{url}/meta"):
+        response = await client.get(endpoint, params={"source": str(root), "path": path})
+        assert response.status_code == status
+
+
 async def test_markdown_bytes_follow_the_authorized_canonical_path(client, session_with_files):
     sid, root = session_with_files
     url = f"/api/sessions/{sid}/files"
@@ -747,6 +798,10 @@ async def test_viewer_detects_document_parent_replacement_but_allows_file_edits(
     directory = meta.json()["canonical_directory"]
     asset = {"path": "note.txt", "source": body["source"],
              "source_directory": directory["path"], "source_directory_id": directory["path_id"]}
+    listing = {key: asset[key] for key in ("source", "source_directory", "source_directory_id")}
+    browse = await client.get(f"{url}/browse", params=listing)
+    assert browse.status_code == 200
+    assert {entry["path"] for entry in browse.json()["entries"]} == {"docs/plan.md", "docs/note.txt"}
 
     report.write_text("updated report")
     updated = await client.get(url, params=body)
@@ -759,6 +814,9 @@ async def test_viewer_detects_document_parent_replacement_but_allows_file_edits(
         stale = await client.get(url, params=params)
         assert stale.status_code == 409
         assert stale.headers["cache-control"] == "no-store"
+    stale_browse = await client.get(f"{url}/browse", params=listing)
+    assert stale_browse.status_code == 409
+    assert stale_browse.headers["cache-control"] == "no-store"
 
 
 async def test_absolute_file_sources_match_path_components_before_resolving_links(client, session_with_files):
@@ -1231,9 +1289,11 @@ async def test_viewer_retries_short_reads_from_the_same_file(client, session_wit
 
 async def test_cancelling_viewer_send_leaves_no_open_source_handles(client, session_with_files):
     sid, root = session_with_files
-    body_send_started = False
+    body_send_started = asyncio.Event()
+    body: bytes | None = None
+    handles_at_body_start: list[Path] | None = None
 
-    def root_handles():
+    def root_handles() -> list[Path]:
         paths = []
         for fd in Path("/proc/self/fd").iterdir():
             try:
@@ -1244,21 +1304,36 @@ async def test_cancelling_viewer_send_leaves_no_open_source_handles(client, sess
                 paths.append(path)
         return paths
 
-    async def cancel_send(scope, receive, send):
-        async def cancel_at_body(message):
-            nonlocal body_send_started
+    async def pause_body_send(scope, receive, send):
+        async def send_with_paused_body(message):
+            nonlocal body, handles_at_body_start
             if message["type"] == "http.response.body":
-                body_send_started = True
-                assert not root_handles()
-                raise asyncio.CancelledError
+                handles_at_body_start = root_handles()
+                body = message["body"]
+                body_send_started.set()
+                # Keep the send suspended until the request task is cancelled.
+                await asyncio.Future()
             await send(message)
 
-        await app(scope, receive, cancel_at_body)
+        await app(scope, receive, send_with_paused_body)
 
-    async with AsyncClient(transport=ASGITransport(app=cancel_send), base_url="http://test", headers=client.headers) as reader:
-        with pytest.raises(asyncio.CancelledError):
-            await reader.get(f"/api/sessions/{sid}/files", params={"path": "plan.md"})
-    assert body_send_started and not root_handles()
+    transport = ASGITransport(app=pause_body_send)
+    async with AsyncClient(transport=transport, base_url="http://test", headers=client.headers) as reader:
+        request = asyncio.create_task(reader.get(f"/api/sessions/{sid}/files", params={"path": "plan.md"}))
+        try:
+            await asyncio.wait_for(body_send_started.wait(), timeout=3)
+            assert body == b"# plan\nstep one"
+            assert handles_at_body_start == []
+
+            assert request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert request.cancelled()
+            assert not root_handles()
+        finally:
+            if not request.done():
+                request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 async def test_viewer_reads_exact_budget_and_serves_html_as_source(client, session_with_files):
@@ -1986,11 +2061,15 @@ async def test_showme_legacy_paths_reopen_the_checked_sources(client, session_wi
     assert reopened_body.text == "# Team plan\n\n![Diagram](../diagram.svg)"
 
     await db.update_user_field(user_id, extra_roots=json.dumps([str(cwd), str(team)]))
-    denied_source = await client.post(f"{base}/showme/resolve", json={"text": bound})
+    denied_source = await client.post(f"{base}/showme/resolve", params={"source": str(team)}, json={"text": bound})
     assert denied_source.status_code == 403
     assert denied_source.json()["target"]["source"] == str(repo)
     unbound = await client.post(f"{base}/showme/resolve", json={"text": json.dumps(str(canonical))})
     assert unbound.json()["metadata"]["source"] == str(team)
+    reloaded = await client.post(f"{base}/showme/resolve", params={"source": str(repo)},
+                                 json={"text": json.dumps(str(canonical))})
+    assert reloaded.status_code == 403
+    assert reloaded.json()["target"]["source"] == str(repo)
 
     await db.update_user_field(user_id, extra_roots=json.dumps([str(cwd)]))
     denied = await client.post(f"{base}/showme/resolve", json={"text": str(repo / "plan.md")})

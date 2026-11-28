@@ -186,17 +186,19 @@ async def fork_cleanup(working_dir: str, resume_id_hint: str | None, fork_id: st
         return
     if hooks is None:
         raise NativeProtocolError("Native fork cleanup has no original resource owner")
-    if artifact.get("phase") == "not_sent" and artifact.get("cleanup_allowed") is True:
-        return
-    if artifact.get("phase") != "created":
+    phase = artifact["phase"]
+    if phase not in ("not_sent", "created"):
         raise NativeProtocolError("Native fork creation is unknown; retain the original recovery material")
     if artifact.get("cleanup_allowed") is not True:
         raise NativeProtocolError("Native fork has no confirmed non-executing retirement; retain the original recovery material")
-    identity, path = artifact.get("thread_id"), artifact.get("path")
     home = _codex_sessions_dir(credential).parent.resolve()
+    if artifact["home"] != str(home):
+        raise NativeProtocolError("Native fork cleanup has no verified history store")
+    if phase == "not_sent":
+        return
+    identity, path = artifact.get("thread_id"), artifact.get("path")
     if (not isinstance(identity, str) or not identity or identity == artifact.get("source_thread_id")
-            or not isinstance(path, str) or artifact.get("home") != str(home)
-            or not Path(path).resolve().is_relative_to(home)):
+            or not isinstance(path, str) or not Path(path).resolve().is_relative_to(home)):
         raise NativeProtocolError("Native fork cleanup has no verified independent artifact")
 
     async def remove(driver: _HistoryDriver) -> dict[str, Any]:
